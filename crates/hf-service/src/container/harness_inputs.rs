@@ -17,11 +17,52 @@ pub(super) struct CapturedBuildInputs {
     pub flags: Vec<String>,
     pub context: Option<BuildContext>,
     profile: Option<BuildProfileView>,
-    // Keep the single bounded byte buffer alive through the attempted compile.
-    _database: Option<String>,
+    /// The selected compile database's exact text, read once; its digest is
+    /// in `record` and its unit list is staged for the link.
+    database: Option<String>,
 }
 
 impl CapturedBuildInputs {
+    /// Record in `workspace` which translation units the harness links: the
+    /// ones the project's compile database lists, or every staged unit when
+    /// there is no database.
+    ///
+    /// A recorded path is one the database names under the project root, or
+    /// under `/work` when the build ran in the sandbox. A path outside both
+    /// is dropped, so nothing here can name a file beyond the workspace.
+    pub fn stage_link_units(&self, workspace: &Path) -> Result<(), ClassifiedError> {
+        let units = self.database_units();
+        hf_harness::project_sources::write_link_units(workspace, units.as_deref())
+            .map_err(|error| ClassifiedError::Internal(format!("stage link units: {error}")))
+    }
+
+    fn database_units(&self) -> Option<Vec<String>> {
+        let entries =
+            hf_discovery::build_context::parse_compile_database(self.database.as_deref()?).ok()?;
+        let root = Path::new(&self.record.project_root);
+        let mut units: Vec<String> = entries
+            .iter()
+            .filter_map(|entry| {
+                let file = if entry.file.is_absolute() {
+                    entry.file.clone()
+                } else {
+                    entry.directory.join(&entry.file)
+                };
+                let relative = file
+                    .strip_prefix(root)
+                    .or_else(|_| file.strip_prefix("/work"))
+                    .ok()?;
+                relative
+                    .components()
+                    .all(|component| matches!(component, std::path::Component::Normal(_)))
+                    .then(|| hf_core::runtime::posix_relative(relative))
+            })
+            .collect();
+        units.sort();
+        units.dedup();
+        (!units.is_empty()).then_some(units)
+    }
+
     pub fn stage_marker(&self, workspace: &Path) -> Result<(), ClassifiedError> {
         let Some(profile) = &self.profile else {
             return Ok(());
@@ -278,7 +319,7 @@ impl ServiceContainer {
             flags,
             context,
             profile,
-            _database: database,
+            database,
         })
     }
 

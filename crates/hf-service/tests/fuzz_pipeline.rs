@@ -1886,3 +1886,93 @@ async fn fuzz_prepare_infers_the_include_directory_of_a_project_without_a_compil
         "the draft prompt gives the exact include directive: {requests:#?}"
     );
 }
+
+/// Every compile fails in the project's own code, as an unconfigured
+/// libxml2 does on its generated `xmlversion.h`.
+struct ProjectBuildFailsRuntime;
+
+#[async_trait::async_trait]
+impl hf_core::runtime::RuntimeAdapter for ProjectBuildFailsRuntime {
+    async fn resolve_image_reference(
+        &self,
+        image: &str,
+    ) -> Result<Option<hf_core::runtime::ImmutableImageReference>, hf_core::error::ClassifiedError>
+    {
+        PipelineRuntime.resolve_image_reference(image).await
+    }
+    async fn run_command(
+        &self,
+        _cmd: &[String],
+        cwd: &std::path::Path,
+        _limits: &hf_core::runtime::ResourceLimits,
+    ) -> Result<hf_core::runtime::CommandResult, hf_core::error::ClassifiedError> {
+        Ok(hf_core::runtime::CommandResult {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "In file included from /work/parse.c:1:\n/work/api.h:16:10: fatal error: \
+                     'version.h' file not found\n1 error generated."
+                .to_owned(),
+            workspace: cwd.to_path_buf(),
+            termination: hf_core::runtime::CommandTermination::Completed,
+        })
+    }
+    async fn write_file(
+        &self,
+        path: &std::path::Path,
+        content: &str,
+    ) -> Result<(), hf_core::error::ClassifiedError> {
+        PipelineRuntime.write_file(path, content).await
+    }
+    async fn read_file(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<String, hf_core::error::ClassifiedError> {
+        PipelineRuntime.read_file(path).await
+    }
+}
+
+#[tokio::test]
+async fn fuzz_prepare_spends_no_repair_on_a_project_that_does_not_compile() {
+    let dir = tempfile::tempdir().unwrap();
+    let _workspace_root = common::install_managed_workspace("oxfuzz_fuzz_prepare_projfail_it");
+    let project = c_project(&dir);
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("fuzz.db"))
+            .await
+            .unwrap(),
+    );
+    let pool = RecordingPool::default();
+    let container = ServiceContainer::new(
+        Arc::new(ProjectBuildFailsRuntime),
+        Some(Arc::new(pool.clone())),
+    )
+    .with_store(Arc::clone(&store));
+    let log = ReportLog::default();
+
+    let error = container
+        .fuzz_prepare(
+            prepare_request(&project),
+            &log.stage_sink(),
+            &log.progress_sink(),
+        )
+        .await
+        .expect_err("the project does not compile");
+
+    let message = error.to_string();
+    assert!(message.contains("'version.h' file not found"), "{message}");
+    assert!(message.contains("oxfuzz build diagnose"), "{message}");
+    assert!(message.contains("Build Doctor"), "{message}");
+    assert!(
+        !log.steps()
+            .iter()
+            .any(|step| matches!(step, HarnessStep::Repairing { .. })),
+        "no repair is attempted: {:?}",
+        log.steps()
+    );
+    let drafts = pool
+        .requests
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .len();
+    assert_eq!(drafts, 1, "only the first draft reaches the model");
+}

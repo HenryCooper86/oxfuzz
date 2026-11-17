@@ -1076,6 +1076,7 @@ impl ServiceContainer {
                 .capture_harness_build_inputs(&candidate.project_root, lang, true)
                 .await?;
             captured.stage_marker(workspace)?;
+            captured.stage_link_units(workspace)?;
             build_cmd.extra_flags = captured.flags.clone();
             let harness = Harness {
                 id: captured.record.harness_id,
@@ -1157,6 +1158,21 @@ impl ServiceContainer {
                 hf_harness::CompileResult::Failed(failure) => {
                     last_diagnostics = failure.diagnostics();
                     (observer.on_step)(HarnessStep::CompileFailed { attempt });
+                    // The project's own code does not compile: no harness
+                    // edit fixes that, so no repair is spent on it.
+                    if let Some(error) = hf_harness::generator::project_build_failure(
+                        &last_diagnostics,
+                        lang.harness_filename(),
+                    ) {
+                        return Err(ClassifiedError::Harness(format!(
+                            "the project's own sources do not compile next to the harness for \
+                             '{target}', so no harness edit can fix it: {error}. Configure the \
+                             project's build first with `oxfuzz build diagnose` and a build \
+                             profile (Build Doctor in the desktop app's Harness step); that \
+                             generates headers such as config.h and records the include \
+                             directories and defines"
+                        )));
+                    }
                     if repairs_used >= max_repairs {
                         break;
                     }
@@ -1439,6 +1455,7 @@ impl ServiceContainer {
             .capture_harness_build_inputs(project, lang, true)
             .await?;
         captured.stage_marker(&workspace)?;
+        captured.stage_link_units(&workspace)?;
         build_cmd.extra_flags = captured.flags.clone();
         let harness = Harness {
             id: captured.record.harness_id,

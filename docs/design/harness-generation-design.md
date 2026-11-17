@@ -68,6 +68,18 @@ pub struct Harness {
    while a target that lives in a program file is still found. Linked as
    plain objects those programs collided on every build, and the repair loop
    spent its attempts on an error no harness edit can fix.
+   When a compile database is selected, the harness links only the units it
+   lists (`harness.units` in the target workspace, written by
+   `CapturedBuildInputs::stage_link_units`). A source tree holds more than
+   its build compiles: libxml2 ships `os400/`, `win32/`, examples, and test
+   programs that do not compile on this platform, and the harness build
+   failed on the first of them even after the project's own CMake build had
+   succeeded. Without a database every staged unit is linked, as before.
+   A compile failure whose failing translation units do not include the
+   harness (`hf_harness::generator::project_build_failure`) ends the build
+   at once with guidance to configure the project build. The repair loop is
+   for harness errors; an unconfigured libxml2 spent both repairs on a
+   missing generated `xmlversion.h` that no harness edit provides.
    The target-definition section also names the project header that declares
    the target and the exact `#include` directive that reaches it under those
    directories (`find_declaring_header`); the note is part of the retained

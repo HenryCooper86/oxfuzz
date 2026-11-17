@@ -1693,6 +1693,47 @@ pub struct HarnessDraftContext<'a> {
     pub target_source: Option<&'a str>,
 }
 
+/// The first compiler error of a build that failed in the project's own
+/// code, or `None` when a failing translation unit is the harness.
+///
+/// `diagnostics` is compiler output; `harness_file` is the harness source's
+/// file name (`harness.c`). An error belongs to the translation unit at the
+/// root of its `In file included from` chain, or to its own file when there
+/// is no chain. When no failing unit is the harness, no edit to the harness
+/// can make the build pass: the project needs its own build configured, for
+/// example to generate `config.h`. Spending model repairs on it only repeats
+/// the same error.
+#[must_use]
+pub fn project_build_failure(diagnostics: &str, harness_file: &str) -> Option<String> {
+    let is_harness = |path: &str| {
+        path.rsplit('/')
+            .next()
+            .is_some_and(|name| name == harness_file)
+    };
+    let mut chain_root: Option<&str> = None;
+    let mut first_project_error: Option<&str> = None;
+    for line in diagnostics.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("In file included from ") {
+            if chain_root.is_none() {
+                chain_root = rest.split(':').next();
+            }
+            continue;
+        }
+        let is_error = line.contains(": error:") || line.contains(": fatal error:");
+        if !is_error {
+            continue;
+        }
+        let file = line.split(':').next().unwrap_or("");
+        let unit = chain_root.take().unwrap_or(file);
+        if is_harness(unit) {
+            return None;
+        }
+        first_project_error.get_or_insert(line);
+    }
+    first_project_error.map(str::to_owned)
+}
+
 /// Draft with explicit persisted semantic context for either supported harness flavor.
 ///
 /// # Errors
@@ -1761,6 +1802,40 @@ mod tests {
             &hf_core::runtime::SandboxOptions::default(),
         )
         .await
+    }
+
+    #[test]
+    fn a_failure_in_project_code_is_told_apart_from_a_harness_error() {
+        // libxml2 before it is configured: every unit that includes its
+        // public headers fails on the generated `xmlversion.h`. Two model
+        // repairs were spent rewriting a harness that was never the problem.
+        let project = "In file included from /work/example/gjobread.c:23:\n\
+                       /work/include/libxml/xmlmemory.h:16:10: fatal error: 'libxml/xmlversion.h' file not found\n\
+                       1 error generated.\n";
+        assert_eq!(
+            project_build_failure(project, "harness.c").as_deref(),
+            Some("/work/include/libxml/xmlmemory.h:16:10: fatal error: 'libxml/xmlversion.h' file not found")
+        );
+        let own = "/work/src/pkt.c:4:10: fatal error: 'config.h' file not found\n";
+        assert!(project_build_failure(own, "harness.c").is_some());
+
+        // The harness is a failing unit: directly, or through a header it includes.
+        let harness = "/work/harness.c:7:5: error: call to undeclared function 'parse'\n";
+        assert_eq!(project_build_failure(harness, "harness.c"), None);
+        let through = "In file included from /work/harness.c:3:\n\
+                       /work/include/a.h:9:10: fatal error: 'b.h' file not found\n";
+        assert_eq!(project_build_failure(through, "harness.c"), None);
+        let both = format!("{project}{harness}");
+        assert_eq!(project_build_failure(&both, "harness.c"), None);
+
+        // Warnings and linker output are not compile errors in project code.
+        assert_eq!(
+            project_build_failure(
+                "/work/a.c:1:1: warning: unused\nld: undefined symbol",
+                "harness.c"
+            ),
+            None
+        );
     }
 
     #[test]

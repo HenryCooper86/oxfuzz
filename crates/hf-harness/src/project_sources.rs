@@ -29,6 +29,52 @@ pub use hf_core::c_unit::{classify_unit, UnitRole};
 /// first campaign.
 const NON_SOURCE_DIRS: [&str; 4] = ["corpus", "out", "fuzz", "runs"];
 
+/// Workspace file listing the translation units the project's own build
+/// compiles, one workspace-relative path per line. When present, only those
+/// units are linked.
+///
+/// A source tree holds more than its build does: libxml2 ships `os400/`,
+/// `win32/`, examples and test programs that its build never compiles on this
+/// platform and that do not compile here. The compile database is the
+/// project's statement of which units make up the library.
+pub const LINK_UNITS_FILE: &str = "harness.units";
+
+/// Record, or with `None` clear, the units [`ProjectLinkInputs::collect`]
+/// links for `workspace`.
+///
+/// # Errors
+/// Returns the I/O error of the write or removal.
+pub fn write_link_units(workspace: &Path, units: Option<&[String]>) -> std::io::Result<()> {
+    let path = workspace.join(LINK_UNITS_FILE);
+    match units {
+        Some(units) => std::fs::write(path, units.join("\n")),
+        None => match std::fs::remove_file(path) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        },
+    }
+}
+
+/// The recorded unit list of `workspace`, when one is present and names at
+/// least one unit that exists there. A list naming nothing present describes
+/// some other tree and is ignored.
+fn recorded_link_units(
+    workspace: &Path,
+    found: &[String],
+) -> Option<std::collections::HashSet<String>> {
+    let text = std::fs::read_to_string(workspace.join(LINK_UNITS_FILE)).ok()?;
+    let units: std::collections::HashSet<String> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect();
+    found
+        .iter()
+        .any(|path| units.contains(path))
+        .then_some(units)
+}
+
 /// Cap on translation units handed to one compile. A project past this is not
 /// something a single-command harness build links.
 const MAX_EXTRA_SOURCES: usize = 5_000;
@@ -56,6 +102,9 @@ impl ProjectLinkInputs {
     pub fn collect(workspace: &Path, excluded_names: &[&str]) -> Self {
         let mut relative = Vec::new();
         collect_source_files(workspace, workspace, excluded_names, &mut relative);
+        if let Some(units) = recorded_link_units(workspace, &relative) {
+            relative.retain(|path| units.contains(path));
+        }
         relative.sort();
         relative.truncate(MAX_EXTRA_SOURCES);
         let mut inputs = Self::default();
@@ -218,6 +267,7 @@ pub(crate) fn sh_quote(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::write_link_units;
     use super::ProjectLinkInputs;
 
     fn write(dir: &std::path::Path, path: &str, content: &str) {
@@ -260,6 +310,49 @@ mod tests {
             inputs.link_args("/work"),
             "/work/'lib/parse.c' /tmp/oxfuzz_project_programs.a"
         );
+    }
+
+    #[test]
+    fn a_recorded_unit_list_limits_the_link_to_the_projects_own_build() {
+        // libxml2: `os400/xmlcatlgcl.c` includes a header that exists only on
+        // that platform. The project's build does not compile it; the harness
+        // build did, and failed.
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "parser.c",
+            "int parse(const char *s){return s[0];}",
+        );
+        write(dir.path(), "tree.c", "int tree(int x){return x;}");
+        write(
+            dir.path(),
+            "os400/xmlcatlgcl.c",
+            "#include <qshell.h>\nint q(void){return 0;}",
+        );
+        write(dir.path(), "example/demo.c", "int main(void){return 0;}");
+
+        let all = ProjectLinkInputs::collect(dir.path(), &["harness.c"]);
+        assert!(all.link_args("/work").contains("os400"), "{all:?}");
+
+        write_link_units(
+            dir.path(),
+            Some(&["parser.c".to_owned(), "tree.c".to_owned()]),
+        )
+        .unwrap();
+        let limited = ProjectLinkInputs::collect(dir.path(), &["harness.c"]);
+        assert_eq!(
+            limited.link_args("/work"),
+            "/work/'parser.c' /work/'tree.c'"
+        );
+        assert_eq!(limited.precompile_script("clang", "/work"), "");
+
+        // A list that names nothing in this tree is not this tree's list.
+        write_link_units(dir.path(), Some(&["elsewhere/a.c".to_owned()])).unwrap();
+        assert_eq!(ProjectLinkInputs::collect(dir.path(), &["harness.c"]), all);
+
+        write_link_units(dir.path(), None).unwrap();
+        assert_eq!(ProjectLinkInputs::collect(dir.path(), &["harness.c"]), all);
+        write_link_units(dir.path(), None).unwrap();
     }
 
     #[test]

@@ -31,6 +31,11 @@ retain only the current release; older entries remain here as the record.
   `local`) are no longer candidates, and comments inside a parameter list no
   longer hide a buffer's length or pass for a type. SQLite went from 1640
   candidates to its 422 public functions.
+- Harness, from building real libxml2: with a compile database, the harness
+  links only the units the project's own build compiles, instead of every
+  source file in the tree. A build that fails in the project's own code
+  stops at once and says to configure the project build (Build Doctor),
+  instead of spending model repairs on an error no harness edit can fix.
 - Harness: a project that ships several programs with `main` (bzip2 has
   three) now links. Their objects go into one archive, so globals they share
   by name no longer collide.
