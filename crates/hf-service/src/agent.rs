@@ -402,14 +402,14 @@ impl ServiceContainer {
             .iter()
             .take(ROWS)
             .map(|harness| {
-                serde_json::json!({
-                    "target": harness.target_symbol,
-                    "engine": harness.engine,
-                    "status": harness.status,
-                    "smoke_passed": harness.smoke_passed,
-                    "smoke_crashes": harness.smoke_crashes,
-                    "next_action": harness.next_action,
-                })
+                harness_status_row(
+                    &harness.target_symbol,
+                    &harness.engine,
+                    &harness.status,
+                    harness.smoke_passed,
+                    harness.smoke_crashes,
+                    &harness.next_action,
+                )
             })
             .collect();
         let runs: Vec<Value> = dashboard
@@ -954,5 +954,73 @@ mod semgrep_consumer_tests {
             .await
             .unwrap();
         assert_eq!(after, before, "discover tool started a Semgrep operation");
+    }
+}
+
+/// One harness as the assistant's project status reports it.
+///
+/// A promoted harness whose smoke test crashed was approved through the
+/// explicit known-findings approval. Reported only as `smoke_passed: false`
+/// beside `Promoted`, it read as a contradiction, and the assistant advised
+/// refining or re-qualifying a harness the operator had already decided on.
+/// The row states the decision and what follows from it.
+fn harness_status_row(
+    target: &str,
+    engine: &str,
+    status: &str,
+    smoke_passed: bool,
+    smoke_crashes: u32,
+    next_action: &str,
+) -> Value {
+    let mut row = serde_json::json!({
+        "target": target,
+        "engine": engine,
+        "status": status,
+        "smoke_passed": smoke_passed,
+        "smoke_crashes": smoke_crashes,
+        "next_action": next_action,
+    });
+    if status == "Promoted" && smoke_crashes > 0 {
+        row["approval"] = Value::from("known_findings");
+        row["guidance"] = Value::from(
+            "The operator approved this exact revision knowing its smoke test crashed. That \
+             is a recorded decision and the crashes are findings in the target, not a defect \
+             of the harness: do not suggest refining, regenerating, or re-qualifying it. \
+             Triage the crashes.",
+        );
+    } else if status == "Promoted" {
+        row["approval"] = Value::from("clean");
+    }
+    row
+}
+
+#[cfg(test)]
+mod status_row_tests {
+    use super::harness_status_row;
+
+    #[test]
+    fn a_known_findings_approval_is_stated_with_what_follows_from_it() {
+        let row = harness_status_row(
+            "decode_utf8",
+            "LibFuzzer",
+            "Promoted",
+            false,
+            1,
+            "Approved with known findings; triage the 1 smoke crash",
+        );
+        assert_eq!(row["approval"], "known_findings");
+        let guidance = row["guidance"].as_str().unwrap();
+        assert!(guidance.contains("do not suggest refining"), "{guidance}");
+        assert!(guidance.contains("Triage the crashes"), "{guidance}");
+    }
+
+    #[test]
+    fn other_harness_states_carry_no_known_findings_guidance() {
+        let clean = harness_status_row("t", "LibFuzzer", "Promoted", true, 0, "Ready");
+        assert_eq!(clean["approval"], "clean");
+        assert!(clean.get("guidance").is_none());
+        let pending = harness_status_row("t", "LibFuzzer", "Compiled", false, 1, "Triage");
+        assert!(pending.get("approval").is_none());
+        assert!(pending.get("guidance").is_none());
     }
 }

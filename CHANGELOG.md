@@ -55,6 +55,8 @@ retain only the current release; older entries remain here as the record.
 - AI Assistant: when a harness's smoke test finds a crash, the assistant
   triages it and reports it instead of drafting another harness. It used to
   refine and re-smoke in a loop, asking for the same approval each time.
+- AI Assistant: its project status states when a harness was approved with
+  known findings and that it should be triaged, not refined or re-qualified.
 - AI Assistant (browser mode): a running turn shows its tool calls and
   results as they happen, as the desktop app does.
 
