@@ -214,10 +214,48 @@ pub fn config_dir() -> PathBuf {
 /// - Windows: `%APPDATA%\oxfuzz`
 ///
 /// Falls back to a temp directory so writes always land on a writable volume.
+///
+/// `HF_APP_DIR` names the directory instead. The run journal, schedules,
+/// locks, transcripts, knowledge index, and default workspaces all live here
+/// and none of them follows `HF_DATA_DIR`, so a server, a CI job, or a test
+/// that must not touch the operator's own application state sets this one
+/// variable rather than redirecting `HOME`.
+///
+/// # Panics
+/// Panics when `HF_APP_DIR` is set to a directory that cannot be created or
+/// written. An explicit location that silently fell back to a temp directory
+/// would split state across two places.
 #[must_use]
 pub fn user_app_dir() -> PathBuf {
-    let candidate = platform_user_app_dir().unwrap_or_else(|| std::env::temp_dir().join("oxfuzz"));
-    writable_or_temp(candidate)
+    resolve_app_dir(std::env::var_os("HF_APP_DIR"), platform_user_app_dir())
+        .unwrap_or_else(|error| panic!("{error}"))
+}
+
+/// [`user_app_dir`] over explicit inputs: the `HF_APP_DIR` value and the
+/// platform's per-user directory.
+fn resolve_app_dir(
+    explicit: Option<std::ffi::OsString>,
+    platform: Option<PathBuf>,
+) -> Result<PathBuf, String> {
+    if let Some(explicit) = explicit.filter(|value| !value.is_empty()) {
+        let directory = PathBuf::from(explicit);
+        if !directory.is_absolute() {
+            return Err(format!(
+                "HF_APP_DIR must be an absolute path, got '{}'",
+                directory.display()
+            ));
+        }
+        if !writable_dir(&directory) {
+            return Err(format!(
+                "HF_APP_DIR '{}' cannot be created or written",
+                directory.display()
+            ));
+        }
+        return Ok(directory);
+    }
+    Ok(writable_or_temp(
+        platform.unwrap_or_else(|| std::env::temp_dir().join("oxfuzz")),
+    ))
 }
 
 fn platform_user_app_dir() -> Option<PathBuf> {
@@ -373,6 +411,49 @@ pub async fn init_at(config_dir: &Path, db_path: &Path) -> Result<InitReport, Cl
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_explicit_app_dir_replaces_the_per_user_directory() {
+        // The run journal, schedules, and locks ignored `HF_DATA_DIR`, so an
+        // isolated server read the operator's interrupted runs and tests wrote
+        // into the real application directory.
+        let dir = tempfile::tempdir().unwrap();
+        let explicit = dir.path().join("state");
+        let platform = dir.path().join("per-user");
+        let resolved = resolve_app_dir(
+            Some(explicit.clone().into_os_string()),
+            Some(platform.clone()),
+        )
+        .unwrap();
+        assert_eq!(resolved, explicit);
+        assert!(explicit.is_dir());
+        assert!(!platform.exists(), "the per-user directory is not touched");
+    }
+
+    #[test]
+    fn an_unset_or_empty_app_dir_keeps_the_per_user_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let platform = dir.path().join("per-user");
+        assert_eq!(
+            resolve_app_dir(None, Some(platform.clone())).unwrap(),
+            platform
+        );
+        assert_eq!(
+            resolve_app_dir(Some(std::ffi::OsString::new()), Some(platform.clone())).unwrap(),
+            platform
+        );
+    }
+
+    #[test]
+    fn an_unusable_explicit_app_dir_is_an_error_not_a_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a-file");
+        std::fs::write(&file, b"x").unwrap();
+        let error = resolve_app_dir(Some(file.into_os_string()), None).unwrap_err();
+        assert!(error.contains("HF_APP_DIR"), "{error}");
+        let error = resolve_app_dir(Some("relative/state".into()), None).unwrap_err();
+        assert!(error.contains("absolute"), "{error}");
+    }
 
     #[test]
     fn writable_or_temp_keeps_writable_directory() {
