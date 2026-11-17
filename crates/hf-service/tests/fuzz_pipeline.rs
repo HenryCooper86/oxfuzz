@@ -1708,6 +1708,20 @@ async fn fuzz_onboard_still_stops_when_the_smoke_test_finds_a_crash() {
         .expect_err("a crash-bearing revision is never promoted automatically");
 
     assert!(error.to_string().contains("found 1 crash(es)"), "{error}");
+    // A presentation layer reads the stop back as a finding to report.
+    assert_eq!(
+        hf_service::smoke_crash_stop(&error),
+        Some(hf_service::SmokeCrashStop {
+            target: "parse_entry".to_owned(),
+            crashes: 1,
+        })
+    );
+    assert_eq!(
+        hf_service::smoke_crash_stop(&hf_core::error::ClassifiedError::Validation(
+            "fuzz smoke failed for 'parse_entry': hollow pass".to_owned()
+        )),
+        None
+    );
     assert!(
         !log.stages()
             .iter()

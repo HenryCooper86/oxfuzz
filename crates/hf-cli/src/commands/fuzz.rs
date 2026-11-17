@@ -214,7 +214,16 @@ pub(crate) async fn cmd_fuzz(args: crate::args::FuzzArgs) -> anyhow::Result<()> 
             &on_stage,
             on_progress.as_ref(),
         )
-        .await?;
+        .await;
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let Some(stop) = hf_service::smoke_crash_stop(&error) else {
+                return Err(error.into());
+            };
+            return report_smoke_findings(&container, &project, &stop, ai, json).await;
+        }
+    };
     if json {
         println!("{}", serde_json::to_string_pretty(&outcome)?);
     } else {
@@ -223,12 +232,90 @@ pub(crate) async fn cmd_fuzz(args: crate::args::FuzzArgs) -> anyhow::Result<()> 
     Ok(())
 }
 
+/// The smoke test already found a crash, so the pipeline stopped before its
+/// promotion gate. That is what the operator came for: triage the crash and
+/// print it with the ways forward, instead of ending on a bare error.
+async fn report_smoke_findings(
+    container: &hf_service::ServiceContainer,
+    project: &Path,
+    stop: &hf_service::SmokeCrashStop,
+    ai: AiOption,
+    json: bool,
+) -> anyhow::Result<()> {
+    print_line(json, &smoke_stop_headline(&stop.target, stop.crashes));
+    let crashes = container.triage(project, &stop.target, ai.into()).await?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "stopped": "smoke_crashes",
+                "target": stop.target,
+                "smoke_crashes": stop.crashes,
+                "findings": crashes,
+            }))?
+        );
+        return Ok(());
+    }
+    for crash in &crashes {
+        println!(
+            "[fuzz] finding: {:?} {} (input: {})",
+            crash.kind,
+            crash.summary,
+            crash.input_path.display()
+        );
+    }
+    for line in smoke_stop_next_steps(project, &stop.target) {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+fn smoke_stop_headline(target: &str, crashes: u32) -> String {
+    let noun = if crashes == 1 { "crash" } else { "crashes" };
+    format!(
+        "--- smoke test of '{target}' already found {crashes} {noun}: likely a real bug; triaging instead of promoting ---"
+    )
+}
+
+/// What the operator can do after a crash-bearing smoke test. No campaign
+/// ran: this pipeline never promotes a crash-bearing harness by itself.
+fn smoke_stop_next_steps(project: &Path, target: &str) -> Vec<String> {
+    vec![
+        "[fuzz] no campaign ran: a harness whose smoke test crashes is never promoted automatically.".to_owned(),
+        format!(
+            "[fuzz] details:  oxfuzz triage {} --target {target}",
+            project.display()
+        ),
+        "[fuzz] to keep fuzzing past this bug, fix it and rerun, or approve the harness with known findings in the desktop app's Harness step.".to_owned(),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use hf_service::{EngineKind, TargetLanguage};
     use hf_service::{FuzzStage, HarnessStep};
 
-    use super::render_stage;
+    use super::{render_stage, smoke_stop_headline, smoke_stop_next_steps};
+
+    #[test]
+    fn a_smoke_crash_stop_is_reported_as_a_finding_with_next_steps() {
+        // `oxfuzz fuzz` on every bundled example ended on "Error: validation
+        // error" because each example's bug is shallow enough for the smoke
+        // test to find.
+        let headline = smoke_stop_headline("decode_utf8", 1);
+        assert!(
+            headline.contains("'decode_utf8' already found 1 crash:"),
+            "{headline}"
+        );
+        assert!(smoke_stop_headline("t", 3).contains("3 crashes"));
+        let steps = smoke_stop_next_steps(std::path::Path::new("/proj"), "decode_utf8").join("\n");
+        assert!(
+            steps.contains("oxfuzz triage /proj --target decode_utf8"),
+            "{steps}"
+        );
+        assert!(steps.contains("never promoted automatically"), "{steps}");
+        assert!(steps.contains("known findings"), "{steps}");
+    }
 
     #[test]
     fn stage_headers_name_the_stage_target_and_engine() {

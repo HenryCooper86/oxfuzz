@@ -135,6 +135,51 @@ pub struct FuzzPrepared {
     pub smoke_crashes: u32,
 }
 
+/// [`ServiceContainer::fuzz_onboard`] stopped because the smoke test of a
+/// fresh revision retained crashes.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SmokeCrashStop {
+    /// The target whose smoke test crashed.
+    pub target: String,
+    /// Crashes the smoke test retained.
+    pub crashes: u32,
+}
+
+/// Leading text of the error [`ServiceContainer::fuzz_onboard`] returns for a
+/// crash-bearing smoke test; [`smoke_crash_stop`] reads it back.
+const SMOKE_CRASH_STOP_PREFIX: &str = "fuzz smoke stopped: the qualification run of '";
+
+/// Text between the target and the crash count in that error.
+const SMOKE_CRASH_STOP_INFIX: &str = "' found ";
+
+fn smoke_crash_stop_error(target: &str, crashes: u32) -> ClassifiedError {
+    ClassifiedError::Validation(format!(
+        "{SMOKE_CRASH_STOP_PREFIX}{target}{SMOKE_CRASH_STOP_INFIX}{crashes} crash(es), so the \
+         revision cannot be promoted as crash-free. This is likely a real finding: review it \
+         with `oxfuzz triage`; approving a crash-bearing revision is a separate, explicit \
+         human decision."
+    ))
+}
+
+/// Whether `error` is the stop [`ServiceContainer::fuzz_onboard`] reports
+/// when a smoke test retained crashes, and for which target.
+///
+/// A presentation layer uses this to report the finding rather than a bare
+/// failure. The pipeline's refusal to promote is unchanged either way.
+#[must_use]
+pub fn smoke_crash_stop(error: &ClassifiedError) -> Option<SmokeCrashStop> {
+    let ClassifiedError::Validation(message) = error else {
+        return None;
+    };
+    let rest = message.strip_prefix(SMOKE_CRASH_STOP_PREFIX)?;
+    let (target, rest) = rest.split_once(SMOKE_CRASH_STOP_INFIX)?;
+    let crashes = rest.split_whitespace().next()?.parse().ok()?;
+    Some(SmokeCrashStop {
+        target: target.to_owned(),
+        crashes,
+    })
+}
+
 /// Inputs to the shared preparation stages.
 struct StageInputs<'a> {
     prepared_harness: Option<&'a PreparedHarnessSource>,
@@ -431,13 +476,7 @@ impl ServiceContainer {
                 // campaign, so it never carries a crash-bearing revision
                 // forward: that approval is its own explicit decision.
                 if smoke.summary.crashes > 0 {
-                    return Err(ClassifiedError::Validation(format!(
-                        "fuzz smoke stopped: the qualification run of '{target}' found {} \
-                         crash(es), so the revision cannot be promoted as crash-free. This is \
-                         likely a real finding: review it with `oxfuzz triage`; approving a \
-                         crash-bearing revision is a separate, explicit human decision.",
-                        smoke.summary.crashes
-                    )));
+                    return Err(smoke_crash_stop_error(&target, smoke.summary.crashes));
                 }
                 // Stage 4: the human promotion gate. A denial stops here.
                 on_stage(FuzzStage::Promote {

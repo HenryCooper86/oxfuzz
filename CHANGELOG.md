@@ -27,6 +27,10 @@ retain only the current release; older entries remain here as the record.
 - Harness (Rust): the draft is told the crate name the harness links, taken
   from `Cargo.toml`. First drafts named the crate after the project folder
   and failed to compile.
+- `oxfuzz fuzz`: when the smoke test already finds a crash, the command
+  triages it and prints the finding and the next steps, exiting 0, instead of
+  ending on "Error: validation error". It still promotes nothing and runs no
+  campaign in that case.
 - AI Assistant: when a harness's smoke test finds a crash, the assistant
   triages it and reports it instead of drafting another harness. It used to
   refine and re-smoke in a loop, asking for the same approval each time.
