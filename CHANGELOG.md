@@ -18,6 +18,17 @@ retain only the current release; older entries remain here as the record.
   structured input rather than a raw byte buffer, and decoders,
   deserializers, unpackers, and tokenizers are classified as parsers.
   Scan scores of existing projects change on the next scan.
+- Discover, from scanning real bzip2 and zstd: a function defined as
+  `MACRO(name) (params)` is named `name` rather than the macro; helpers whose
+  `static` or `inline` is spelled through a macro, and C functions defined
+  in headers, are no longer candidates; a pointer to the project's own state
+  is not treated as a byte buffer; a buffer with its length, deep reach, and
+  a declaration in a public header raise a target; and the weights no longer
+  saturate, so a library's entry points lead the list instead of tying with
+  internal decoders.
+- Harness: a project that ships several programs with `main` (bzip2 has
+  three) now links. Their objects go into one archive, so globals they share
+  by name no longer collide.
 - Harness: a project that keeps headers under a directory such as `include/`
   and has no compile database now builds without a Build Doctor profile. The
   include directories are inferred from the project's own `#include` lines,
