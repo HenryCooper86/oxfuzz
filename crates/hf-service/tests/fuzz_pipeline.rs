@@ -1548,3 +1548,327 @@ async fn fuzz_prepare_reuses_an_approved_harness_without_smoke() {
         log.stages()
     );
 }
+
+/// [`PipelineRuntime`], except that any command given a run-owned output
+/// mount leaves a crash reproducer there, as a smoke test of a target with a
+/// shallow memory error does.
+struct CrashingSmokeRuntime;
+
+impl CrashingSmokeRuntime {
+    fn leave_crash(opts: &hf_core::runtime::SandboxOptions) {
+        if let Some(out) = opts
+            .extra_mounts
+            .iter()
+            .find(|mount| mount.container_path.ends_with("/out"))
+        {
+            std::fs::write(out.host_path.join("crash-smoke-0001"), b"\xf0").unwrap();
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl hf_core::runtime::RuntimeAdapter for CrashingSmokeRuntime {
+    async fn resolve_image_reference(
+        &self,
+        image: &str,
+    ) -> Result<Option<hf_core::runtime::ImmutableImageReference>, hf_core::error::ClassifiedError>
+    {
+        PipelineRuntime.resolve_image_reference(image).await
+    }
+    async fn run_command(
+        &self,
+        cmd: &[String],
+        cwd: &std::path::Path,
+        limits: &hf_core::runtime::ResourceLimits,
+    ) -> Result<hf_core::runtime::CommandResult, hf_core::error::ClassifiedError> {
+        PipelineRuntime.run_command(cmd, cwd, limits).await
+    }
+    async fn run_command_opts(
+        &self,
+        cmd: &[String],
+        cwd: &std::path::Path,
+        limits: &hf_core::runtime::ResourceLimits,
+        opts: &hf_core::runtime::SandboxOptions,
+    ) -> Result<hf_core::runtime::CommandResult, hf_core::error::ClassifiedError> {
+        Self::leave_crash(opts);
+        PipelineRuntime.run_command(cmd, cwd, limits).await
+    }
+    async fn run_command_streaming_opts(
+        &self,
+        cmd: &[String],
+        cwd: &std::path::Path,
+        limits: &hf_core::runtime::ResourceLimits,
+        opts: &hf_core::runtime::SandboxOptions,
+        _cancel: &tokio_util::sync::CancellationToken,
+        _on_line: &hf_core::runtime::LineSink<'_>,
+    ) -> Result<hf_core::runtime::CommandResult, hf_core::error::ClassifiedError> {
+        Self::leave_crash(opts);
+        PipelineRuntime.run_command(cmd, cwd, limits).await
+    }
+    async fn write_file(
+        &self,
+        path: &std::path::Path,
+        content: &str,
+    ) -> Result<(), hf_core::error::ClassifiedError> {
+        PipelineRuntime.write_file(path, content).await
+    }
+    async fn read_file(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<String, hf_core::error::ClassifiedError> {
+        PipelineRuntime.read_file(path).await
+    }
+}
+
+/// A smoke test that finds a crash has found what the person came for. The
+/// revision and its crash evidence are retained and can be approved with known
+/// findings, so preparation reports the count instead of failing: the one-click
+/// action otherwise ends on an error for a project whose bug is shallow.
+#[tokio::test]
+async fn fuzz_prepare_reports_smoke_crashes_as_a_reviewable_result() {
+    let dir = tempfile::tempdir().unwrap();
+    let _workspace_root = common::install_managed_workspace("oxfuzz_fuzz_prepare_crash_it");
+    let project = c_project(&dir);
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("fuzz.db"))
+            .await
+            .unwrap(),
+    );
+    let consent = SmokeOnlyConsent::default();
+    let container = ServiceContainer::new(
+        Arc::new(CrashingSmokeRuntime),
+        Some(Arc::new(CodeBlockPool)),
+    )
+    .with_store(Arc::clone(&store))
+    .with_guardrails(hf_guardrails::Guardrails::new(
+        hf_guardrails::GuardrailPolicy::default(),
+        Arc::new(consent.clone()),
+    ));
+
+    let prepared = container
+        .fuzz_prepare(prepare_request(&project), &noop_stage(), &noop_progress())
+        .await
+        .expect("a crash found by the smoke test is a result, not a preparation failure");
+
+    assert_eq!(prepared.target, "parse_entry");
+    assert!(!prepared.harness_reused);
+    assert_eq!(prepared.smoke_crashes, 1);
+    let asked = consent
+        .asked
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    assert!(
+        !asked.iter().any(|label| label.contains("promote")),
+        "preparation never asks to approve a crash-bearing revision: {asked:?}"
+    );
+}
+
+/// The unattended pipeline promotes on its own prompt, so it still stops on a
+/// crash-bearing smoke test rather than promoting past it.
+#[tokio::test]
+async fn fuzz_onboard_still_stops_when_the_smoke_test_finds_a_crash() {
+    let dir = tempfile::tempdir().unwrap();
+    let _workspace_root = common::install_managed_workspace("oxfuzz_fuzz_onboard_crash_it");
+    let project = c_project(&dir);
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("fuzz.db"))
+            .await
+            .unwrap(),
+    );
+    let container = ServiceContainer::new(
+        Arc::new(CrashingSmokeRuntime),
+        Some(Arc::new(CodeBlockPool)),
+    )
+    .with_store(Arc::clone(&store));
+    let log = StageLog::default();
+
+    let error = container
+        .fuzz_onboard(
+            FuzzRequest {
+                prepared_harness: None,
+                project: &project,
+                target: None,
+                engine: EngineKind::LibFuzzer,
+                lang: None,
+                duration_secs: 1,
+                iterations: 1,
+                timeout_ms: None,
+                resume: None,
+                review_bypass: hf_service::HarnessReviewBypass::NotRequested,
+                fresh: false,
+                sanitizer: None,
+                cmplog: false,
+                seed: None,
+            },
+            &log.sink(),
+            &noop_progress(),
+        )
+        .await
+        .expect_err("a crash-bearing revision is never promoted automatically");
+
+    assert!(error.to_string().contains("found 1 crash(es)"), "{error}");
+    assert!(
+        !log.stages()
+            .iter()
+            .any(|stage| matches!(stage, FuzzStage::Promote { .. })),
+        "the promotion gate is never reached"
+    );
+}
+
+/// [`PipelineRuntime`], recording every sandbox command line.
+#[derive(Clone, Default)]
+struct RecordingRuntime {
+    commands: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl hf_core::runtime::RuntimeAdapter for RecordingRuntime {
+    async fn resolve_image_reference(
+        &self,
+        image: &str,
+    ) -> Result<Option<hf_core::runtime::ImmutableImageReference>, hf_core::error::ClassifiedError>
+    {
+        PipelineRuntime.resolve_image_reference(image).await
+    }
+    async fn run_command(
+        &self,
+        cmd: &[String],
+        cwd: &std::path::Path,
+        limits: &hf_core::runtime::ResourceLimits,
+    ) -> Result<hf_core::runtime::CommandResult, hf_core::error::ClassifiedError> {
+        self.commands
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(cmd.join(" "));
+        PipelineRuntime.run_command(cmd, cwd, limits).await
+    }
+    async fn write_file(
+        &self,
+        path: &std::path::Path,
+        content: &str,
+    ) -> Result<(), hf_core::error::ClassifiedError> {
+        PipelineRuntime.write_file(path, content).await
+    }
+    async fn read_file(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<String, hf_core::error::ClassifiedError> {
+        PipelineRuntime.read_file(path).await
+    }
+}
+
+/// [`CodeBlockPool`], recording every request it is sent.
+#[derive(Clone, Default)]
+struct RecordingPool {
+    requests: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl hf_core::provider::ProviderPool for RecordingPool {
+    async fn chat_completion(
+        &self,
+        request: &hf_core::provider::ChatRequest,
+        route: &hf_core::provider::RouteRequest,
+    ) -> Result<hf_core::provider::ChatResponse, hf_core::provider::ProviderError> {
+        self.requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(format!("{request:?}"));
+        CodeBlockPool.chat_completion(request, route).await
+    }
+    async fn chat_completion_stream(
+        &self,
+        request: &hf_core::provider::ChatRequest,
+        route: &hf_core::provider::RouteRequest,
+    ) -> Result<hf_core::provider::ChatStreamResponse, hf_core::provider::ProviderError> {
+        CodeBlockPool.chat_completion_stream(request, route).await
+    }
+    fn report_error(
+        &self,
+        _provider_id: &hf_core::types::ProviderId,
+        _error: &hf_core::provider::ProviderError,
+    ) {
+    }
+    async fn provider_statuses(&self) -> Vec<hf_core::provider::ProviderStatus> {
+        Vec::new()
+    }
+    async fn freeze(&self, _provider_id: &hf_core::types::ProviderId, _reason: String) {}
+    async fn thaw(
+        &self,
+        _provider_id: &hf_core::types::ProviderId,
+    ) -> Result<(), hf_core::provider::ProviderError> {
+        Ok(())
+    }
+}
+
+/// A project that keeps its public header under `include/` and has no compile
+/// database, the layout of the bundled `cmake_tlv_lib` example. Its sources
+/// did not compile next to the harness, and the model was left to guess the
+/// header's spelling.
+#[tokio::test]
+async fn fuzz_prepare_infers_the_include_directory_of_a_project_without_a_compile_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let _workspace_root = common::install_managed_workspace("oxfuzz_fuzz_prepare_include_it");
+    let project = std::fs::canonicalize(dir.path()).unwrap().join("layout");
+    std::fs::create_dir_all(project.join("include/pkt")).unwrap();
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(
+        project.join("include/pkt/pkt.h"),
+        "#include <stddef.h>\n#include <stdint.h>\nint parse_entry(const uint8_t *data, size_t size);\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("src/pkt.c"),
+        "#include \"pkt/pkt.h\"\n\
+         int parse_entry(const uint8_t *data, size_t size){ return size>0 && data[0]=='A'; }\n",
+    )
+    .unwrap();
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("fuzz.db"))
+            .await
+            .unwrap(),
+    );
+    let runtime = RecordingRuntime::default();
+    let pool = RecordingPool::default();
+    let container = ServiceContainer::new(Arc::new(runtime.clone()), Some(Arc::new(pool.clone())))
+        .with_store(Arc::clone(&store))
+        .with_guardrails(hf_guardrails::Guardrails::new(
+            hf_guardrails::GuardrailPolicy::default(),
+            Arc::new(SmokeOnlyConsent::default()),
+        ));
+
+    container
+        .fuzz_prepare(prepare_request(&project), &noop_stage(), &noop_progress())
+        .await
+        .expect("preparation completes");
+
+    let commands = runtime
+        .commands
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    assert!(
+        commands
+            .iter()
+            .any(|command| command.contains("-I/work/include")),
+        "the harness build searches the inferred include directory: {commands:#?}"
+    );
+    let requests = pool
+        .requests
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    assert!(
+        requests
+            .iter()
+            .any(|request| request.contains("include directories: include")),
+        "the draft prompt names the include directory"
+    );
+    assert!(
+        requests.iter().any(|request| request
+            .contains("declared in the project header include/pkt/pkt.h")
+            && request.contains("#include \\\"pkt/pkt.h\\\"")),
+        "the draft prompt gives the exact include directive: {requests:#?}"
+    );
+}

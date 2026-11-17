@@ -535,7 +535,7 @@ impl ServiceContainer {
                 // smoke execution. The deterministic smoke verdict now steers the
                 // orchestrator; promotion remains an explicit human action.
                 let verdict = smoke.verdict;
-                let next = crate::verification::harness_next_step(&verdict);
+                let next = crate::verification::harness_next_step(&verdict, smoke.summary.crashes);
                 Ok(serde_json::json!({
                     "compiled": format!("{:?}", compile.status),
                     "binary": compile.binary_name,

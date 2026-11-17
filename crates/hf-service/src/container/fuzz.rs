@@ -129,6 +129,10 @@ pub struct FuzzPrepared {
     pub repairs_used: usize,
     /// Smoke repairs used (0 when reused).
     pub smoke_repairs: usize,
+    /// Crashes the smoke test of the fresh revision retained (0 when reused).
+    /// A nonzero count is a finding, not a preparation failure: the revision
+    /// can be approved only through the explicit known-findings approval.
+    pub smoke_crashes: u32,
 }
 
 /// Inputs to the shared preparation stages.
@@ -423,6 +427,18 @@ impl ServiceContainer {
                 repairs_used,
                 smoke_repairs,
             } => {
+                // This pipeline promotes on one prompt and then starts a
+                // campaign, so it never carries a crash-bearing revision
+                // forward: that approval is its own explicit decision.
+                if smoke.summary.crashes > 0 {
+                    return Err(ClassifiedError::Validation(format!(
+                        "fuzz smoke stopped: the qualification run of '{target}' found {} \
+                         crash(es), so the revision cannot be promoted as crash-free. This is \
+                         likely a real finding: review it with `oxfuzz triage`; approving a \
+                         crash-bearing revision is a separate, explicit human decision.",
+                        smoke.summary.crashes
+                    )));
+                }
                 // Stage 4: the human promotion gate. A denial stops here.
                 on_stage(FuzzStage::Promote {
                     target: target.clone(),
@@ -514,8 +530,9 @@ impl ServiceContainer {
     ///
     /// # Errors
     /// Returns `ClassifiedError` when discovery finds no usable target, the
-    /// harness fails to compile after repairs, or the smoke test fails or finds
-    /// crashes.
+    /// harness fails to compile after repairs, or the smoke test fails. A smoke
+    /// test that finds crashes is not an error: see
+    /// [`FuzzPrepared::smoke_crashes`].
     pub async fn fuzz_prepare(
         &self,
         request: FuzzPrepareRequest<'_>,
@@ -544,13 +561,14 @@ impl ServiceContainer {
                 on_progress,
             )
             .await?;
-        let (harness_reused, repairs_used, smoke_repairs) = match harness {
-            StagedHarness::Reused(_) => (true, 0, 0),
+        let (harness_reused, repairs_used, smoke_repairs, smoke_crashes) = match harness {
+            StagedHarness::Reused(_) => (true, 0, 0, 0),
             StagedHarness::Qualified {
                 repairs_used,
                 smoke_repairs,
+                smoke,
                 ..
-            } => (false, repairs_used, smoke_repairs),
+            } => (false, repairs_used, smoke_repairs, smoke.summary.crashes),
         };
         Ok(FuzzPrepared {
             target,
@@ -559,6 +577,7 @@ impl ServiceContainer {
             harness_reused,
             repairs_used,
             smoke_repairs,
+            smoke_crashes,
         })
     }
 
@@ -734,14 +753,20 @@ impl ServiceContainer {
         })?;
         let smoke_repairs = qualified.smoke_repairs;
         let smoke = qualified.smoke;
+        // A crash-bearing smoke test is returned as it is: what it means is
+        // the caller's decision. Its verdict describes a run that stopped on
+        // the crash, so it is not judged as a clean qualification here.
         if smoke.summary.crashes > 0 {
-            return Err(ClassifiedError::Validation(format!(
-                "fuzz smoke stopped: the qualification run of '{target}' found {} \
-                 crash(es), so the revision cannot be promoted as crash-free. This is \
-                 likely a real finding: review it with `oxfuzz triage`; approving a \
-                 crash-bearing revision is a separate, explicit human decision.",
-                smoke.summary.crashes
-            )));
+            return Ok(PreparedStages {
+                target,
+                lang,
+                harness: StagedHarness::Qualified {
+                    exact_harness_id,
+                    smoke,
+                    repairs_used,
+                    smoke_repairs,
+                },
+            });
         }
         match smoke.verdict.level {
             VerdictLevel::Pass => {}

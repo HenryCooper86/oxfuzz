@@ -131,9 +131,32 @@ pub struct HarnessNextStep {
 
 /// Derive the orchestration guidance from a smoke verdict: a `Pass` points at
 /// human promotion; a `Suspect`/`Fail` steers the agent to refine and re-smoke,
-/// carrying the verdict's reasons so the correction is actionable.
+/// carrying the verdict's reasons so the correction is actionable. A smoke
+/// test that retained crashes steers to triage instead, whatever its verdict.
 #[must_use]
-pub fn harness_next_step(verdict: &HarnessVerdict) -> HarnessNextStep {
+pub fn harness_next_step(verdict: &HarnessVerdict, smoke_crashes: u32) -> HarnessNextStep {
+    // A crash in the smoke test is most often the target's own defect, which
+    // another harness reproduces. It ends harness work for this target: the
+    // crash goes to triage and the revision to the operator's explicit
+    // known-findings approval.
+    if smoke_crashes > 0 {
+        let noun = if smoke_crashes == 1 {
+            "crash"
+        } else {
+            "crashes"
+        };
+        return HarnessNextStep {
+            promotion_ready: false,
+            guidance: format!(
+                "The smoke test retained {smoke_crashes} {noun}. That is most likely a defect \
+                 in the target, not in the harness, and a new harness would hit it again: do \
+                 not call `harness` or `refine` again for this target. Call `triage` to \
+                 classify it, then tell the operator what was found and that this revision \
+                 can run campaigns only through their explicit Approve with Known Findings \
+                 in the Harness step."
+            ),
+        };
+    }
     match verdict.level {
         VerdictLevel::Pass => HarnessNextStep {
             promotion_ready: true,
@@ -258,10 +281,13 @@ mod tests {
 
     #[test]
     fn a_pass_verdict_is_promotion_ready_and_points_at_promotion() {
-        let step = harness_next_step(&HarnessVerdict {
-            level: VerdictLevel::Pass,
-            reasons: vec!["exercised the target".to_owned()],
-        });
+        let step = harness_next_step(
+            &HarnessVerdict {
+                level: VerdictLevel::Pass,
+                reasons: vec!["exercised the target".to_owned()],
+            },
+            0,
+        );
         assert!(step.promotion_ready, "{step:?}");
         assert!(
             step.guidance.to_lowercase().contains("promote"),
@@ -271,10 +297,13 @@ mod tests {
 
     #[test]
     fn a_suspect_verdict_is_not_promotion_ready_and_steers_to_refine_with_reasons() {
-        let step = harness_next_step(&HarnessVerdict {
-            level: VerdictLevel::Suspect,
-            reasons: vec!["hollow pass: 0.00 execs/sec below floor".to_owned()],
-        });
+        let step = harness_next_step(
+            &HarnessVerdict {
+                level: VerdictLevel::Suspect,
+                reasons: vec!["hollow pass: 0.00 execs/sec below floor".to_owned()],
+            },
+            0,
+        );
         assert!(
             !step.promotion_ready,
             "a hollow pass is never promotion-ready: {step:?}"
@@ -293,12 +322,39 @@ mod tests {
 
     #[test]
     fn a_fail_verdict_is_not_promotion_ready() {
-        let step = harness_next_step(&HarnessVerdict {
-            level: VerdictLevel::Fail,
-            reasons: vec!["smoke run reported passed=false".to_owned()],
-        });
+        let step = harness_next_step(
+            &HarnessVerdict {
+                level: VerdictLevel::Fail,
+                reasons: vec!["smoke run reported passed=false".to_owned()],
+            },
+            0,
+        );
         assert!(!step.promotion_ready, "{step:?}");
         assert!(step.guidance.to_lowercase().contains("refine"), "{step:?}");
+    }
+
+    #[test]
+    fn a_smoke_crash_steers_to_triage_instead_of_another_harness() {
+        // On a target with a shallow memory error every harness crashes in its
+        // smoke test. Told to refine and re-smoke, the assistant drafted
+        // harness after harness and asked the operator to approve the same
+        // smoke test again and again.
+        let step = harness_next_step(
+            &HarnessVerdict {
+                level: VerdictLevel::Fail,
+                reasons: vec!["smoke run reported passed=false".to_owned()],
+            },
+            2,
+        );
+        assert!(!step.promotion_ready, "{step:?}");
+        let lower = step.guidance.to_lowercase();
+        assert!(lower.contains("2 crashes"), "{step:?}");
+        assert!(lower.contains("`triage`"), "{step:?}");
+        assert!(lower.contains("known findings"), "{step:?}");
+        assert!(
+            lower.contains("do not call `harness` or `refine` again"),
+            "{step:?}"
+        );
     }
 
     #[test]

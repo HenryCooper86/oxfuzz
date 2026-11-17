@@ -1032,9 +1032,42 @@ the first stages of the `oxfuzz fuzz` pipeline: discover and pick a target
 (explicit or top-ranked), reuse the target's approved harness or draft and
 compile one with the repair loop, and smoke-test it behind the pre-execution
 review. It stops before the approval stage and returns the target, engine,
-language, harness revision, and whether an approved revision was reused.
+language, harness revision, whether an approved revision was reused, and how
+many crashes the smoke test retained (`FuzzPrepared::smoke_crashes`).
 `fuzz_onboard` composes `fuzz_prepare`, approval, and the campaign, so the
 CLI and GUI share one implementation of the preparation stages.
+
+A smoke test that finds a crash is a result of preparation, not a failure of
+it: on a target with a shallow memory error the smoke test is where the bug
+first shows. `fuzz_prepare` therefore returns the crash count, and the GUI
+tells the person that the smoke test already found a crash and that the
+revision can be approved only through **Approve with Known Findings**.
+`fuzz_onboard` promotes on one prompt and then starts a campaign, so it still
+stops with an error on a crash-bearing smoke test and never reaches the
+promotion gate. Rejected alternative: keeping the error for the GUI as well.
+It ended the headline action on a red "Could not prepare the project" for the
+bundled `utf8_decoder` example while the harness step beside it was ready for
+the known-findings approval.
+
+The assistant's `harness` tool follows the same rule. Its guidance after a
+smoke test that retained crashes (`verification::harness_next_step`) is to
+triage and report, and to leave the revision to the operator's
+known-findings approval. The earlier guidance, refine and re-smoke until the
+verdict is clean, cannot terminate on a target whose defect every harness
+reaches, and each round asked the operator to approve the same smoke test.
+
+A web chat turn publishes its steps as `chat:event` over SSE
+(`SseChatSink`), the event the desktop shell emits under the same name, so
+the Assistant view renders tool activity during the turn on both surfaces.
+The events are advisory: with no subscriber the turn still returns its
+complete answer.
+
+Approving a harness completes the Harness stage in the GUI's progress model
+whichever screen ran the earlier steps: a revision can be approved only after
+it was drafted, compiled, and smoke-tested, and the optional seed step is
+recorded as skipped when it was not run. Before this the stage stayed "next"
+after a one-click preparation or a known-findings approval, because neither
+marks the seed step.
 
 The click carries one explicit consent, `RunHarness`, which covers the
 sandboxed smoke test and its repair re-runs (as the Harness step's own button

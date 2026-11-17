@@ -229,6 +229,9 @@ pub enum SseEvent {
     PermissionRequest(hf_service::approval::PermissionRequest),
     /// `chat:permission_closed` -- an approval prompt is no longer pending.
     PermissionClosed(hf_service::approval::PermissionClosed),
+    /// `chat:event` -- one step of a running chat turn (reasoning, a tool
+    /// call, its result), the event the desktop shell emits under this name.
+    ChatEvent(hf_service::AgentEvent),
 }
 
 impl SseEvent {
@@ -244,6 +247,7 @@ impl SseEvent {
             SseEvent::StreamLagged { .. } => "stream:lagged",
             SseEvent::PermissionRequest(_) => hf_service::approval::PERMISSION_REQUEST_EVENT,
             SseEvent::PermissionClosed(_) => hf_service::approval::PERMISSION_CLOSED_EVENT,
+            SseEvent::ChatEvent(_) => "chat:event",
         }
     }
 }
@@ -3917,11 +3921,28 @@ async fn chat_agent(
                 provider,
                 turn_id,
             },
-            &hf_service::NullSink,
+            &SseChatSink {
+                state: state.clone(),
+            },
         )
         .await
         .map_err(classified_api_error)?;
     Ok(Json(answer))
+}
+
+/// Forwards the steps of a web chat turn to browsers over SSE, so the turn
+/// shows its tool activity while it runs, as the desktop shell's does.
+struct SseChatSink {
+    state: AppState,
+}
+
+#[async_trait::async_trait]
+impl hf_service::EventSink for SseChatSink {
+    async fn emit(&self, event: hf_service::AgentEvent) {
+        // Progress is advisory: with no subscriber, or an event past the SSE
+        // size limit, the turn still returns its complete answer.
+        let _ = self.state.deliver_event(SseEvent::ChatEvent(event));
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -3974,6 +3995,42 @@ async fn chat_answer_permission(
         )
     })?;
     Ok(Json(state.pending_approvals.resolve(id, req.approved)))
+}
+
+#[cfg(test)]
+mod chat_sink_tests {
+    use hf_service::EventSink as _;
+
+    use super::{AppState, SseChatSink};
+
+    /// A browser chat turn showed only "Thinking..." until it ended, because
+    /// the web route discarded the turn's events; the desktop shell streams
+    /// them as `chat:event`.
+    #[tokio::test]
+    async fn a_chat_turn_step_reaches_event_clients_under_the_desktop_event_name() {
+        let state = AppState::new(hf_service::ServiceContainer::stubbed());
+        let mut events = state.event_tx.subscribe();
+        let sink = SseChatSink {
+            state: state.clone(),
+        };
+
+        sink.emit(hf_service::AgentEvent::Started).await;
+
+        let event = events.recv().await.expect("the step reaches the client");
+        assert_eq!(event.event_name(), "chat:event");
+        assert_eq!(
+            serde_json::to_value(&event).unwrap(),
+            serde_json::json!({ "type": "ChatEvent", "data": { "type": "started" } })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_step_with_no_event_client_does_not_fail_the_turn() {
+        let state = AppState::new(hf_service::ServiceContainer::stubbed());
+        SseChatSink { state }
+            .emit(hf_service::AgentEvent::Started)
+            .await;
+    }
 }
 
 #[cfg(test)]
