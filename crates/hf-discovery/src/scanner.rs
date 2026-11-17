@@ -1240,9 +1240,14 @@ fn extract_functions(
         if params == 0 {
             return;
         }
-        let parameter_text = parameter_list
-            .and_then(|list| list.utf8_text(src.as_bytes()).ok())
-            .unwrap_or("");
+        // Comments are dropped first: projects document parameters inline,
+        // and a comment's `*` or a word such as "string" is not a type.
+        let parameter_text = strip_comments(
+            parameter_list
+                .and_then(|list| list.utf8_text(src.as_bytes()).ok())
+                .unwrap_or(""),
+        );
+        let parameter_text = parameter_text.as_str();
         // `main` is the program entry point: a harness cannot call it and the
         // engine driver defines its own. `LLVMFuzzer*` functions are the
         // callbacks of a fuzz harness the project already ships.
@@ -1506,7 +1511,8 @@ fn macro_wrapped_name(declarator: tree_sitter::Node<'_>) -> Option<tree_sitter::
 }
 
 /// Whether the text before a definition's name carries a macro that spells
-/// internal linkage or inlining, such as `MEM_STATIC` or `FORCE_INLINE`.
+/// internal linkage or inlining, such as `MEM_STATIC`, `SQLITE_PRIVATE`,
+/// `FORCE_INLINE`, or zlib's `local`.
 ///
 /// An export macro (`ZSTDLIB_STATIC_API`) names the opposite and is excluded.
 fn has_linkage_macro(
@@ -1521,6 +1527,10 @@ fn has_linkage_macro(
         .split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
         .filter(|token| !token.is_empty())
         .any(|token| {
+            // zlib's spelling of `static`.
+            if token == "local" {
+                return true;
+            }
             let upper = token.to_ascii_uppercase();
             // A lowercase `static`/`inline` is a keyword the grammar reports.
             token
@@ -1528,9 +1538,16 @@ fn has_linkage_macro(
                 .any(|character| character.is_ascii_uppercase())
                 && !upper.contains("API")
                 && !upper.contains("EXPORT")
-                && (upper.contains("INLINE") || upper.ends_with("STATIC"))
+                && (upper.contains("INLINE")
+                    || INTERNAL_LINKAGE_SUFFIXES
+                        .iter()
+                        .any(|suffix| upper.ends_with(suffix)))
         })
 }
+
+/// Endings of macro names that expand to `static`: `MEM_STATIC`,
+/// `SQLITE_PRIVATE`, `XML_INTERNAL`, `ZEXPORT_LOCAL`.
+const INTERNAL_LINKAGE_SUFFIXES: [&str; 4] = ["STATIC", "PRIVATE", "INTERNAL", "LOCAL"];
 
 /// Whether a `parameter_declaration` is the `void` placeholder of a `(void)`
 /// prototype: its type is the primitive `void` and it has no declarator (so
@@ -1582,6 +1599,38 @@ fn infer_input_surface(parameters: &str) -> InputSurface {
         // build the arguments from the fuzzer's bytes, as it does for a Rust
         // function without a slice.
         InputSurface::Structured
+    }
+}
+
+/// `text` without `/* ... */` and `// ...` comments, each replaced by a space.
+fn strip_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    loop {
+        let block = rest.find("/*");
+        let line = rest.find("//");
+        let (start, block_comment) = match (block, line) {
+            (Some(block), Some(line)) => (block.min(line), block < line),
+            (Some(block), None) => (block, true),
+            (None, Some(line)) => (line, false),
+            (None, None) => {
+                out.push_str(rest);
+                return out;
+            }
+        };
+        out.push_str(&rest[..start]);
+        out.push(' ');
+        let after = &rest[start + 2..];
+        let end = if block_comment {
+            after.find("*/").map(|at| at + 2)
+        } else {
+            after.find('\n')
+        };
+        match end {
+            Some(end) => rest = &after[end..],
+            // An unterminated comment runs to the end of the text.
+            None => return out,
+        }
     }
 }
 
@@ -2087,6 +2136,49 @@ mod tests {
         );
         let symbols: Vec<_> = candidates.iter().map(|c| c.symbol.as_str()).collect();
         assert_eq!(symbols, ["d", "e"]);
+    }
+
+    #[test]
+    fn private_and_local_linkage_macros_exclude_a_helper() {
+        // The SQLite amalgamation marks every internal function
+        // `SQLITE_PRIVATE`, and zlib writes `local`; both expand to `static`.
+        // SQLite's internals filled the ranking above its `sqlite3_*` API.
+        let candidates = c_candidates(
+            "SQLITE_PRIVATE int sqlite3ParseUri(const char *zUri, int n) { return zUri[0] + n; }\n\
+             local int inflate_table(const unsigned char *lens, unsigned n) { return lens[0] + n; }\n\
+             LIB_INTERNAL int helper(const unsigned char *p, unsigned n) { return p[0] + n; }\n\
+             SQLITE_API int sqlite3_deserialize(const unsigned char *pData, long szDb) { return pData[0] + (int)szDb; }\n\
+             int local_time(const char *zone, int n) { return zone[0] + n; }\n",
+        );
+        let symbols: Vec<_> = candidates.iter().map(|c| c.symbol.as_str()).collect();
+        assert_eq!(symbols, ["sqlite3_deserialize", "local_time"]);
+    }
+
+    #[test]
+    fn comments_inside_a_parameter_list_do_not_change_its_reading() {
+        // SQLite documents each parameter inline. The `*` of a comment hid the
+        // length of `sqlite3_prepare_v2`, and a word such as "string" in a
+        // comment made a state pointer look like a byte container.
+        let candidates = c_candidates(
+            "int prepare(\n  sqlite3 *db,          /* Database handle. */\n  const char *zSql,     /* UTF-8 encoded SQL statement. */\n  int nBytes            /* Length of zSql in bytes. */\n) { return zSql[0] + nBytes; }\n\
+             int plain(const char *zSql, int nBytes) { return zSql[0] + nBytes; }\n\
+             int state(Ctx *c /* holds the string table */, int n // a vector index\n) { return n; }\n",
+        );
+        let by_symbol = |symbol: &str| {
+            candidates
+                .iter()
+                .find(|candidate| candidate.symbol == symbol)
+                .unwrap()
+        };
+        assert!(
+            (by_symbol("prepare").fit_score - by_symbol("plain").fit_score).abs() < 0.03,
+            "{candidates:?}"
+        );
+        assert!(
+            by_symbol("prepare").fit_score > 0.39,
+            "the length is seen: {candidates:?}"
+        );
+        assert_eq!(by_symbol("state").input_surface, InputSurface::Structured);
     }
 
     #[test]

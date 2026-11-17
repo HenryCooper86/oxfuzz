@@ -172,8 +172,9 @@ standard string, vector, span, or array. A pointer to the project's own state
 
 Candidates exclude what a harness cannot call or should not start from:
 `static` functions, including those whose specifier is spelled through a
-macro containing `INLINE` or ending in `STATIC` (an export macro containing
-`API` or `EXPORT` is not one); anonymous-namespace and non-public members;
+macro containing `INLINE` or ending in `STATIC`, `PRIVATE`, `INTERNAL`, or
+`LOCAL`, or as zlib's `local` (an export macro containing `API` or `EXPORT`
+is not one); anonymous-namespace and non-public members;
 zero-parameter functions; `main`; and C functions defined in a `.h` file.
 All of them stay in the call graph. A definition written
 `ret MACRO(name) (params)`, as bzip2 writes its API, is named `name`.

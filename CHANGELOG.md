@@ -26,6 +26,11 @@ retain only the current release; older entries remain here as the record.
   a declaration in a public header raise a target; and the weights no longer
   saturate, so a library's entry points lead the list instead of tying with
   internal decoders.
+- Discover, from scanning real libxml2 and SQLite: internal functions marked
+  through a macro ending in `PRIVATE`, `INTERNAL`, or `LOCAL` (and zlib's
+  `local`) are no longer candidates, and comments inside a parameter list no
+  longer hide a buffer's length or pass for a type. SQLite went from 1640
+  candidates to its 422 public functions.
 - Harness: a project that ships several programs with `main` (bzip2 has
   three) now links. Their objects go into one archive, so globals they share
   by name no longer collide.
