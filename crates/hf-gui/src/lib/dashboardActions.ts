@@ -8,6 +8,7 @@ export function dashboardActionDestination(actionCode: string): ViewType | null 
     case "generate_harness":
       return "harness";
     case "triage_crashes":
+    case "scan_crashes":
       return "triage";
     case "smoke_campaign":
       return "run";

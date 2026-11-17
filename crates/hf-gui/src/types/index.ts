@@ -349,6 +349,8 @@ export interface WorkbenchTotals {
   crashes: number;
   /** Crashes with no drafted bug report yet -- what "triage required" keys on. */
   crashes_needing_triage: number;
+  /** Crash artifacts of runs with no findings yet; absent on older servers. */
+  crashes_unscanned?: number;
   corpus_entries: number;
 }
 

@@ -469,6 +469,7 @@ describe("transport", () => {
               crashes: 2,
               edges: 41,
               execs: 123.5,
+              stopped_at_first_crash: true,
             },
           ]),
           { status: 200, headers: { "content-type": "application/json" } },
@@ -499,6 +500,10 @@ describe("transport", () => {
         termination: "completed",
         stagnation: null,
         auto_revert: null,
+        // The retained history row says whether single-process libFuzzer
+        // exited at its first crash; the browser result dropped it, so the
+        // Run view never explained an unused budget there.
+        stopped_at_first_crash: true,
       });
       expect(progress).toEqual([
         { run_id: "other-run", type: "LogLine", data: "ignore" },

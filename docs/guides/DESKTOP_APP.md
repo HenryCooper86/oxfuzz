@@ -68,7 +68,10 @@ separate action after assessment finishes.
 action finds the most promising target, builds and smoke-tests a harness in the
 sandbox, and stops at step 2 for you to review and approve it. Approving starts
 one run with the default duration. An already-approved harness gets a **Start
-run** button instead. The steps below are what it automates.
+run** button instead. If the smoke test already finds a crash, which happens
+when the bug is shallow, the action says so and step 2 offers **Approve with
+Known Findings**; the crash is then waiting in Triage. The steps below are
+what it automates.
 
 **2. Generate, smoke-test, and approve a harness.** Pick a target and the agent
 drafts a harness, compiles it in the sandbox, runs a time-limited smoke test,
@@ -243,7 +246,10 @@ execution report that they are unavailable.
 signature, minimized, and classified with CASR for severity and exploitability.
 The default queue shows unfinished findings first. Filters expose resolved
 history and narrow by target, run, fault origin, disposition, or CASR
-classification. A selected finding is restored per project by its retained
+classification. When runs retained crash artifacts that have not been scanned
+yet, the empty queue says so and offers the scan instead of suggesting other
+filters. **Push to DefectDojo** appears only when a DefectDojo instance is
+configured. A selected finding is restored per project by its retained
 crash and run identifiers, so an older crash keeps its original input path,
 target language, and engine even after a newer run completes. Opening the queue
 or a finding is read-only; Scan and report creation remain explicit actions.

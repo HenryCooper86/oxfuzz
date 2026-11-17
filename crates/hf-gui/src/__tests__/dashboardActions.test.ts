@@ -22,6 +22,7 @@ describe("dashboard action destinations", () => {
     expect(dashboardActionDestination("run_discovery")).toBe("discover");
     expect(dashboardActionDestination("review_harnesses")).toBe("harness");
     expect(dashboardActionDestination("triage_crashes")).toBe("triage");
+    expect(dashboardActionDestination("scan_crashes")).toBe("triage");
     expect(dashboardActionDestination("generate_harness")).toBe("harness");
     expect(dashboardActionDestination("smoke_campaign")).toBe("run");
     expect(dashboardActionDestination("select_project")).toBe("projects");
@@ -90,5 +91,15 @@ describe("action-first dashboard overview", () => {
     expect(dictionaries.match(/"dashboard\.attention": "待处理事项"/g)).toHaveLength(1);
     expect(dictionaries.match(/"dashboard\.openAction": "Open \{action\}"/g)).toHaveLength(1);
     expect(dictionaries.match(/"dashboard\.openAction": "打开：\{action\}"/g)).toHaveLength(1);
+  });
+});
+
+describe("dashboard target scores", () => {
+  it("labels the figure as the scan score, since Discover may show a different AI score", () => {
+    // Discover showed "75/100 AI assessment" for a target the Dashboard
+    // listed at a bare "57%".
+    const dashboard = source("../views/DashboardView.tsx");
+    expect(dashboard).toContain('t("dashboard.scanScore", { score: Math.round(target.fit_score * 100) })');
+    expect(dashboard).not.toContain("{Math.round(target.fit_score * 100)}%");
   });
 });

@@ -349,6 +349,36 @@ describe("MiniTrend absent measurements", () => {
     expect(host.textContent).not.toContain("▲");
   });
 
+  it("says a rate is unknown when the latest run never measured one", async () => {
+    // A libFuzzer run that crashes in its first second reports no rate. The
+    // tile showed 0, or an older run's rate as if it were the latest.
+    const runs = [
+      { ...item("10000000-0000-4000-8000-000000000001", 9), execs: 4000 },
+      { ...item("10000000-0000-4000-8000-000000000002", 9), execs: null },
+    ];
+    await act(async () => miniRoot.render(
+      <I18nContext.Provider value={{ locale: "en", setLocale: () => undefined, t: (key) => key }}>
+        <MiniTrend title="runs.throughput" icon={<span>icon</span>} runs={runs} value={(r) => r.execs} color="var(--accent)" />
+      </I18nContext.Provider>,
+    ));
+    expect(host.querySelector("span.text-lg")?.textContent).toBe("runs.unknownValue");
+    expect(host.textContent).not.toContain("runs.vsPrev");
+    expect(barCount()).toBe(1);
+  });
+
+  it("says a rate is unknown when no run measured one", async () => {
+    const runs = [
+      { ...item("10000000-0000-4000-8000-000000000001", 9), execs: null },
+      { ...item("10000000-0000-4000-8000-000000000002", 9), execs: null },
+    ];
+    await act(async () => miniRoot.render(
+      <I18nContext.Provider value={{ locale: "en", setLocale: () => undefined, t: (key) => key }}>
+        <MiniTrend title="runs.throughput" icon={<span>icon</span>} runs={runs} value={(r) => r.execs} color="var(--accent)" />
+      </I18nContext.Provider>,
+    ));
+    expect(host.querySelector("span.text-lg")?.textContent).toBe("runs.unknownValue");
+  });
+
   it("keeps a change marker on its own run when other points are absent", async () => {
     const runs = [
       item("10000000-0000-4000-8000-000000000001", 100),

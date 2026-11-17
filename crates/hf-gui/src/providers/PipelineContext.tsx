@@ -57,6 +57,21 @@ function loadProgress(): Record<string, Progress> {
   }
 }
 
+/**
+ * Approval is the gate of the harness stage: a revision can only be approved
+ * after it was drafted, compiled, and smoke-tested, so those steps are
+ * complete whichever screen ran them. The optional seed step is recorded as
+ * skipped when it was not run.
+ */
+function completeApprovedStage(progress: Progress): Progress {
+  const steps = CORE_STAGES.find((stage) => stage.id === "harness")?.steps ?? [];
+  const missing = steps.filter((step) => !progress.completed.includes(step));
+  return {
+    completed: [...progress.completed, ...missing],
+    skipped: missing.includes("seeds") ? [...progress.skipped, "seeds"] : progress.skipped,
+  };
+}
+
 export function PipelineProvider({ children }: { children: React.ReactNode }) {
   // Progress is kept per fuzzing target (project path), so switching between
   // targets retains each one's pipeline state instead of resetting it, and it
@@ -89,10 +104,13 @@ export function PipelineProvider({ children }: { children: React.ReactNode }) {
   const markDone = useCallback(
     (id: StageId, projectKey?: string) =>
       update(
-        (p) => ({
-          completed: p.completed.includes(id) ? p.completed : [...p.completed, id],
-          skipped: p.skipped.filter((s) => s !== id),
-        }),
+        (p) => {
+          const done: Progress = {
+            completed: p.completed.includes(id) ? p.completed : [...p.completed, id],
+            skipped: p.skipped.filter((s) => s !== id),
+          };
+          return id === "approve" ? completeApprovedStage(done) : done;
+        },
         projectKey,
       ),
     [update],

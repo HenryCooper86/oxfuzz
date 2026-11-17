@@ -13,7 +13,7 @@ const mocks = vi.hoisted(() => ({
   stage: undefined as undefined | ((payload: unknown) => void),
   log: undefined as undefined | ((payload: unknown) => void),
   runFuzzer: vi.fn(async () => 0),
-  setTarget: vi.fn(), setEngine: vi.fn(), setLang: vi.fn(), markDone: vi.fn(),
+  setTarget: vi.fn(), setEngine: vi.fn(), setLang: vi.fn(), markDone: vi.fn(), markSkipped: vi.fn(),
 }));
 vi.mock("../lib", () => ({
   getTransport: () => ({
@@ -30,7 +30,7 @@ vi.mock("../lib", () => ({
 }));
 vi.mock("../providers/project", () => ({ useProject: () => ({ activeProject: "/proj" }) }));
 vi.mock("../providers/target", () => ({ useTarget: () => ({ setTarget: mocks.setTarget, setEngine: mocks.setEngine, setLang: mocks.setLang }) }));
-vi.mock("../providers/pipeline", () => ({ usePipeline: () => ({ markDone: mocks.markDone }) }));
+vi.mock("../providers/pipeline", () => ({ usePipeline: () => ({ markDone: mocks.markDone, markSkipped: mocks.markSkipped }) }));
 vi.mock("../providers/runOutput", () => ({ useRunOutput: () => ({ runFuzzer: mocks.runFuzzer }) }));
 vi.mock("../hooks/useFuzzingSettings", () => ({ useFuzzingSettings: () => ({ settings: { default_engine: "libfuzzer", default_duration_secs: 600 } }) }));
 
@@ -39,7 +39,7 @@ const flush = async () => act(async () => { for (let i = 0; i < 6; i++) await Pr
 const button = (label: string) => [...host.querySelectorAll("button")].find(b => b.textContent?.trim() === label);
 beforeEach(async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  for (const fn of [mocks.invoke, mocks.runFuzzer, mocks.setTarget, mocks.setEngine, mocks.setLang, mocks.markDone, open]) fn.mockClear();
+  for (const fn of [mocks.invoke, mocks.runFuzzer, mocks.setTarget, mocks.setEngine, mocks.setLang, mocks.markDone, mocks.markSkipped, open]) fn.mockClear();
   api = null;
   host = document.createElement("div"); document.body.append(host); root = createRoot(host);
   await act(async () => root.render(<I18nProvider><OneClickFuzz onOpen={open} apiRef={(value) => { api = value; }} /></I18nProvider>));
@@ -77,6 +77,10 @@ it("prepares, stops at approval, and starts one run only after that harness is a
   expect(mocks.runFuzzer).toHaveBeenCalledWith({ project: "/proj", target: "parse_number", engine: "libfuzzer", duration: 600 });
   expect(open).toHaveBeenCalledWith("run");
   expect(host.textContent).toContain("Started a 10 min run of parse_number");
+  // The run this action started completes the Run stage, as a run started
+  // from the Run step does; a crash-free run leaves nothing to triage.
+  expect(mocks.markDone).toHaveBeenCalledWith("run", "/proj");
+  expect(mocks.markSkipped).toHaveBeenCalledWith("triage", "/proj");
 });
 
 it("asks before running when the target already had an approved harness", async () => {
@@ -91,22 +95,42 @@ it("asks before running when the target already had an approved harness", async 
   expect(mocks.runFuzzer).toHaveBeenCalledWith({ project: "/proj", target: "parse_number", engine: "afl++", duration: 600 });
 });
 
-it("shows the built revision for review when its smoke test stops on a crash", async () => {
+it("presents a crash found by the smoke test as a finding to review, not as a failure", async () => {
+  const replaced: unknown[] = [];
+  const stopListening = onHarnessReplaced(scope => replaced.push(scope));
+  mocks.invoke.mockResolvedValue({ target: "parse_number", lang: "C", engine: "libfuzzer", harness_reused: false, repairs_used: 0, smoke_repairs: 0, smoke_crashes: 2 });
+  await act(async () => button("Fuzz this project")!.click());
+  await flush();
+  stopListening();
+  // The compiled revision and its crash evidence are retained; approving it
+  // with known findings is the person's decision, so the review must show it.
+  expect(replaced).toEqual([{ project: "/proj", target: "parse_number", engine: "libfuzzer" }]);
+  expect(open).toHaveBeenCalledWith("harness");
+  expect(host.textContent).toContain("smoke test of parse_number already found 2 crashes");
+  expect(host.textContent).toContain("Approve with Known Findings");
+  expect(host.textContent).not.toContain("Could not prepare the project");
+  expect(host.querySelector('[data-step-status="failed"]')).toBeNull();
+  expect(mocks.runFuzzer).not.toHaveBeenCalled();
+  // The known-findings approval is still an approval of that exact scope.
+  await act(async () => api!.approved({ project: "/proj", target: "parse_number", engine: "libfuzzer" }));
+  await flush();
+  expect(mocks.runFuzzer).toHaveBeenCalledWith({ project: "/proj", target: "parse_number", engine: "libfuzzer", duration: 600 });
+});
+
+it("shows the built revision for review when preparation fails after its smoke test ran", async () => {
   let fail!: (error: Error) => void;
   const replaced: unknown[] = [];
   const stopListening = onHarnessReplaced(scope => replaced.push(scope));
   mocks.invoke.mockImplementation((command: string) => command === "fuzz_prepare" ? new Promise((_resolve, reject) => { fail = reject; }) : Promise.resolve(null));
   await act(async () => button("Fuzz this project")!.click());
   await act(async () => mocks.stage!({ stage: "smoke", target: "parse_number", reused: false }));
-  await act(async () => fail(new Error("fuzz smoke stopped: the qualification run found 1 crash(es)")));
+  await act(async () => fail(new Error("fuzz smoke failed for 'parse_number': no fuzzer activity")));
   await flush();
   stopListening();
-  // The compiled revision and its crash evidence are retained; approving it
-  // with known findings is the person's decision, so the review must show it.
   expect(replaced).toEqual([{ project: "/proj", target: "parse_number", engine: "libfuzzer" }]);
   expect(mocks.setTarget).toHaveBeenCalledWith("parse_number");
   expect(open).toHaveBeenCalledWith("harness");
-  expect(host.textContent).toContain("found 1 crash(es)");
+  expect(host.textContent).toContain("no fuzzer activity");
 });
 
 it("leaves the harness review alone when preparation fails before a build", async () => {

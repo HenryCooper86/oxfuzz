@@ -177,7 +177,9 @@ in one click: it finds the most promising target, builds and smoke-tests a
 harness in the sandbox, then stops and opens step 2 so you can review the
 source and evidence. When you approve that harness, one run with your default
 duration starts. If the target already has an approved harness, it offers a
-**Start run** button instead. The click never approves a harness or starts a
+**Start run** button instead. If the smoke test already finds a crash, the
+action says so and step 2 offers **Approve with Known Findings**; the crash
+is then waiting in Triage. The click never approves a harness or starts a
 run by itself.
 
 The **Next** button opens the current stage without starting work. The

@@ -29,6 +29,8 @@ interface FuzzPrepared {
   lang: string;
   engine: string;
   harness_reused: boolean;
+  /** Crashes the smoke test of a fresh revision retained; absent on older servers. */
+  smoke_crashes?: number;
 }
 
 /** One `fuzz:stage` event: a stage boundary, or a step inside the harness stage. */
@@ -89,7 +91,7 @@ function formatElapsed(ms: number): string {
 type Phase =
   | { kind: "idle" }
   | { kind: "preparing" }
-  | { kind: "awaitingApproval"; scope: HarnessScope }
+  | { kind: "awaitingApproval"; scope: HarnessScope; smokeCrashes: number }
   | { kind: "ready"; scope: HarnessScope }
   | { kind: "started"; scope: HarnessScope }
   | { kind: "error"; message: string };
@@ -109,7 +111,7 @@ export function OneClickFuzz({ onOpen, apiRef }: {
   const { t } = useI18n();
   const { activeProject } = useProject();
   const { setTarget, setEngine, setLang } = useTarget();
-  const { markDone } = usePipeline();
+  const { markDone, markSkipped } = usePipeline();
   const { runFuzzer } = useRunOutput();
   const { settings } = useFuzzingSettings();
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
@@ -126,11 +128,14 @@ export function OneClickFuzz({ onOpen, apiRef }: {
     setPhase({ kind: "started", scope });
     onOpen("run");
     try {
-      await runFuzzer({ ...scope, duration: settings.default_duration_secs });
+      const crashes = await runFuzzer({ ...scope, duration: settings.default_duration_secs });
+      // The same bookkeeping as a run started from the Run step.
+      markDone("run", scope.project);
+      if (crashes === 0) markSkipped("triage", scope.project);
     } catch (error) {
       setPhase({ kind: "error", message: String(error) });
     }
-  }, [onOpen, runFuzzer, settings]);
+  }, [markDone, markSkipped, onOpen, runFuzzer, settings]);
 
   // Keep the latest phase reachable from the stable approval callback.
   const phaseRef = useRef(phase);
@@ -201,7 +206,7 @@ export function OneClickFuzz({ onOpen, apiRef }: {
         setPhase({ kind: "ready", scope });
       } else {
         emitHarnessReplaced(scope);
-        setPhase({ kind: "awaitingApproval", scope });
+        setPhase({ kind: "awaitingApproval", scope, smokeCrashes: prepared.smoke_crashes ?? 0 });
         onOpen("harness");
       }
     } catch (error) {
@@ -252,7 +257,12 @@ export function OneClickFuzz({ onOpen, apiRef }: {
           <pre ref={logRef} className="m-0 mt-1 p-2 overflow-auto font-mono whitespace-pre-wrap break-all" style={{ maxHeight: 220, background: "var(--surface-code)", borderRadius: 6 }}>{log.join("\n")}</pre>
         </details>
       )}
-      {phase.kind === "awaitingApproval" && <p role="status" className="text-xs m-0">{t("oneClick.awaitingApproval", { target: phase.scope.target, duration: durationText })}</p>}
+      {phase.kind === "awaitingApproval" && phase.smokeCrashes === 0 && <p role="status" className="text-xs m-0">{t("oneClick.awaitingApproval", { target: phase.scope.target, duration: durationText })}</p>}
+      {phase.kind === "awaitingApproval" && phase.smokeCrashes > 0 && (
+        <p role="status" className="text-xs m-0">
+          {t(phase.smokeCrashes === 1 ? "oneClick.smokeFoundOne" : "oneClick.smokeFoundMany", { target: phase.scope.target, count: phase.smokeCrashes, duration: durationText })}
+        </p>
+      )}
       {phase.kind === "ready" && (
         <div className="flex flex-wrap items-center gap-2">
           <p role="status" className="text-xs m-0">{t("oneClick.reused", { target: phase.scope.target })}</p>

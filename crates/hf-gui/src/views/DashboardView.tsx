@@ -1288,7 +1288,7 @@ function TopTargets({ targets, onOpen }: { targets: WorkbenchTarget[]; onOpen?: 
             <div key={target.id} className="rounded-md border border-border" style={{ padding: "var(--space-sm)", background: "var(--surface-secondary)" }}>
               <div className="flex items-center justify-between gap-2">
                 <span className="text-sm font-medium truncate">{target.symbol}</span>
-                <span className="text-xs text-text-muted">{Math.round(target.fit_score * 100)}%</span>
+                <span className="text-xs text-text-muted" title={t("dashboard.scanScoreHint")}>{t("dashboard.scanScore", { score: Math.round(target.fit_score * 100) })}</span>
               </div>
               <p className="text-xs text-text-secondary mt-1" style={{ maxHeight: 38, overflow: "hidden" }}>
                 {target.rationale || target.language}

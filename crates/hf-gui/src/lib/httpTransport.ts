@@ -350,6 +350,7 @@ interface RunHistorySnapshot {
   crashes: number;
   edges: number | null;
   execs: number | null;
+  stopped_at_first_crash?: boolean;
 }
 
 function runStartArgs(args?: Record<string, unknown>): Record<string, unknown> {
@@ -525,6 +526,7 @@ export function createHttpTransport(options: HttpTransportOptions = {}): Transpo
         termination: status === "cancelled" ? "cancelled" : "completed",
         stagnation: null,
         auto_revert: null,
+        stopped_at_first_crash: completed.stopped_at_first_crash === true,
       };
     } finally {
       if (activeRunId === runId) activeRunId = null;

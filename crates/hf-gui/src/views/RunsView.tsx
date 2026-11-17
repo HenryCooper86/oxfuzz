@@ -872,9 +872,11 @@ export function MiniTrend({
       point.value !== null);
   const values = points.map((point) => point.value);
   const max = Math.max(1, ...values);
-  const latest = values[values.length - 1] ?? 0;
+  // The headline is the newest run's own value. When that run has none, the
+  // tile says so instead of showing zero or an older run's number as current.
+  const latest = runs.length > 0 ? value(runs[runs.length - 1]) : null;
   const prev = values[values.length - 2] ?? latest;
-  const delta = latest - prev;
+  const delta = latest === null || prev === null ? 0 : latest - prev;
   return (
     <div className="rounded-md border border-border min-w-0" style={{ padding: "var(--space-sm) var(--space-md)", background: "var(--surface-secondary)" }}>
       <div className="flex items-center gap-1.5 text-xs text-text-muted">
@@ -882,7 +884,7 @@ export function MiniTrend({
         <span className="truncate">{title}</span>
       </div>
       <div className="flex items-baseline gap-2 mt-1">
-        <span className="text-lg font-semibold" style={{ color }}>{latest.toLocaleString()}</span>
+        <span className="text-lg font-semibold" style={{ color: latest === null ? "var(--text-muted)" : color }}>{latest === null ? t("runs.unknownValue") : latest.toLocaleString()}</span>
         {delta !== 0 && (
           <span className="text-xs" style={{ color: delta > 0 ? "var(--success)" : "var(--text-muted)" }}>
             {delta > 0 ? "+" : ""}

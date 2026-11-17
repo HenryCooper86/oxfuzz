@@ -21,7 +21,7 @@ const scanListeners = vi.hoisted(() => new Set<(event: { payload: unknown }) => 
 const environment = vi.hoisted(() => ({ tauri: false }));
 vi.mock("../lib", async () => ({
   ...(await vi.importActual<typeof import("../lib")>("../lib")),
-  getTransport: () => ({ listen: async (_event: string, callback: (event: { payload: unknown }) => void) => { scanListeners.add(callback); return () => scanListeners.delete(callback); }, invoke: (command: string, args?: Record<string, unknown>) => command === "run_history" ? Promise.resolve([{ id: "retained-run" }]) : invoke(command, args) }),
+  getTransport: () => ({ listen: async (_event: string, callback: (event: { payload: unknown }) => void) => { scanListeners.add(callback); return () => scanListeners.delete(callback); }, invoke: (command: string, args?: Record<string, unknown>) => command === "run_history" ? Promise.resolve([{ id: "retained-run" }]) : command === "defectdojo_configured" ? Promise.resolve(true) : invoke(command, args) }),
   isTauriEnvironment: () => environment.tauri,
 }));
 

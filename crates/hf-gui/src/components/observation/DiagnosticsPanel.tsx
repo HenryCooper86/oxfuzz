@@ -11,6 +11,7 @@ import { usePolledResource } from "../../hooks/usePolledResource";
 import { Badge } from "../ui/Badge";
 import { IconButton } from "../ui/IconButton";
 import { useI18n } from "../../i18nContext";
+import { formatCost } from "../../lib/cost";
 
 interface ModelCost {
   model: string;
@@ -28,7 +29,6 @@ interface CostSummary {
 }
 
 const fmtTokens = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`);
-const fmtCost = (n: number) => (n > 0 ? `$${n.toFixed(n < 0.01 ? 4 : 2)}` : "$0");
 
 export function DiagnosticsPanel() {
   const { t } = useI18n();
@@ -73,7 +73,7 @@ export function DiagnosticsPanel() {
         <div className="flex-1 overflow-y-auto p-2 flex flex-col gap-3">
           {/* Session totals */}
           <div className="grid grid-cols-3 gap-2">
-            <Stat label={t("diag.cost")} value={fmtCost(data.cost_usd)} accent />
+            <Stat label={t("diag.cost")} value={formatCost(data.cost_usd, data.input_tokens + data.output_tokens) ?? t("diag.notPriced")} accent />
             <Stat label={t("diag.calls")} value={`${data.calls}`} />
             <Stat label={t("diag.tokens")} value={fmtTokens(data.input_tokens + data.output_tokens)} />
           </div>
@@ -90,7 +90,7 @@ export function DiagnosticsPanel() {
                     {fmtTokens(m.input_tokens + m.output_tokens)} tok
                   </span>
                   <span className="font-mono" style={{ minWidth: "56px", textAlign: "right", color: m.cost_usd > 0 ? "var(--accent)" : "var(--text-muted)" }}>
-                    {fmtCost(m.cost_usd)}
+                    {formatCost(m.cost_usd, m.input_tokens + m.output_tokens) ?? <span title={t("diag.notPricedHint")}>{t("diag.notPriced")}</span>}
                   </span>
                 </div>
               ))}

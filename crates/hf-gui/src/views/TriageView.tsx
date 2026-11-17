@@ -86,17 +86,50 @@ function ScopedTriageView({ embedded, initialRunId, onNavigate }: { embedded: bo
   const isKernelRun = lastEngine === "syzkaller";
 
   const [hasRuns, setHasRuns] = useState<boolean | null>(null);
+  // Crash artifacts the project's runs retained. They become findings only
+  // after a scan, so an empty queue beside a nonzero count needs a scan, not
+  // a different filter.
+  const [retainedCrashes, setRetainedCrashes] = useState(0);
   useEffect(() => {
     let active = true;
     if (!activeProject) return;
     void getTransport().invoke<RunHistoryItem[]>("run_history", { project: activeProject }).then(runs => {
-      if (active && Array.isArray(runs)) setHasRuns(runs.length > 0);
+      if (!active || !Array.isArray(runs)) return;
+      setHasRuns(runs.length > 0);
+      setRetainedCrashes(runs.reduce((total, run) => total + (Number.isFinite(run.crashes) ? run.crashes : 0), 0));
     }).catch(() => {
       // Findings remain usable if the optional empty-state history check fails.
-      if (active) setHasRuns(null);
+      if (active) { setHasRuns(null); setRetainedCrashes(0); }
     });
     return () => { active = false; };
   }, [activeProject, reloadVersion, summary]);
+
+  // Whether the project has any finding at all, asked only when the filtered
+  // queue is empty beside retained crashes: resolved findings also empty the
+  // default queue, and those crashes were scanned.
+  const [totalFindings, setTotalFindings] = useState<number | null>(null);
+  const queueEmpty = !queueLoading && !queueError && queue.length === 0;
+  useEffect(() => {
+    let active = true;
+    if (!activeProject || !queueEmpty || retainedCrashes === 0) return;
+    const everything: FindingReviewFilter = { disposition: { mode: "all" }, origin: null, severity: null, run_id: null, target_id: null };
+    getTransport().invoke<FindingReviewItem[]>("finding_review_queue", { project: activeProject, filter: everything })
+      .then(items => { if (active) setTotalFindings(Array.isArray(items) ? items.length : null); })
+      .catch(() => { if (active) setTotalFindings(null); });
+    return () => { active = false; };
+  }, [activeProject, queueEmpty, retainedCrashes, reloadVersion]);
+  const unscanned = queueEmpty && retainedCrashes > 0 && totalFindings === 0;
+
+  // The push is offered only where a DefectDojo instance is configured, as on
+  // the Reports screen. Unknown configuration keeps it hidden.
+  const [defectDojoConfigured, setDefectDojoConfigured] = useState(false);
+  useEffect(() => {
+    let active = true;
+    getTransport().invoke<boolean>("defectdojo_configured")
+      .then(configured => { if (active) setDefectDojoConfigured(configured === true); })
+      .catch(() => { if (active) setDefectDojoConfigured(false); });
+    return () => { active = false; };
+  }, []);
 
   const serviceFilter = useMemo<FindingReviewFilter>(() => ({
     disposition: dispositionFilter.startsWith("only:")
@@ -408,7 +441,7 @@ function ScopedTriageView({ embedded, initialRunId, onNavigate }: { embedded: bo
           <Button variant="outline" size="sm" onClick={() => void exportSarif()} disabled={actionsBusy || !actionTarget || !latestActionsAllowed} title={disabledReason ?? t("triage.exportSarifTooltip")}>
             <Download size={14} />{t("triage.exportSarif")}
           </Button>
-          {activeFinding && <Button variant="outline" size="sm" onClick={() => void pushToDefectDojo()} disabled={actionsBusy || !latestActionsAllowed} loading={pushing} title={disabledReason ?? t("triage.pushTooltip")}>
+          {activeFinding && defectDojoConfigured && <Button variant="outline" size="sm" onClick={() => void pushToDefectDojo()} disabled={actionsBusy || !latestActionsAllowed} loading={pushing} title={disabledReason ?? t("triage.pushTooltip")}>
             {!pushing && <Share2 size={14} />}{t(pushing ? "triage.pushing" : "triage.pushToDefectDojo")}
           </Button>}
           {activeFinding && isTauriEnvironment() && <Button variant="outline" size="sm" onClick={() => void exportRepro()} disabled={actionsBusy || !latestActionsAllowed} title={disabledReason ?? t("triage.downloadRepro")}>
@@ -454,6 +487,10 @@ function ScopedTriageView({ embedded, initialRunId, onNavigate }: { embedded: bo
       {!queueLoading && !queueError && visibleQueue.length === 0 && <div className="surface-card text-sm text-text-muted" style={{ padding: "var(--space-xl)", textAlign: "center" }}>{hasRuns === false && !runFilter && !targetFilter && !search && !originFilter && !severityFilter ? <>
         <p className="font-medium">{t("gui.noCampaign")}</p><p>{t("gui.noCampaignHint")}</p>
         {onNavigate && <Button onClick={() => onNavigate("workflow")}>{t("gui.workflowAction")}</Button>}
+      </> : unscanned ? <>
+        <p className="font-medium">{t(retainedCrashes === 1 ? "triage.unscannedOne" : "triage.unscannedMany", { count: retainedCrashes })}</p>
+        <p>{t("triage.unscannedHint")}</p>
+        <Button variant="primary" onClick={() => void triage()} disabled={actionsBusy || !scanTarget || isKernelRun} loading={scanning}>{t("triage.scanForCrashes")}</Button>
       </> : <><p>{t("gui.noFindingsHint")}</p><Button onClick={() => { setSearch(""); setDispositionFilter("all"); setOriginFilter(""); setSeverityFilter(""); setRunFilter(""); setTargetFilter(""); }}>{t("gui.clearFilters")}</Button></>}</div>}
       {(visibleQueue.length > 0 || selection || detailLoading || detailError) && <div className="flex gap-3" style={{ animation: "slideInUp 0.2s ease" }}>
         <div className="flex flex-col gap-1 flex-1 min-w-0">

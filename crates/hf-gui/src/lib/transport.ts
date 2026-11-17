@@ -171,6 +171,8 @@ export interface FuzzerRunResult {
   termination: "completed" | "timed_out" | "cancelled";
   stagnation: string | null;
   auto_revert: unknown | null;
+  /** Single-process libFuzzer exited at its first crash with budget left. */
+  stopped_at_first_crash?: boolean;
 }
 
 export interface Transport {

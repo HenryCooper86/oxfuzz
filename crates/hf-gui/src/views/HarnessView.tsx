@@ -622,7 +622,7 @@ export function HarnessView({
             </div>
           )}
           <p className="text-xs text-text-muted mt-2">
-            {t("harness.generatedPreviously")}
+            {t(promotionStatus === "done" ? "harness.generatedPreviously" : "harness.existingNeedsApproval")}
           </p>
           <ManagedMutatorPanel key={`${project}:${selectedTarget}:${engine}:${existing.harness_id}:${reviewRefresh}:${smokeStatus}:${promotionStatus}`} project={project} target={selectedTarget} engine={engine} lang={lang}
             harnessId={existing.harness_id} disabled={selectionBlocked || buildBlocked || qualificationBusy}
