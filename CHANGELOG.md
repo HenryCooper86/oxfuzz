@@ -10,6 +10,58 @@ retain only the current release; older entries remain here as the record.
 
 ## Unreleased
 
+### Changed
+
+- Discover: `static` and other internal helper functions now count toward
+  what a target reaches, so an entry point that calls them is no longer
+  ranked as a leaf. A C or C++ function that takes only scalars is scored as
+  structured input rather than a raw byte buffer, and decoders,
+  deserializers, unpackers, and tokenizers are classified as parsers.
+  Scan scores of existing projects change on the next scan.
+- Harness: a project that keeps headers under a directory such as `include/`
+  and has no compile database now builds without a Build Doctor profile. The
+  include directories are inferred from the project's own `#include` lines,
+  and the draft is told which header declares the target and how to include
+  it. The draft prompt also rules out guessed headers, guessed macros,
+  rewritten input, and uninitialized output structures.
+- Harness (Rust): the draft is told the crate name the harness links, taken
+  from `Cargo.toml`. First drafts named the crate after the project folder
+  and failed to compile.
+- AI Assistant: when a harness's smoke test finds a crash, the assistant
+  triages it and reports it instead of drafting another harness. It used to
+  refine and re-smoke in a loop, asking for the same approval each time.
+- AI Assistant (browser mode): a running turn shows its tool calls and
+  results as they happen, as the desktop app does.
+
+### Added
+
+- `HF_APP_DIR` relocates application state (run journal, schedules, locks,
+  transcripts, knowledge index, default workspaces), which `HF_DATA_DIR`
+  never moved.
+
+### Fixed
+
+- Dashboard: Top Targets labels its figure as the scan score.
+- Run (browser mode): a libFuzzer run that exited at its first crash says
+  so, as the desktop app already did.
+- Fuzz this project: a run it starts now completes the Run stage.
+- Fuzz this project: a smoke test that finds a crash is reported as a finding
+  to review, with the known-findings approval, instead of "Could not prepare
+  the project".
+- Fuzzing Workflow and Progress: an approved harness completes the Harness
+  stage. It stayed "Next: Generate Harness" after a one-click preparation or
+  a known-findings approval.
+- Dashboard: a compiled revision that a later build replaced is no longer
+  counted as awaiting human approval; Recent Runs shows a run's crashes
+  before they are triaged, as Run History does; an approval with known
+  findings is named as such instead of "Ready for scheduled runs".
+- Run History: the trend tiles say Unknown when the latest run measured no
+  value, instead of 0 or an older run's number.
+- Triage: an empty queue beside unscanned crash artifacts offers the scan;
+  Push to DefectDojo is hidden when DefectDojo is not configured.
+- Diagnostics: usage of a model with no configured price reads "Not priced"
+  instead of $0.
+
 ## 0.9.6 - 2026-11-13
 
 ### Fixed
