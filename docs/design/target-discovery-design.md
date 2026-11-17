@@ -47,7 +47,13 @@ pub struct TargetCandidate {
 scans, so rediscovery of one definition keeps its id, while two same-named
 functions in different files of one project are distinct persisted targets.
 For analysis the scanner still unions same-named functions' call edges and
-keeps the maximum complexity (the call graph is name-keyed by design). Target
+keeps the maximum complexity (the call graph is name-keyed by design). Every
+C and C++ function definition enters that call graph, including the ones that
+are never candidates: `static` functions, anonymous-namespace and non-public
+members, zero-parameter functions, and `main`. A harness cannot call them,
+but the entry point that does call them reaches their code, and in C most of
+a parser's depth sits in `static` helpers; leaving them out made such an
+entry point look like a leaf. Target
 resolution accepts a `file::symbol` qualifier; a plain symbol matching more
 than one definition is rejected as ambiguous with the qualified forms listed.
 The older direct LLM ranking method matches `(relative_file, symbol)` pairs;
@@ -143,7 +149,13 @@ base score descending, then relative file, symbol, and target UUID ascending.
 ## 4. Fit Score Heuristics
 
 - Untrusted input entry point: +0.3
-- Parser/deserializer: +0.3
+- Parser/deserializer: +0.3. The name contains `parse`, `decode`, `deserial`,
+  `unmarshal`, `unpack`, `inflate`, `decompress`, or `tokeniz`.
+- Input surface: +0.2 for `Bytes`, +0.1 for `Structured`. A C or C++ function
+  is `Bytes` only when a parameter can receive the fuzzer's bytes directly (a
+  pointer, array, reference, or standard string, vector, span, or array
+  type); a function taking scalars only is `Structured`, as a Rust function
+  without a slice or string parameter already was.
 - High cyclomatic complexity: +0.2
 - No existing harness in project: +0.1
 - Uses raw pointers / unsafe / unsafe FFI: +0.1

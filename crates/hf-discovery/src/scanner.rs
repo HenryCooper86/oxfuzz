@@ -1060,18 +1060,6 @@ fn extract_functions(
         if node.kind() != "function_definition" {
             return;
         }
-        // Skip static functions: they have internal linkage and cannot be
-        // called from a separately-compiled harness translation unit.
-        if has_storage_class_specifier(node, src, "static") {
-            return;
-        }
-        // The C++ equivalents: an anonymous namespace gives internal linkage,
-        // and a private or protected member is not callable from a harness.
-        if lang == TargetLanguage::Cpp
-            && (in_anonymous_namespace(node) || !is_public_member(node, src))
-        {
-            return;
-        }
         let Some(declarator) = node.child_by_field_name("declarator") else {
             return;
         };
@@ -1080,17 +1068,12 @@ fn extract_functions(
             return;
         };
         let symbol = name_node.utf8_text(src.as_bytes()).unwrap_or("").to_owned();
-
-        let params = count_parameters(&declarator, src);
-        if params == 0 {
-            return;
-        }
-
-        let kind = classify(&symbol);
-        let input_surface = infer_input_surface(&declarator, src);
         let complexity = compute_complexity(node);
-        let fit_score = compute_fit_score(kind, input_surface, complexity, params);
-        // Record the call graph for interprocedural reachability analysis.
+        // Record the call graph for interprocedural reachability analysis
+        // before deciding whether this function is itself a candidate: a
+        // function a harness cannot call (internal linkage, no parameters,
+        // `main`) is still code its callers reach, and in C most of a
+        // parser's depth sits in `static` helpers.
         // Identity is name-keyed by design, so two same-named definitions in
         // different files share one slot: merge rather than overwrite, or the
         // second definition would silently drop the first's edges. The union
@@ -1103,13 +1086,33 @@ fn extract_functions(
         edges.extend(extract_calls(node, src));
         edges.sort();
         edges.dedup();
+
+        // Static functions have internal linkage and cannot be called from a
+        // separately-compiled harness translation unit.
+        if has_storage_class_specifier(node, src, "static") {
+            return;
+        }
+        // The C++ equivalents: an anonymous namespace gives internal linkage,
+        // and a private or protected member is not callable from a harness.
+        if lang == TargetLanguage::Cpp
+            && (in_anonymous_namespace(node) || !is_public_member(node, src))
+        {
+            return;
+        }
+        let params = count_parameters(&declarator, src);
+        if params == 0 {
+            return;
+        }
         // `main` is the program entry point: a harness cannot call it and the
         // engine driver defines its own. `LLVMFuzzer*` functions are the
-        // callbacks of a fuzz harness the project already ships. Both stay in
-        // the call graph above.
+        // callbacks of a fuzz harness the project already ships.
         if shipped_harness || symbol == "main" || symbol.starts_with("LLVMFuzzer") {
             return;
         }
+
+        let kind = classify(&symbol);
+        let input_surface = infer_input_surface(&declarator, src);
+        let fit_score = compute_fit_score(kind, input_surface, complexity, params);
         // Capture only the function prototype (declarator), not the whole
         // definition body -- otherwise the signature spans many lines and
         // downstream consumers (e.g. harness generation) leak body code.
@@ -1333,9 +1336,23 @@ fn is_void_placeholder(param: &tree_sitter::Node<'_>, src: &str) -> bool {
         .is_some_and(|t| t.kind() == "primitive_type" && t.utf8_text(src.as_bytes()) == Ok("void"))
 }
 
+/// Name fragments of functions that turn untrusted bytes into structure: the
+/// functions whose defects fuzzing finds most often. Matched anywhere in the
+/// lowercased symbol.
+const PARSER_NAME_PARTS: [&str; 8] = [
+    "parse",
+    "decode",
+    "deserial",
+    "unmarshal",
+    "unpack",
+    "inflate",
+    "decompress",
+    "tokeniz",
+];
+
 fn classify(symbol: &str) -> TargetKind {
     let lower = symbol.to_ascii_lowercase();
-    if lower.starts_with("parse_") || lower.contains("parse") {
+    if PARSER_NAME_PARTS.iter().any(|part| lower.contains(part)) {
         TargetKind::Parser
     } else if lower.contains("_ffi") || lower.starts_with("java_") {
         TargetKind::Ffi
@@ -1350,9 +1367,27 @@ fn infer_input_surface(declarator: &tree_sitter::Node<'_>, src: &str) -> InputSu
         InputSurface::File
     } else if text.contains("stdin") {
         InputSurface::Stdin
-    } else {
+    } else if takes_buffer(parameter_text(text)) {
         InputSurface::Bytes
+    } else {
+        // Scalars only: a harness has to carve the arguments out of the
+        // fuzzer's bytes, as it does for a Rust function without a slice.
+        InputSurface::Structured
     }
+}
+
+/// The parameter list of a function declarator's text, without the name.
+fn parameter_text(declarator: &str) -> &str {
+    declarator
+        .find('(')
+        .map_or(declarator, |open| &declarator[open..])
+}
+
+/// Whether a C or C++ parameter list can receive the fuzzer's bytes directly:
+/// through a pointer, an array, a reference, or a standard byte container.
+fn takes_buffer(params: &str) -> bool {
+    const CONTAINERS: [&str; 4] = ["string", "vector", "span", "array"];
+    params.contains(['*', '[', '&']) || CONTAINERS.iter().any(|name| params.contains(name))
 }
 
 fn compute_complexity(func: tree_sitter::Node) -> u32 {
@@ -1379,12 +1414,13 @@ fn compute_fit_score(
     if matches!(kind, TargetKind::Parser) {
         score += 0.3;
     }
-    if matches!(
-        input_surface,
-        InputSurface::Bytes | InputSurface::Structured
-    ) {
-        score += 0.2;
-    }
+    // A raw byte surface needs no input decoding in the harness; a structured
+    // one is still fuzzable, through a harness that builds the arguments.
+    score += match input_surface {
+        InputSurface::Bytes => 0.2,
+        InputSurface::Structured => 0.1,
+        InputSurface::File | InputSurface::Stdin => 0.0,
+    };
     score += (f64::from(complexity) / 100.0) * 0.2;
     if params >= 2 {
         score += 0.05;
@@ -1684,6 +1720,136 @@ mod tests {
             .map(|candidate| candidate.symbol.clone())
             .collect();
         assert_eq!(symbols, vec!["parse_a".to_owned(), "parse_b".to_owned()]);
+    }
+
+    #[test]
+    fn c_function_without_a_buffer_parameter_is_not_a_byte_surface() {
+        // `scale` cannot be handed the fuzzer's bytes: a harness has to carve
+        // integers out of them. It was scored as a raw byte surface, level
+        // with a real buffer consumer of the same size.
+        let candidates = c_candidates(
+            "int scale(int value, int factor) { if (factor > 3) return value; return value * factor; }\n\
+             int checksum(const unsigned char *data, unsigned long len) { if (len > 3) return data[0]; return data[0] * 2; }\n",
+        );
+        let by_symbol = |symbol: &str| {
+            candidates
+                .iter()
+                .find(|candidate| candidate.symbol == symbol)
+                .unwrap()
+        };
+        assert_eq!(by_symbol("scale").input_surface, InputSurface::Structured);
+        assert_eq!(by_symbol("checksum").input_surface, InputSurface::Bytes);
+        assert!(by_symbol("checksum").fit_score > by_symbol("scale").fit_score);
+    }
+
+    #[test]
+    fn cpp_reference_and_container_parameters_are_byte_surfaces() {
+        let candidates = cpp_candidates(
+            "#include <string>\n#include <vector>\n\
+             int a(const std::string &text) { return text.size() > 2; }\n\
+             int b(std::vector<unsigned char> bytes) { return bytes.size() > 2; }\n\
+             int c(std::string_view text) { return text.size() > 2; }\n\
+             int d(long count) { return count > 2; }\n",
+        );
+        let surface = |symbol: &str| {
+            candidates
+                .iter()
+                .find(|candidate| candidate.symbol == symbol)
+                .unwrap()
+                .input_surface
+        };
+        assert_eq!(surface("a"), InputSurface::Bytes);
+        assert_eq!(surface("b"), InputSurface::Bytes);
+        assert_eq!(surface("c"), InputSurface::Bytes);
+        assert_eq!(surface("d"), InputSurface::Structured);
+    }
+
+    #[test]
+    fn decoders_and_deserializers_are_classified_as_parsers() {
+        // The bundled `decode_utf8` example is a textbook parser target and
+        // was classified as a plain function because only "parse" matched.
+        for symbol in [
+            "decode_utf8",
+            "tlv_record_decode",
+            "deserialize_header",
+            "msg_unmarshal",
+            "unpack_frame",
+            "inflate_block",
+            "png_decompress",
+            "tokenize_line",
+            "parse_number",
+        ] {
+            assert_eq!(super::classify(symbol), TargetKind::Parser, "{symbol}");
+        }
+        for symbol in ["encode_utf8", "tlv_cursor_init", "checksum", "decorate"] {
+            assert_eq!(super::classify(symbol), TargetKind::Function, "{symbol}");
+        }
+    }
+
+    #[tokio::test]
+    async fn c_reachability_follows_internal_linkage_helpers() {
+        // Most of a C parser's depth sits in `static` helpers. They cannot be
+        // fuzzed directly, but the entry point that calls them reaches their
+        // code; leaving them out of the call graph made such an entry point
+        // look like a leaf and ranked it below shallower functions.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("msg.c"),
+            b"#include <stddef.h>\n\
+              static void reset_state(void) { }\n\
+              static int read_field(const unsigned char *p, size_t n) {\n\
+                  if (n < 2) return -1;\n\
+                  if (p[0] > 3) return -2;\n\
+                  return p[1];\n\
+              }\n\
+              int msg_decode(const unsigned char *p, size_t n) {\n\
+                  reset_state();\n\
+                  return read_field(p, n);\n\
+              }\n",
+        )
+        .unwrap();
+
+        let inventory = super::discover(dir.path(), TargetLanguage::C)
+            .await
+            .unwrap();
+
+        let symbols: Vec<_> = inventory
+            .candidates
+            .iter()
+            .map(|candidate| candidate.symbol.as_str())
+            .collect();
+        assert_eq!(symbols, ["msg_decode"], "helpers are not candidates");
+        let entry = &inventory.candidates[0];
+        assert_eq!(entry.reachable_functions, ["read_field", "reset_state"]);
+        assert!(
+            entry.accumulated_complexity > entry.complexity,
+            "the helpers' complexity counts toward what the entry point exercises"
+        );
+    }
+
+    #[tokio::test]
+    async fn cpp_reachability_follows_anonymous_namespace_helpers() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("cfg.cpp"),
+            b"#include <cstddef>\n\
+              namespace {\n\
+              int scan_key(const char *p, std::size_t n) {\n\
+                  if (n == 0) return -1;\n\
+                  return p[0] == '=' ? 1 : 0;\n\
+              }\n\
+              }\n\
+              int parse_config(const char *p, std::size_t n) { return scan_key(p, n); }\n",
+        )
+        .unwrap();
+
+        let inventory = super::discover(dir.path(), TargetLanguage::Cpp)
+            .await
+            .unwrap();
+
+        assert_eq!(inventory.candidates.len(), 1);
+        assert_eq!(inventory.candidates[0].symbol, "parse_config");
+        assert_eq!(inventory.candidates[0].reachable_functions, ["scan_key"]);
     }
 
     #[tokio::test]

@@ -32,7 +32,7 @@ and `oxfuzz fuzz` target auto-selection enforce that predicate directly.
 | Variant | Description | Example |
 | --- | --- | --- |
 | `Function` | A standalone function taking input. | `parse_value(const char*)` |
-| `Parser` | A parser entry point. | `json_parse(const char*, size_t)` |
+| `Parser` | A parser, decoder, or deserializer entry point, recognized by name (`parse`, `decode`, `deserial`, `unmarshal`, `unpack`, `inflate`, `decompress`, `tokeniz`). | `json_parse(const char*, size_t)` |
 | `ApiEntry` | A public API entry point of a library. | `SSL_read` |
 | `Ffi` | Foreign function interface boundary. | `Java_pkg_foo_nativeBar` |
 
@@ -40,8 +40,8 @@ and `oxfuzz fuzz` target auto-selection enforce that predicate directly.
 
 | Variant | Description | Harness strategy |
 | --- | --- | --- |
-| `Bytes` | Raw byte buffer. | `LLVMFuzzerTestOneInput(data, size)` |
-| `Structured` | Structured input (protobuf, JSON, custom). | Custom mutator / grammar. |
+| `Bytes` | Raw byte buffer: a pointer, array, reference, slice, or string parameter. | `LLVMFuzzerTestOneInput(data, size)` |
+| `Structured` | Structured input (protobuf, JSON, custom), or scalar parameters a harness must carve out of the fuzzer's bytes. | Custom mutator / grammar, or a harness that builds the arguments. |
 | `File` | Reads from a file path. | Temp-file harness. |
 | `Stdin` | Reads from stdin. | Pipe harness. |
 
