@@ -255,6 +255,10 @@ function ScopedTriageView({ embedded, initialRunId, onNavigate }: { embedded: bo
   const [expandedGroups, setExpandedGroups] = useState<ReadonlySet<string>>(() => new Set());
 
   const triage = useCallback(async () => {
+    // One scan at a time: the busy state that disables the scan controls is
+    // not rendered yet when a second press lands in the same tick, and two
+    // scans of one run can each retain the same crash.
+    if (activeScan.current) return;
     const request = ++scanRequest.current;
     const scanId = crypto.randomUUID();
     activeScan.current = scanId;

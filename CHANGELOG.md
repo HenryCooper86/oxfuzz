@@ -74,6 +74,10 @@ retain only the current release; older entries remain here as the record.
   value, instead of 0 or an older run's number.
 - Triage: an empty queue beside unscanned crash artifacts offers the scan;
   Push to DefectDojo is hidden when DefectDojo is not configured.
+- Triage: scanning a crash a second time under a different classification
+  (plain replay where an earlier scan used CASR) no longer adds a second
+  finding for the same crash file; the CASR classification is kept. A second
+  scan cannot be started while one is running.
 - Diagnostics: usage of a model with no configured price reads "Not priced"
   instead of $0.
 

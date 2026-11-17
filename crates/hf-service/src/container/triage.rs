@@ -42,6 +42,14 @@ impl ServiceContainer {
             String,
             std::collections::VecDeque<Arc<hf_core::crash::Crash>>,
         > = std::collections::HashMap::new();
+        // The run's retained findings by the input they were classified from.
+        // One crash file is one crash: a scan that classifies it another way
+        // (plain replay where an earlier scan had CASR) describes the same
+        // finding under a different signature.
+        let mut retained_by_input: std::collections::HashMap<
+            std::path::PathBuf,
+            Arc<hf_core::crash::Crash>,
+        > = std::collections::HashMap::new();
         if let Some(store) = self.store() {
             for retained in store
                 .list_crashes_by_run(run_id)
@@ -49,6 +57,9 @@ impl ServiceContainer {
                 .map_err(|error| ClassifiedError::Storage(error.to_string()))?
             {
                 let retained = Arc::new(retained);
+                retained_by_input
+                    .entry(retained.input_path.clone())
+                    .or_insert_with(|| Arc::clone(&retained));
                 if !retained.stack_signature.is_empty() {
                     retained_by_signature
                         .entry(retained.stack_signature.clone())
@@ -87,7 +98,7 @@ impl ServiceContainer {
             let exact = retained_crashes
                 .get(&(crash.stack_signature.clone(), crash.input_path.clone()))
                 .cloned();
-            let retained = exact.or_else(|| {
+            let by_signature = exact.or_else(|| {
                 let candidates = retained_by_signature.get_mut(&crash.stack_signature)?;
                 while let Some(candidate) = candidates.pop_front() {
                     if claimed.insert(candidate.id) {
@@ -96,7 +107,26 @@ impl ServiceContainer {
                 }
                 None
             });
-            if let Some(retained) = retained {
+            let same_input = if by_signature.is_none() {
+                retained_by_input
+                    .get(&crash.input_path)
+                    .filter(|candidate| claimed.insert(candidate.id))
+                    .cloned()
+            } else {
+                None
+            };
+            if let Some(retained) = &same_input {
+                // Keep a CASR classification over a later plain-replay one:
+                // the fallback's signature is a digest of raw sanitizer text.
+                if retained.casr.is_some() && crash.casr.is_none() {
+                    crash.stack_signature.clone_from(&retained.stack_signature);
+                    crash.kind = retained.kind;
+                    crash.summary.clone_from(&retained.summary);
+                    crash.casr.clone_from(&retained.casr);
+                    crash.origin = retained.origin;
+                }
+            }
+            if let Some(retained) = by_signature.or(same_input) {
                 crash.id = retained.id;
                 if self.scan_control.is_some() {
                     // Classification-only scans must not erase earlier enrichment.

@@ -1107,6 +1107,60 @@ async fn scan_cancel_reaps_sandbox_retains_completed_reports_and_cancels_queued_
 }
 
 #[tokio::test]
+async fn a_fallback_rescan_of_the_same_input_does_not_add_a_second_finding() {
+    // Seen in the desktop app: a scan classified the run's one crash through
+    // CASR, and a second scan that fell back to plain replay gave the same
+    // input a different signature. The queue then showed two findings for
+    // one crash file, the second with a raw sanitizer line as its summary.
+    let fixture = triage_fixture("scan-fallback-same-input", &["crash-one".to_owned()]).await;
+    let fallback = ServiceContainer::new(Arc::new(LegacyReplayRuntime::new(false)), None)
+        .with_store(fixture.store.clone());
+    let scan = || {
+        fallback.scan_crashes(
+            &fixture.project,
+            &fixture.symbol,
+            Uuid::new_v4(),
+            Arc::new(|_| {}),
+        )
+    };
+    // Learn the input path a scan records, then replace that row with the
+    // CASR-classified finding an earlier scan of the same input retained.
+    let plain = scan().await.unwrap();
+    assert_eq!(plain.len(), 1);
+    fixture
+        .store
+        .delete_crash(&plain[0].id.to_string())
+        .await
+        .unwrap();
+    let mut classified = plain[0].clone();
+    classified.id = Uuid::new_v4();
+    classified.stack_signature = "/work/utf8.c:31:27".to_owned();
+    classified.summary = "heap-buffer-overflow(read) at /work/utf8.c:31:27".to_owned();
+    classified.casr = Some(hf_core::crash::CasrReport {
+        severity: hf_core::crash::CrashSeverity::NotExploitable,
+        severity_short: "heap-buffer-overflow(read)".to_owned(),
+        crashline: "/work/utf8.c:31:27".to_owned(),
+        stack: vec!["decode_utf8".to_owned()],
+        cluster: None,
+    });
+    fixture.store.upsert_crash(&classified).await.unwrap();
+
+    scan().await.unwrap();
+
+    let retained = fixture
+        .store
+        .list_crashes_by_run(fixture.run_id)
+        .await
+        .unwrap();
+    assert_eq!(retained.len(), 1, "{retained:#?}");
+    assert_eq!(retained[0].id, classified.id);
+    // The better classification is kept, not replaced by the fallback's.
+    assert!(retained[0].casr.is_some());
+    assert_eq!(retained[0].stack_signature, classified.stack_signature);
+    assert_eq!(retained[0].summary, classified.summary);
+}
+
+#[tokio::test]
 async fn rescanning_does_not_erase_a_retained_ai_report() {
     let fixture = triage_fixture("scan-preserve-report", &["crash-one".to_owned()]).await;
     let pool = Arc::new(BugReportPool {

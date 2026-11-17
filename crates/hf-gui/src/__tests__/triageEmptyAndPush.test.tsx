@@ -86,3 +86,25 @@ it("offers the DefectDojo push only where DefectDojo is configured", () => {
   expect(triage).toContain('invoke<boolean>("defectdojo_configured")');
   expect(triage).toContain("{activeFinding && defectDojoConfigured && <Button");
 });
+
+it("starts one scan when both scan controls are pressed before the first has rendered as busy", async () => {
+  // Driving the installed app, a press on the empty-state scan and one on the
+  // header scan within the same second ran two scans of one run, and the
+  // second left a duplicate finding with an unparsed summary.
+  mocks.runs = [{ id: "r-1", crashes: 1 }];
+  let scans = 0;
+  mocks.invoke.mockImplementation(async (command: string) => {
+    if (command === "run_history") return mocks.runs;
+    if (command === "finding_review_queue") return [];
+    if (command === "defectdojo_configured") return false;
+    if (command === "scan_crashes") { scans += 1; return new Promise(() => {}); }
+    return null;
+  });
+  await mount();
+  const buttons = [...host.querySelectorAll("button")].filter(b => b.textContent?.trim() === "Scan for Crashes");
+  expect(buttons).toHaveLength(2);
+  // Both handlers run before React re-renders either button as disabled.
+  await act(async () => { buttons[0].click(); buttons[1].click(); });
+  await flush();
+  expect(scans).toBe(1);
+});
