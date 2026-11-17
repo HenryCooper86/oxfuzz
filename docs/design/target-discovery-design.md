@@ -148,17 +148,35 @@ base score descending, then relative file, symbol, and target UUID ascending.
 
 ## 4. Fit Score Heuristics
 
-- Untrusted input entry point: +0.3
-- Parser/deserializer: +0.3. The name contains `parse`, `decode`, `deserial`,
-  `unmarshal`, `unpack`, `inflate`, `decompress`, or `tokeniz`.
-- Input surface: +0.2 for `Bytes`, +0.1 for `Structured`. A C or C++ function
-  is `Bytes` only when a parameter can receive the fuzzer's bytes directly (a
-  pointer, array, reference, or standard string, vector, span, or array
-  type); a function taking scalars only is `Structured`, as a Rust function
-  without a slice or string parameter already was.
-- High cyclomatic complexity: +0.2
-- No existing harness in project: +0.1
-- Uses raw pointers / unsafe / unsafe FFI: +0.1
+The weights sum to 1.0, so the best target of a large project is not tied
+with dozens of others at a clamped maximum. Scanning zstd 1.5.7 under the
+earlier weights put fifteen internal stage decoders at exactly 1.0 ahead of
+`ZSTD_decompress`.
+
+| Signal | Weight |
+| --- | --- |
+| Has parameters (base) | 0.15 |
+| Parser, decoder, or deserializer: the name contains `parse`, `decode`, `deserial`, `unmarshal`, `unpack`, `inflate`, `decompress`, or `tokeniz` | 0.25 |
+| Input surface `Bytes` | 0.15 |
+| Input surface `Structured` | 0.05 |
+| A byte buffer immediately followed by an integer parameter, the `(data, len)` signature a harness calls with no decoding; a Rust, Go, or Python slice or string counts, since it carries its length | 0.10 |
+| Complexity, scaled from 0 to 100 | up to 0.10 |
+| Two or more parameters | 0.02 |
+| Reachable complexity beyond the function's own, logarithmic, saturating at 2000 | up to 0.15 |
+| Declared in a public header: one nearer the project root than the definition, or under `include`, `inc`, `api`, or `public`. Such a `Function` is classified `ApiEntry` | 0.08 |
+
+A C or C++ parameter is a byte surface only when it is a pointer, array, or
+reference to a byte type (`char`, `void`, `uint8_t`, `BYTE`, ...) or a
+standard string, vector, span, or array. A pointer to the project's own state
+(`DState *s`) is `Structured`: a harness has to build it.
+
+Candidates exclude what a harness cannot call or should not start from:
+`static` functions, including those whose specifier is spelled through a
+macro containing `INLINE` or ending in `STATIC` (an export macro containing
+`API` or `EXPORT` is not one); anonymous-namespace and non-public members;
+zero-parameter functions; `main`; and C functions defined in a `.h` file.
+All of them stay in the call graph. A definition written
+`ret MACRO(name) (params)`, as bzip2 writes its API, is named `name`.
 
 ## 5. Languages
 

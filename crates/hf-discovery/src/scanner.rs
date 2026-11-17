@@ -415,7 +415,14 @@ fn extract_rust_functions(src: &str, path: &Path, out: &mut Vec<TargetCandidate>
             TargetKind::Function
         };
         let complexity = rust_body_complexity(&src[line_start..]);
-        let fit_score = compute_fit_score(kind, input_surface, complexity, param_count);
+        let fit_score = compute_fit_score(
+            kind,
+            input_surface,
+            complexity,
+            param_count,
+            // A slice or string carries its own length.
+            input_surface == InputSurface::Bytes,
+        );
         let signature = line.trim().trim_end_matches('{').trim().to_owned();
         out.push(TargetCandidate {
             id: Uuid::new_v4(),
@@ -525,7 +532,14 @@ fn extract_go_functions(src: &str, path: &Path, out: &mut Vec<TargetCandidate>) 
             format!("{receiver}.{name}")
         };
         let complexity = go_body_complexity(decl);
-        let fit_score = compute_fit_score(kind, input_surface, complexity, param_count);
+        let fit_score = compute_fit_score(
+            kind,
+            input_surface,
+            complexity,
+            param_count,
+            // A slice or string carries its own length.
+            input_surface == InputSurface::Bytes,
+        );
         let signature = line.trim().trim_end_matches('{').trim().to_owned();
         out.push(TargetCandidate {
             id: Uuid::new_v4(),
@@ -672,7 +686,14 @@ fn extract_python_functions(src: &str, path: &Path, out: &mut Vec<TargetCandidat
             None => name,
         };
         let complexity = python_body_complexity(decl, indent);
-        let fit_score = compute_fit_score(kind, input_surface, complexity, param_count);
+        let fit_score = compute_fit_score(
+            kind,
+            input_surface,
+            complexity,
+            param_count,
+            // A slice or string carries its own length.
+            input_surface == InputSurface::Bytes,
+        );
         let signature = line.trim().trim_end_matches(':').trim().to_owned();
         out.push(TargetCandidate {
             id: Uuid::new_v4(),
@@ -945,6 +966,9 @@ fn scan_c(root: &Path, lang: TargetLanguage) -> Result<ScanResult, ClassifiedErr
     let mut complexity_map: std::collections::HashMap<String, u32> =
         std::collections::HashMap::new();
     let mut signals: Vec<crate::enrichment::EnrichmentSignal> = Vec::new();
+    // Header file -> the function names it declares, for the public-entry bonus.
+    let mut header_declarations: std::collections::HashMap<String, Vec<PathBuf>> =
+        std::collections::HashMap::new();
     // Sorted, not raw walk order: readdir order is filesystem-dependent, and
     // candidate order must be identical on every machine.
     for relative in discoverable_source_files(root, lang)? {
@@ -975,9 +999,18 @@ fn scan_c(root: &Path, lang: TargetLanguage) -> Result<ScanResult, ClassifiedErr
         // Same tree, same source: the marginal cost of a signal is a query
         // cursor pass, not another parse.
         signals.extend(analyze_unit(&tree, &src, &relative, lang));
+        if is_header(&relative) {
+            for name in called_or_declared_names(&src) {
+                header_declarations
+                    .entry(name.to_owned())
+                    .or_default()
+                    .push(relative.clone());
+            }
+        }
     }
     // Annotate candidates with reachability + accumulated complexity.
     crate::reachability::analyze(&mut candidates, &calls, &complexity_map);
+    mark_public_entry_points(&mut candidates, root, &header_declarations);
     // Project-only call adjacency (drop library/self edges) for the call-tree view.
     let mut call_graph: std::collections::HashMap<String, Vec<String>> =
         std::collections::HashMap::new();
@@ -994,6 +1027,89 @@ fn scan_c(root: &Path, lang: TargetLanguage) -> Result<ScanResult, ClassifiedErr
         }
     }
     Ok((candidates, call_graph, signals))
+}
+
+/// Score added to a function its project declares in a public header.
+const PUBLIC_ENTRY_BONUS: f64 = 0.08;
+
+/// Directory names that hold a project's public headers.
+const PUBLIC_HEADER_DIRS: [&str; 4] = ["include", "inc", "api", "public"];
+
+fn is_header(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| matches!(extension, "h" | "hh" | "hpp" | "hxx"))
+}
+
+/// The function names `text` declares or calls: every identifier followed by
+/// `(`, allowing whitespace, and every identifier closing a macro wrapper as
+/// in `API(name) (`.
+fn called_or_declared_names(text: &str) -> Vec<&str> {
+    let bytes = text.as_bytes();
+    let is_identifier = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    let skip_space = |mut at: usize| {
+        while bytes.get(at).is_some_and(u8::is_ascii_whitespace) {
+            at += 1;
+        }
+        at
+    };
+    let mut names = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        if !is_identifier(bytes[at]) {
+            at += 1;
+            continue;
+        }
+        let start = at;
+        while at < bytes.len() && is_identifier(bytes[at]) {
+            at += 1;
+        }
+        let after = skip_space(at);
+        let opens = bytes.get(after) == Some(&b'(');
+        let wrapped =
+            bytes.get(after) == Some(&b')') && bytes.get(skip_space(after + 1)) == Some(&b'(');
+        if opens || wrapped {
+            names.push(&text[start..at]);
+        }
+    }
+    names
+}
+
+/// Raise the candidates a project exposes: those declared in a header that
+/// sits nearer the project root than the definition, or under a directory
+/// conventionally holding public headers. In a library whose stage decoders
+/// share the entry point's buffer signature, this is what tells them apart.
+fn mark_public_entry_points(
+    candidates: &mut [TargetCandidate],
+    root: &Path,
+    header_declarations: &std::collections::HashMap<String, Vec<PathBuf>>,
+) {
+    for candidate in candidates {
+        let Some(headers) = header_declarations.get(&candidate.symbol) else {
+            continue;
+        };
+        let definition = candidate
+            .location
+            .file
+            .strip_prefix(root)
+            .unwrap_or(&candidate.location.file);
+        let depth = definition.components().count();
+        let public = headers.iter().any(|header| {
+            header.components().count() < depth
+                || header.components().any(|component| {
+                    component
+                        .as_os_str()
+                        .to_str()
+                        .is_some_and(|name| PUBLIC_HEADER_DIRS.contains(&name))
+                })
+        });
+        if public {
+            candidate.fit_score = (candidate.fit_score + PUBLIC_ENTRY_BONUS).clamp(0.0, 1.0);
+            if candidate.kind == TargetKind::Function {
+                candidate.kind = TargetKind::ApiEntry;
+            }
+        }
+    }
 }
 
 /// Native static-analysis signals for one translation unit.
@@ -1063,7 +1179,13 @@ fn extract_functions(
         let Some(declarator) = node.child_by_field_name("declarator") else {
             return;
         };
-        let name_node = function_name_node(declarator).or_else(|| find_identifier(&declarator));
+        // `int API(name) (params)` parses as a function `API` returning a
+        // function: the real name is the macro's argument and the real
+        // parameters are the outer list.
+        let wrapped = macro_wrapped_name(declarator);
+        let name_node = wrapped
+            .or_else(|| function_name_node(declarator))
+            .or_else(|| find_identifier(&declarator));
         let Some(name_node) = name_node else {
             return;
         };
@@ -1088,8 +1210,18 @@ fn extract_functions(
         edges.dedup();
 
         // Static functions have internal linkage and cannot be called from a
-        // separately-compiled harness translation unit.
-        if has_storage_class_specifier(node, src, "static") {
+        // separately-compiled harness translation unit. Projects often spell
+        // the specifier through a macro (`MEM_STATIC`, `FORCE_INLINE`).
+        if has_storage_class_specifier(node, src, "static")
+            || has_linkage_macro(node, name_node, src)
+        {
+            return;
+        }
+        // A C function defined in a header is an inline helper compiled into
+        // every unit that includes it, not an entry point of the project.
+        if lang == TargetLanguage::C
+            && path.extension().and_then(|extension| extension.to_str()) == Some("h")
+        {
             return;
         }
         // The C++ equivalents: an anonymous namespace gives internal linkage,
@@ -1099,10 +1231,18 @@ fn extract_functions(
         {
             return;
         }
-        let params = count_parameters(&declarator, src);
+        let parameter_list = if wrapped.is_some() {
+            declarator.child_by_field_name("parameters")
+        } else {
+            find_parameter_list(declarator)
+        };
+        let params = parameter_list.map_or(0, |list| count_parameter_list(&list, src));
         if params == 0 {
             return;
         }
+        let parameter_text = parameter_list
+            .and_then(|list| list.utf8_text(src.as_bytes()).ok())
+            .unwrap_or("");
         // `main` is the program entry point: a harness cannot call it and the
         // engine driver defines its own. `LLVMFuzzer*` functions are the
         // callbacks of a fuzz harness the project already ships.
@@ -1111,8 +1251,14 @@ fn extract_functions(
         }
 
         let kind = classify(&symbol);
-        let input_surface = infer_input_surface(&declarator, src);
-        let fit_score = compute_fit_score(kind, input_surface, complexity, params);
+        let input_surface = infer_input_surface(parameter_text);
+        let fit_score = compute_fit_score(
+            kind,
+            input_surface,
+            complexity,
+            params,
+            has_buffer_and_length(parameter_text),
+        );
         // Capture only the function prototype (declarator), not the whole
         // definition body -- otherwise the signature spans many lines and
         // downstream consumers (e.g. harness generation) leak body code.
@@ -1282,45 +1428,108 @@ fn find_identifier<'a>(node: &tree_sitter::Node<'a>) -> Option<tree_sitter::Node
     None
 }
 
-fn count_parameters(declarator: &tree_sitter::Node<'_>, src: &str) -> usize {
+/// The first parameter list under a function declarator.
+fn find_parameter_list(declarator: tree_sitter::Node<'_>) -> Option<tree_sitter::Node<'_>> {
     let mut cursor = declarator.walk();
+    if !cursor.goto_first_child() {
+        return None;
+    }
+    loop {
+        let child = cursor.node();
+        if child.kind() == "parameter_list" {
+            return Some(child);
+        }
+        // A function declarator may wrap another declarator.
+        if let Some(nested) = find_parameter_list(child) {
+            return Some(nested);
+        }
+        if !cursor.goto_next_sibling() {
+            return None;
+        }
+    }
+}
+
+/// How many arguments a parameter list declares.
+///
+/// A prototype `(void)` parses as a single `parameter_declaration` whose type is
+/// the primitive `void` with no declarator. It carries no argument, so it
+/// counts as zero -- otherwise the `params == 0` filter never fires and
+/// `(void)` functions become bogus fuzz candidates.
+fn count_parameter_list(list: &tree_sitter::Node<'_>, src: &str) -> usize {
+    let mut count = 0;
+    let mut cursor = list.walk();
     if cursor.goto_first_child() {
         loop {
-            let child = cursor.node();
-            if child.kind() == "parameter_list" {
-                let mut count = 0;
-                let mut pc = child.walk();
-                if pc.goto_first_child() {
-                    loop {
-                        // A prototype `(void)` parses as a single
-                        // parameter_declaration whose type is the primitive
-                        // `void` with no declarator. It carries no argument, so
-                        // it must count as zero -- otherwise the `params == 0`
-                        // filter never fires and `(void)` functions become
-                        // bogus fuzz candidates.
-                        if pc.node().kind() == "parameter_declaration"
-                            && !is_void_placeholder(&pc.node(), src)
-                        {
-                            count += 1;
-                        }
-                        if !pc.goto_next_sibling() {
-                            break;
-                        }
-                    }
-                }
-                return count;
-            }
-            // Recurse (function_declarator may wrap another declarator).
-            let nested = count_parameters(&child, src);
-            if nested > 0 {
-                return nested;
+            if cursor.node().kind() == "parameter_declaration"
+                && !is_void_placeholder(&cursor.node(), src)
+            {
+                count += 1;
             }
             if !cursor.goto_next_sibling() {
                 break;
             }
         }
     }
-    0
+    count
+}
+
+/// The function name of a definition written `ret MACRO(name) (params)`.
+///
+/// The grammar reads it as a function `MACRO` whose parameter list is the one
+/// bare type name `name`, returning a function. Only that exact form matches,
+/// so an ordinary function returning a function pointer is left alone.
+fn macro_wrapped_name(declarator: tree_sitter::Node<'_>) -> Option<tree_sitter::Node<'_>> {
+    if declarator.kind() != "function_declarator" {
+        return None;
+    }
+    let inner = declarator.child_by_field_name("declarator")?;
+    if inner.kind() != "function_declarator"
+        || inner.child_by_field_name("declarator")?.kind() != "identifier"
+    {
+        return None;
+    }
+    let arguments = inner.child_by_field_name("parameters")?;
+    let mut cursor = arguments.walk();
+    let mut only = None;
+    for child in arguments.named_children(&mut cursor) {
+        if only.is_some() || child.kind() != "parameter_declaration" {
+            return None;
+        }
+        only = Some(child);
+    }
+    let only = only?;
+    if only.child_by_field_name("declarator").is_some() {
+        return None;
+    }
+    let name = only.child_by_field_name("type")?;
+    (name.kind() == "type_identifier").then_some(name)
+}
+
+/// Whether the text before a definition's name carries a macro that spells
+/// internal linkage or inlining, such as `MEM_STATIC` or `FORCE_INLINE`.
+///
+/// An export macro (`ZSTDLIB_STATIC_API`) names the opposite and is excluded.
+fn has_linkage_macro(
+    definition: tree_sitter::Node<'_>,
+    name: tree_sitter::Node<'_>,
+    src: &str,
+) -> bool {
+    let prefix = src
+        .get(definition.start_byte()..name.start_byte())
+        .unwrap_or("");
+    prefix
+        .split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+        .filter(|token| !token.is_empty())
+        .any(|token| {
+            let upper = token.to_ascii_uppercase();
+            // A lowercase `static`/`inline` is a keyword the grammar reports.
+            token
+                .chars()
+                .any(|character| character.is_ascii_uppercase())
+                && !upper.contains("API")
+                && !upper.contains("EXPORT")
+                && (upper.contains("INLINE") || upper.ends_with("STATIC"))
+        })
 }
 
 /// Whether a `parameter_declaration` is the `void` placeholder of a `(void)`
@@ -1361,33 +1570,86 @@ fn classify(symbol: &str) -> TargetKind {
     }
 }
 
-fn infer_input_surface(declarator: &tree_sitter::Node<'_>, src: &str) -> InputSurface {
-    let text = declarator.utf8_text(src.as_bytes()).unwrap_or("");
-    if text.contains("FILE") {
+fn infer_input_surface(parameters: &str) -> InputSurface {
+    if parameters.contains("FILE") {
         InputSurface::File
-    } else if text.contains("stdin") {
+    } else if parameters.contains("stdin") {
         InputSurface::Stdin
-    } else if takes_buffer(parameter_text(text)) {
+    } else if split_parameters(parameters).any(is_buffer_parameter) {
         InputSurface::Bytes
     } else {
-        // Scalars only: a harness has to carve the arguments out of the
-        // fuzzer's bytes, as it does for a Rust function without a slice.
+        // Scalars, or pointers to the project's own state: a harness has to
+        // build the arguments from the fuzzer's bytes, as it does for a Rust
+        // function without a slice.
         InputSurface::Structured
     }
 }
 
-/// The parameter list of a function declarator's text, without the name.
-fn parameter_text(declarator: &str) -> &str {
-    declarator
-        .find('(')
-        .map_or(declarator, |open| &declarator[open..])
+/// The parameters of a parenthesized list, split at top-level commas.
+fn split_parameters(parameters: &str) -> impl Iterator<Item = &str> {
+    let inner = parameters
+        .trim()
+        .strip_prefix('(')
+        .and_then(|rest| rest.strip_suffix(')'))
+        .unwrap_or(parameters);
+    let mut depth = 0_i32;
+    inner
+        .split(move |character: char| {
+            match character {
+                '(' | '<' | '[' => depth += 1,
+                ')' | '>' | ']' => depth -= 1,
+                _ => {}
+            }
+            character == ',' && depth == 0
+        })
+        .map(str::trim)
+        .filter(|parameter| !parameter.is_empty())
 }
 
-/// Whether a C or C++ parameter list can receive the fuzzer's bytes directly:
-/// through a pointer, an array, a reference, or a standard byte container.
-fn takes_buffer(params: &str) -> bool {
-    const CONTAINERS: [&str; 4] = ["string", "vector", "span", "array"];
-    params.contains(['*', '[', '&']) || CONTAINERS.iter().any(|name| params.contains(name))
+/// Type names whose pointer, array, or reference is a run of raw bytes.
+const BYTE_TYPES: [&str; 12] = [
+    "char", "void", "uint8_t", "int8_t", "u8", "uint8", "byte", "uchar", "bytef", "u_char",
+    "wchar_t", "char8_t",
+];
+
+/// Standard containers that own a run of bytes.
+const BYTE_CONTAINERS: [&str; 6] = [
+    "string",
+    "string_view",
+    "u8string",
+    "vector",
+    "span",
+    "array",
+];
+
+/// Whether one C or C++ parameter can receive the fuzzer's bytes directly: a
+/// pointer, array, or reference to a byte type, or a standard byte container.
+/// A pointer to the project's own state (`DState *s`) cannot.
+fn is_buffer_parameter(parameter: &str) -> bool {
+    let lower = parameter.to_ascii_lowercase();
+    let mut tokens = lower
+        .split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+        .filter(|token| !token.is_empty());
+    if tokens.clone().any(|token| BYTE_CONTAINERS.contains(&token)) {
+        return true;
+    }
+    parameter.contains(['*', '[', '&']) && tokens.any(|token| BYTE_TYPES.contains(&token))
+}
+
+/// Whether a parameter list pairs a byte buffer with an integer right after
+/// it: the `(data, len)` signature a harness can call with no decoding.
+fn has_buffer_and_length(parameters: &str) -> bool {
+    let list: Vec<&str> = split_parameters(parameters).collect();
+    list.windows(2).any(|pair| {
+        is_buffer_parameter(pair[0]) && !pair[1].contains(['*', '[', '&']) && {
+            let lower = pair[1].to_ascii_lowercase();
+            [
+                "size_t", "int", "long", "unsigned", "uint", "u32", "u64", "short",
+            ]
+            .iter()
+            .any(|integer| lower.contains(integer))
+        }
+    })
 }
 
 fn compute_complexity(func: tree_sitter::Node) -> u32 {
@@ -1404,26 +1666,34 @@ fn compute_complexity(func: tree_sitter::Node) -> u32 {
     score.min(100)
 }
 
+/// The heuristic score before the reachability and public-declaration
+/// bonuses (`crate::reachability`). The weights sum to 0.77, which with those
+/// two bonuses (0.15 and 0.08) tops out at 1.0, so the best target of a large
+/// project is not tied with dozens of others at a clamped maximum.
 fn compute_fit_score(
     kind: TargetKind,
     input_surface: InputSurface,
     complexity: u32,
     params: usize,
+    buffer_and_length: bool,
 ) -> f64 {
-    let mut score = 0.3; // base: has params + untrusted input potential
+    let mut score = 0.15; // base: has parameters
     if matches!(kind, TargetKind::Parser) {
-        score += 0.3;
+        score += 0.25;
     }
     // A raw byte surface needs no input decoding in the harness; a structured
     // one is still fuzzable, through a harness that builds the arguments.
     score += match input_surface {
-        InputSurface::Bytes => 0.2,
-        InputSurface::Structured => 0.1,
+        InputSurface::Bytes => 0.15,
+        InputSurface::Structured => 0.05,
         InputSurface::File | InputSurface::Stdin => 0.0,
     };
-    score += (f64::from(complexity) / 100.0) * 0.2;
+    if buffer_and_length {
+        score += 0.10;
+    }
+    score += (f64::from(complexity) / 100.0) * 0.10;
     if params >= 2 {
-        score += 0.05;
+        score += 0.02;
     }
     score.clamp(0.0, 1.0)
 }
@@ -1784,6 +2054,162 @@ mod tests {
         for symbol in ["encode_utf8", "tlv_cursor_init", "checksum", "decorate"] {
             assert_eq!(super::classify(symbol), TargetKind::Function, "{symbol}");
         }
+    }
+
+    // The next tests come from scanning real bzip2 1.0.8 and zstd 1.5.7.
+
+    #[test]
+    fn a_macro_wrapped_definition_is_named_by_its_function_not_the_macro() {
+        // bzip2 defines its whole public API as `int BZ_API(name) (params)`.
+        // Every one of those functions was recorded as the target `BZ_API`.
+        let candidates = c_candidates(
+            "int BZ_API(BZ2_bzBuffToBuffDecompress) ( char* dest, unsigned int* destLen, char* source, unsigned int sourceLen ) { return source[0] + dest[0]; }\n\
+             int BZ_API(BZ2_bzDecompressEnd) ( bz_stream *strm ) { return strm != 0; }\n",
+        );
+        let symbols: Vec<_> = candidates.iter().map(|c| c.symbol.as_str()).collect();
+        assert_eq!(
+            symbols,
+            ["BZ2_bzBuffToBuffDecompress", "BZ2_bzDecompressEnd"]
+        );
+        assert_eq!(candidates[0].input_surface, InputSurface::Bytes);
+    }
+
+    #[test]
+    fn linkage_hidden_behind_a_macro_still_excludes_a_helper() {
+        // zstd spells `static inline` as MEM_STATIC, FORCE_INLINE_TEMPLATE and
+        // HINT_INLINE; those helpers filled the top of the ranking.
+        let candidates = c_candidates(
+            "MEM_STATIC unsigned a(const unsigned char *p, unsigned long n) { return p[0] + n; }\n\
+             FORCE_INLINE_TEMPLATE unsigned b(const unsigned char *p, unsigned long n) { return p[0] + n; }\n\
+             HINT_INLINE unsigned c(const unsigned char *p, unsigned long n) { return p[0] + n; }\n\
+             ZSTDLIB_API unsigned d(const unsigned char *p, unsigned long n) { return p[0] + n; }\n\
+             unsigned e(const unsigned char *p, unsigned long n) { return a(p, n) + b(p, n) + c(p, n); }\n",
+        );
+        let symbols: Vec<_> = candidates.iter().map(|c| c.symbol.as_str()).collect();
+        assert_eq!(symbols, ["d", "e"]);
+    }
+
+    #[test]
+    fn a_pointer_to_state_is_not_a_byte_buffer() {
+        // `BZ2_decompress(DState* s)` outranked the buffer-to-buffer entry
+        // point: any pointer counted as the fuzzer's bytes.
+        let candidates = c_candidates(
+            "int step(DState* s) { return s->pos > 3; }\n\
+             int both(FSE_DState_t* state, BIT_DStream_t* bits) { return state != bits; }\n\
+             unsigned long plain(void* dst, unsigned long cap, const void* src, unsigned long n) { return cap + n; }\n\
+             int text(const char *s) { return s[0]; }\n\
+             int bytes(const BYTE* ip, const BYTE* iend) { return ip < iend; }\n",
+        );
+        let surface = |symbol: &str| {
+            candidates
+                .iter()
+                .find(|candidate| candidate.symbol == symbol)
+                .unwrap()
+                .input_surface
+        };
+        assert_eq!(surface("step"), InputSurface::Structured);
+        assert_eq!(surface("both"), InputSurface::Structured);
+        assert_eq!(surface("plain"), InputSurface::Bytes);
+        assert_eq!(surface("text"), InputSurface::Bytes);
+        assert_eq!(surface("bytes"), InputSurface::Bytes);
+    }
+
+    #[test]
+    fn a_buffer_with_its_length_outranks_a_lone_pointer() {
+        let candidates = c_candidates(
+            "int with_len(const unsigned char *data, unsigned long len) { if (len > 3) return data[0]; return 1; }\n\
+             int lone(const unsigned char *data) { if (data[1] > 3) return data[0]; return 1; }\n",
+        );
+        assert!(
+            candidates[0].fit_score > candidates[1].fit_score,
+            "{candidates:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_library_entry_point_outranks_its_internal_decoders() {
+        // The shape of zstd: the public function is declared in the header at
+        // the library root and reaches everything; the stage decoders have the
+        // same buffer signature and are declared in an internal header. All
+        // of them scored exactly 1.0, in path order.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("common")).unwrap();
+        std::fs::create_dir_all(root.join("decompress")).unwrap();
+        std::fs::write(
+            root.join("lib.h"),
+            b"unsigned long LIB_decompress(void* dst, unsigned long cap, const void* src, unsigned long n);\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("common/stage.h"),
+            b"unsigned long STG_decompress_body(void* dst, unsigned long cap, const void* src, unsigned long n);\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("common/stage.c"),
+            b"#include \"stage.h\"\n\
+              unsigned long STG_decompress_body(void* dst, unsigned long cap, const void* src, unsigned long n) {\n\
+                  const unsigned char *p = src; unsigned long i = 0;\n\
+                  while (i < n && i < cap) { if (p[i] > 3) i += 2; else i += 1; }\n\
+                  return i;\n\
+              }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("decompress/lib_decompress.c"),
+            b"#include \"../lib.h\"\n#include \"../common/stage.h\"\n\
+              unsigned long LIB_decompress(void* dst, unsigned long cap, const void* src, unsigned long n) {\n\
+                  if (n < 4) return 0;\n\
+                  return STG_decompress_body(dst, cap, src, n);\n\
+              }\n",
+        )
+        .unwrap();
+
+        let inventory = super::discover(root, TargetLanguage::C).await.unwrap();
+
+        let score = |symbol: &str| {
+            inventory
+                .candidates
+                .iter()
+                .find(|candidate| candidate.symbol == symbol)
+                .unwrap()
+                .fit_score
+        };
+        assert!(
+            score("LIB_decompress") > score("STG_decompress_body"),
+            "{:?}",
+            inventory.candidates
+        );
+        assert!(
+            score("LIB_decompress") < 1.0,
+            "the top score keeps headroom"
+        );
+    }
+
+    #[tokio::test]
+    async fn c_functions_defined_in_headers_are_not_candidates() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("bits.h"),
+            b"unsigned read_bits(const unsigned char *p, unsigned long n) { return p[0] + n; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("use.c"),
+            b"#include \"bits.h\"\nunsigned parse_all(const unsigned char *p, unsigned long n) { return read_bits(p, n); }\n",
+        )
+        .unwrap();
+        let inventory = super::discover(dir.path(), TargetLanguage::C)
+            .await
+            .unwrap();
+        let symbols: Vec<_> = inventory
+            .candidates
+            .iter()
+            .map(|c| c.symbol.as_str())
+            .collect();
+        assert_eq!(symbols, ["parse_all"]);
+        assert_eq!(inventory.candidates[0].reachable_functions, ["read_bits"]);
     }
 
     #[tokio::test]

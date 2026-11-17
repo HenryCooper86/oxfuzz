@@ -14,6 +14,9 @@ use hf_core::target::TargetCandidate;
 /// size); complexity is accumulated over the *full* reachable set regardless.
 const MAX_REACHABLE_STORED: usize = 64;
 
+/// Reachable complexity at which the reachability bonus stops growing.
+const REACH_SATURATION: f64 = 2000.0;
+
 /// Annotate each candidate with its reachable project functions and the
 /// accumulated complexity of that set.
 ///
@@ -42,7 +45,10 @@ pub fn analyze(
         // exercises more code, so rank it up (a high-leverage "blocker"). Bounded
         // so it refines rather than dominates the existing heuristic score.
         let unlocked = f64::from(accumulated.saturating_sub(candidate.complexity));
-        let bonus = (unlocked / 200.0).min(0.15);
+        // Logarithmic, so the entry point of a large library (thousands of
+        // reachable complexity) still outranks a mid-level function (hundreds)
+        // instead of both hitting a linear cap.
+        let bonus = 0.15 * ((1.0 + unlocked).ln() / (1.0 + REACH_SATURATION).ln()).min(1.0);
         candidate.fit_score = (candidate.fit_score + bonus).clamp(0.0, 1.0);
     }
 }
