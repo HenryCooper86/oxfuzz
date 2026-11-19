@@ -16,7 +16,12 @@ use serde::Deserialize;
 pub fn bug_report_from_response(crash: &Crash, response: &str) -> BugReport {
     let Some(report) = parse_report_json(response) else {
         return BugReport {
-            title: format!("{:?} in target", crash.kind),
+            // The crash's own summary names the class and the location.
+            title: if crash.summary.trim().is_empty() {
+                legacy_fallback_title(crash)
+            } else {
+                crash.summary.clone()
+            },
             summary: crash.summary.clone(),
             repro_steps: format!(
                 "Run fuzzer with crash input: {}",
@@ -41,6 +46,18 @@ pub fn bug_report_from_response(crash: &Crash, response: &str) -> BugReport {
         root_cause: non_empty(&report.root_cause),
         suggested_fix: non_empty(&report.suggested_fix),
     }
+}
+
+/// Whether `title` is the placeholder earlier versions stored when a model's
+/// answer could not be parsed (`Asan in target`): it names neither the bug nor
+/// its location, so a reader is better served by the crash summary.
+#[must_use]
+pub fn is_fallback_title(crash: &Crash, title: &str) -> bool {
+    title == legacy_fallback_title(crash)
+}
+
+fn legacy_fallback_title(crash: &Crash) -> String {
+    format!("{:?} in target", crash.kind)
 }
 
 /// Parse the first JSON object out of a model response, tolerating surrounding
@@ -102,6 +119,33 @@ mod tests {
     fn a_json_object_inside_prose_is_found() {
         let text = "Here is the report:\n```json\n{\"title\":\"t\",\"summary\":\"s\",\"repro_steps\":\"r\",\"stack\":\"st\",\"severity_guess\":\"low\"}\n```";
         assert_eq!(parse_report_json(text).expect("embedded json").title, "t");
+    }
+
+    /// An unparseable answer used to title the finding "Asan in target", which
+    /// names neither the bug nor where it is.
+    #[test]
+    fn an_unparseable_answer_is_titled_by_the_crash_itself() {
+        let crash = Crash {
+            reproduction: None,
+            id: uuid::Uuid::nil(),
+            run_id: uuid::Uuid::nil(),
+            target_id: uuid::Uuid::nil(),
+            input_path: std::path::PathBuf::from("/work/out/crash-1"),
+            stack_signature: "/work/utf8.c:31:27".to_owned(),
+            kind: hf_core::crash::CrashKind::Asan,
+            summary: "heap-buffer-overflow(read) at /work/utf8.c:31:27".to_owned(),
+            minimized: false,
+            bug_report: None,
+            casr: None,
+            origin: hf_core::crash::CrashOrigin::Target,
+        };
+        let report = bug_report_from_response(&crash, "not json");
+        assert_eq!(
+            report.title,
+            "heap-buffer-overflow(read) at /work/utf8.c:31:27"
+        );
+        assert!(is_fallback_title(&crash, "Asan in target"));
+        assert!(!is_fallback_title(&crash, "Heap overflow in decode_utf8"));
     }
 
     #[test]

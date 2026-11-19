@@ -418,15 +418,18 @@ mod crash_input_boundary_tests {
 /// by 317 inputs into 317 findings.
 pub(super) fn bucket_by_cluster(crashes: Vec<hf_core::crash::Crash>) -> Vec<hf_core::crash::Crash> {
     let mut seen_clusters = std::collections::HashSet::new();
-    let mut seen_signatures = std::collections::HashSet::new();
+    let mut seen_identities = std::collections::HashSet::new();
     let mut kept = Vec::with_capacity(crashes.len());
     for crash in crashes {
-        let first_of_its_kind = match crash.casr.as_ref().and_then(|c| c.cluster) {
-            Some(cluster) => seen_clusters.insert(cluster),
-            None => {
-                crash.stack_signature.is_empty()
-                    || seen_signatures.insert(crash.stack_signature.clone())
-            }
+        let first_of_its_kind = if let Some(cluster) = crash.casr.as_ref().and_then(|c| c.cluster) {
+            seen_clusters.insert(cluster)
+        } else {
+            // The signature, or another identity of the same bug (the same
+            // faulting addresses when symbolization failed for this replay).
+            let keys = hf_crash::identity_keys(&crash);
+            let new = keys.iter().all(|key| !seen_identities.contains(key));
+            seen_identities.extend(keys);
+            new
         };
         if first_of_its_kind {
             kept.push(crash);

@@ -210,7 +210,9 @@ fn an_unparseable_response_falls_back_to_the_crash_evidence() {
         cluster: None,
     });
     let report = bug_report_from_response(&framed, "not json");
-    assert!(report.title.contains("Asan"));
+    // Titled by the crash summary (class and location) since 2026-11-19;
+    // the earlier "Asan in target" named neither.
+    assert_eq!(report.title, framed.summary);
     assert_eq!(report.severity_guess, "uncertain");
     assert_eq!(
         report.stack, "#0 abort\n#1 match_magic src/a.c:3",
