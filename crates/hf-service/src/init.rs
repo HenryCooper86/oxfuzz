@@ -314,9 +314,21 @@ pub(crate) fn writable_dir(path: &Path) -> bool {
     }
 }
 
-/// Resolve the database path the same way [`Store::connect_from_env`] does.
-fn db_path() -> PathBuf {
-    PathBuf::from(std::env::var("HF_DB_PATH").unwrap_or_else(|_| "data/oxfuzz.db".to_owned()))
+/// The database every entry point opens: `HF_DB_PATH` when set, otherwise
+/// `data/oxfuzz.db` in the per-user application directory, beside the
+/// workspaces it describes (`HF_APP_DIR` relocates both). It never depends on
+/// the working directory: a database per directory sharing one set of
+/// workspaces overwrote another database's active-harness pointers.
+#[must_use]
+pub fn database_path() -> PathBuf {
+    resolve_database_path(std::env::var_os("HF_DB_PATH"), &user_app_dir())
+}
+
+/// [`database_path`] over explicit inputs.
+fn resolve_database_path(explicit: Option<std::ffi::OsString>, app_dir: &Path) -> PathBuf {
+    explicit
+        .filter(|value| !value.is_empty())
+        .map_or_else(|| app_dir.join("data").join("oxfuzz.db"), PathBuf::from)
 }
 
 /// Config templates compiled into the binary, one per [`CONFIG_SECTIONS`] entry.
@@ -361,7 +373,7 @@ const EMBEDDED_TEMPLATES: &[(&str, &str)] = &[
 /// Returns `ClassifiedError` if the config directory cannot be read or the
 /// database cannot be created.
 pub async fn init_workspace() -> Result<InitReport, ClassifiedError> {
-    init_at(&config_dir(), &db_path()).await
+    init_at(&config_dir(), &database_path()).await
 }
 
 /// Initialize a workspace at explicit paths (the testable core of
@@ -411,6 +423,28 @@ pub async fn init_at(config_dir: &Path, db_path: &Path) -> Result<InitReport, Cl
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The CLI and web server opened `data/oxfuzz.db` relative to the working
+    /// directory while every entry point shares the per-user workspaces, so a
+    /// run started from the source tree wrote a second database into the
+    /// desktop app's workspaces and replaced its active-harness pointer.
+    #[test]
+    fn the_default_database_lives_in_the_application_directory() {
+        let app = PathBuf::from("/srv/oxfuzz-state");
+        assert_eq!(
+            resolve_database_path(None, &app),
+            app.join("data").join("oxfuzz.db")
+        );
+        assert_eq!(
+            resolve_database_path(Some("".into()), &app),
+            app.join("data").join("oxfuzz.db"),
+            "an empty override is no override"
+        );
+        assert_eq!(
+            resolve_database_path(Some("/tmp/other.db".into()), &app),
+            PathBuf::from("/tmp/other.db")
+        );
+    }
 
     #[test]
     fn an_explicit_app_dir_replaces_the_per_user_directory() {

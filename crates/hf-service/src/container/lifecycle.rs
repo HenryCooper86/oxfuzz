@@ -364,13 +364,14 @@ impl ServiceContainer {
             .then(provider_pool_from_config)
             .flatten()
             .or_else(provider_pool_from_env);
-        let (store, persistence_availability) = match Store::connect_from_env().await {
-            Ok(s) => (Some(Arc::new(s)), PersistenceAvailability::Available),
-            Err(e) => {
-                tracing::warn!("persistence disabled: {e}");
-                (None, PersistenceAvailability::Unavailable)
-            }
-        };
+        let (store, persistence_availability) =
+            match Store::connect(crate::init::database_path()).await {
+                Ok(s) => (Some(Arc::new(s)), PersistenceAvailability::Available),
+                Err(e) => {
+                    tracing::warn!("persistence disabled: {e}");
+                    (None, PersistenceAvailability::Unavailable)
+                }
+            };
         #[cfg(feature = "clang-analysis")]
         if let Some(store) = &store {
             match super::workspace::prepare_configured_workspace_root() {

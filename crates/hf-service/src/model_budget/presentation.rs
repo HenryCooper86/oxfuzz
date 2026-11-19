@@ -134,7 +134,7 @@ pub async fn model_budget_view() -> Result<ModelBudgetView, String> {
     let settings = crate::config::effective_model_budget_settings()?;
     #[cfg(feature = "model-budgets")]
     if settings.scope_id.is_some() {
-        let store = hf_storage::Store::connect_from_env()
+        let store = hf_storage::Store::connect(crate::init::database_path())
             .await
             .map_err(|error| error.to_string())?;
         return read_view(&settings, &store).await;

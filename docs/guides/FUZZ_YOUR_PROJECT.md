@@ -18,10 +18,10 @@ when something fails, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
    `sandbox image`, and the engine you plan to use.
 3. Configure a model provider ([CONFIGURATION.md](CONFIGURATION.md#choosing-an-llm-provider)),
    or plan to run without one (`--ai off --no-llm-review`, described below).
-4. Pin your state. Unless `HF_DB_PATH` is set, the CLI opens
-   `data/oxfuzz.db` relative to the current directory, so running from a
-   different directory sees a different database (and none of your promoted
-   harnesses). Export `HF_DB_PATH` to one absolute path before you begin.
+4. Know where your state lives. Unless `HF_DB_PATH` is set, the CLI, the
+   REST server, and the desktop app all open `data/oxfuzz.db` in the per-user
+   application directory, so every entry point sees the same promoted
+   harnesses from any working directory (`HF_APP_DIR` relocates it).
    Workspaces (harness binaries, corpora, crash files) default to the per-user
    directory (`~/Library/Application Support/oxfuzz/workspaces` on macOS,
    `$XDG_DATA_HOME/oxfuzz/workspaces` or `~/.local/share/oxfuzz/workspaces` on

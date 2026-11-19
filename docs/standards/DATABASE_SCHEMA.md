@@ -8,8 +8,10 @@ Status: **implemented through migration 0052**. Scope: `hf-storage` and
 SQLite is embedded through `sqlx`. The bundled engine must be SQLite 3.54.0
 or newer to include the WAL page-size mismatch repair (RUSTSEC-2026-0459).
 The local `sqlx-sqlite` manifest patch selects the repaired native dependency
-while retaining SQLx 0.8 APIs and the existing schema. `Store::connect` uses `HF_DB_PATH` when
-configured and otherwise opens `data/oxfuzz.db`. It creates the parent
+while retaining SQLx 0.8 APIs and the existing schema. Every entry point opens the path
+`hf_service::init::database_path` resolves: `HF_DB_PATH` when configured,
+otherwise `data/oxfuzz.db` under the per-user application directory
+(`HF_APP_DIR`), beside the default workspaces. `Store::connect` creates the parent
 directory and database when needed, then applies the forward-only migrations
 in `crates/hf-storage/migrations/`. Connections wait up to 30 seconds for a
 transient SQLite writer to finish before returning `SQLITE_BUSY`; the bound

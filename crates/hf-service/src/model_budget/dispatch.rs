@@ -36,7 +36,11 @@ impl BudgetController {
 
     async fn store(&self) -> Result<&Arc<Store>, ProviderError> {
         self.store
-            .get_or_try_init(|| async { Store::connect_from_env().await.map(Arc::new) })
+            .get_or_try_init(|| async {
+                Store::connect(crate::init::database_path())
+                    .await
+                    .map(Arc::new)
+            })
             .await
             .map_err(|error| self.denied(format!("accounting_unavailable: {error}")))
     }
@@ -107,7 +111,7 @@ pub async fn model_budget_status() -> Result<Option<ModelBudgetSnapshot>, String
     let Some(scope) = settings.scope_id else {
         return Ok(None);
     };
-    let store = Store::connect_from_env()
+    let store = Store::connect(crate::init::database_path())
         .await
         .map_err(|error| error.to_string())?;
     store

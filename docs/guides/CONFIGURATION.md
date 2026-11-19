@@ -357,10 +357,13 @@ warning: config directory '<per-user dir>' (per-user) shadows the source tree co
 To make the choice explicit, pass `--config <dir>` or export
 `HF_CONFIG_DIR`; `oxfuzz --config <dir> init` fills in any missing files there
 from the built-in templates. The config directory also locates `agents/` and
-`skills/`. Note that `HF_DB_PATH` is resolved separately: the CLI default is
-`data/oxfuzz.db` relative to the current directory, while the desktop app uses
-`data/oxfuzz.db` under the per-user application directory (on macOS
-`~/Library/Application Support/oxfuzz/data/oxfuzz.db`).
+`skills/`. Note that `HF_DB_PATH` is resolved separately: every entry point
+(CLI, REST server, desktop app) defaults to `data/oxfuzz.db` under the
+per-user application directory (on macOS
+`~/Library/Application Support/oxfuzz/data/oxfuzz.db`), beside the default
+workspaces; `HF_APP_DIR` relocates both. A separate `HF_DB_PATH` should come
+with its own `HF_WORKSPACE_DIR`, because a workspace's active-harness pointer
+names records in one database.
 
 The REST API binds to loopback by default and is **fail-closed**: set
 `HF_WEB_TOKEN` to require a bearer token, or `HF_WEB_TOKEN_OPTIONAL=1` for

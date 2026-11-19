@@ -3104,13 +3104,10 @@ fn approval_mac_key_path(state_dir: &Path) -> PathBuf {
 }
 
 /// Resolve the durable service-state directory for the approval MAC key: the
-/// parent of the database path, resolved exactly the way
-/// [`hf_storage::Store::connect_from_env`] and `init` resolve it
-/// (`HF_DB_PATH`, default `data/oxfuzz.db`), so the key always sits beside
+/// parent of [`crate::init::database_path`], so the key always sits beside
 /// the database the service actually uses.
 fn approval_mac_key_dir() -> PathBuf {
-    let db_path =
-        PathBuf::from(std::env::var("HF_DB_PATH").unwrap_or_else(|_| "data/oxfuzz.db".to_owned()));
+    let db_path = crate::init::database_path();
     match db_path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
         _ => PathBuf::from("."),

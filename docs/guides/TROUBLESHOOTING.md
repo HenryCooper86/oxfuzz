@@ -195,11 +195,12 @@ Symptom: `run`, `triage`, or `ci` cannot find a harness you promoted, or
 
 Causes and fixes:
 
-- The CLI opens `data/oxfuzz.db` relative to the current directory unless
-  `HF_DB_PATH` is set (the desktop app uses `data/oxfuzz.db` under the
-  per-user application directory, on macOS
-  `~/Library/Application Support/oxfuzz/data/oxfuzz.db`). Export one absolute
-  `HF_DB_PATH`.
+- Every entry point opens `data/oxfuzz.db` under the per-user application
+  directory (on macOS `~/Library/Application Support/oxfuzz/data/oxfuzz.db`)
+  unless `HF_DB_PATH` or `HF_APP_DIR` is set. Check that the shell running the
+  CLI does not export a different `HF_DB_PATH`. Version 0.9.6 and earlier opened
+  `data/oxfuzz.db` relative to the current directory; to read such a
+  database, set `HF_DB_PATH` to its absolute path.
 - Targets are keyed by the exact spelling: `parse_value` and
   `src/parser.c::parse_value` are different workspaces. Use the spelling you
   promoted under (work orders always use the file-qualified one).

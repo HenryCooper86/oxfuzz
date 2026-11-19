@@ -884,7 +884,7 @@ errors only).
 | Variable | Meaning | Default |
 | --- | --- | --- |
 | `HF_CONFIG_DIR` | Config directory. Wins over the per-user config dir and source-tree discovery; the `--config` flag wins over it. | Unset; see the resolution order in Quick Start. |
-| `HF_DB_PATH` | SQLite database path. | `data/oxfuzz.db`, relative to the current directory. The desktop app sets `<per-user app dir>/data/oxfuzz.db` when unset. |
+| `HF_DB_PATH` | SQLite database path. | `<per-user app dir>/data/oxfuzz.db` (`HF_APP_DIR` relocates it), the same database the desktop app and REST server use. |
 | `HF_DATA_DIR` | Runtime data directory, shown in system information and protected from workspace cleanup. It does not move the database; use `HF_DB_PATH` for that. | `<source checkout>/data`, else `<per-user app dir>/data`. |
 | `HF_APP_DIR` | Application state directory: run journal, schedules, locks, transcripts, knowledge index, and default workspaces. Must be absolute; an unusable value is a startup error rather than a silent fallback. | per-user app directory |
 | `HF_WORKSPACE_DIR` | Root of the managed per-project workspaces (harness builds, corpora, crash artifacts, run output). | `<per-user app dir>/workspaces`. |

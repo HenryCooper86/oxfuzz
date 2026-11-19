@@ -47,6 +47,14 @@ retain only the current release; older entries remain here as the record.
   memory-safety finding CASR rates not exploitable scores 5.0 (Medium), not
   3.5.
 
+- The CLI and REST server open the same per-user database as the desktop app
+  (`data/oxfuzz.db` in the application directory) instead of `data/oxfuzz.db`
+  relative to the working directory. A database per directory shared one set
+  of workspaces, and a run from the source tree replaced the desktop app's
+  active-harness pointer ("active harness record is missing"). Set
+  `HF_DB_PATH` to the old file's absolute path to read a database created
+  that way.
+
 ### Added
 
 - Total executions for every engine in the Run view, run history, run

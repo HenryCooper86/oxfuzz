@@ -18,7 +18,6 @@ use hf_core::harness::Harness;
 use hf_core::target::{TargetCandidate, TargetInventory};
 
 /// Default database path used when `HF_DB_PATH` is unset.
-const DEFAULT_DB_PATH: &str = "data/oxfuzz.db";
 /// Maximum time a connection waits for another `SQLite` writer to finish.
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_HEALTH_JSON_BYTES: usize = 64 * 1024;
@@ -692,16 +691,6 @@ impl Store {
             .journal_mode(SqliteJournalMode::Wal)
             .busy_timeout(SQLITE_BUSY_TIMEOUT);
         Self::connect_with(opts).await
-    }
-
-    /// Connect using the `HF_DB_PATH` env var, defaulting to
-    /// `data/oxfuzz.db`.
-    ///
-    /// # Errors
-    /// See [`Store::connect`].
-    pub async fn connect_from_env() -> Result<Self, StorageError> {
-        let path = std::env::var("HF_DB_PATH").unwrap_or_else(|_| DEFAULT_DB_PATH.to_owned());
-        Self::connect(path).await
     }
 
     async fn connect_with(opts: SqliteConnectOptions) -> Result<Self, StorageError> {
