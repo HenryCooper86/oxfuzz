@@ -364,7 +364,20 @@ pub async fn dashboard<S: std::hash::BuildHasher>(
             HashMap::new()
         }
     };
-    let crash_reviews = crash_review_items(filtered_crashes, &target_by_id, &remediation_by_crash);
+    // One finding per bug of a target: each run that hits a bug persists its
+    // own finding, so without this the Dashboard listed one overflow once
+    // per run. The newest run's report represents the bug.
+    let run_started: HashMap<Uuid, chrono::DateTime<chrono::Utc>> = filtered_runs
+        .iter()
+        .map(|run| (run.id, run.started_at))
+        .collect();
+    let mut newest_first = filtered_crashes;
+    newest_first.sort_by_key(|crash| std::cmp::Reverse(run_started.get(&crash.run_id).copied()));
+    let crash_reviews = crash_review_items(
+        one_finding_per_bug(newest_first),
+        &target_by_id,
+        &remediation_by_crash,
+    );
     // A project is always selected past the early return above, so scope the
     // corpus count to this project's targets rather than loading every row.
     let mut corpus_entry_count = 0;
@@ -890,6 +903,25 @@ fn ai_review_summary(record: &hf_storage::HarnessAiReviewRecord) -> Option<Harne
             })
         }
     }
+}
+
+/// Collapse findings of the same bug of a target to one, keeping the first
+/// (callers order newest first). Identity is [`hf_crash::identity_keys`], the
+/// same matching triage and reports apply.
+fn one_finding_per_bug(crashes: Vec<Crash>) -> Vec<Crash> {
+    let mut targets: Vec<Uuid> = Vec::new();
+    let mut by_target: HashMap<Uuid, Vec<Crash>> = HashMap::new();
+    for crash in crashes {
+        if !by_target.contains_key(&crash.target_id) {
+            targets.push(crash.target_id);
+        }
+        by_target.entry(crash.target_id).or_default().push(crash);
+    }
+    targets
+        .into_iter()
+        .filter_map(|target| by_target.remove(&target))
+        .flat_map(hf_crash::dedup)
+        .collect()
 }
 
 pub(crate) fn crash_review_items(
@@ -1815,5 +1847,66 @@ mod next_action_tests {
                 next_action_notes(&totals).len()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod one_finding_per_bug_tests {
+    use std::path::PathBuf;
+
+    use hf_core::crash::{CasrReport, Crash, CrashKind, CrashOrigin, CrashSeverity};
+    use uuid::Uuid;
+
+    use super::one_finding_per_bug;
+
+    fn crash(target: Uuid, run: u128, line: &str) -> Crash {
+        Crash {
+            reproduction: None,
+            id: Uuid::new_v4(),
+            run_id: Uuid::from_u128(run),
+            target_id: target,
+            input_path: PathBuf::from("/work/out/crash"),
+            stack_signature: line.to_owned(),
+            kind: CrashKind::Asan,
+            summary: format!("heap-buffer-overflow(read) at {line}"),
+            minimized: false,
+            bug_report: None,
+            casr: Some(CasrReport {
+                severity: CrashSeverity::NotExploitable,
+                severity_short: "heap-buffer-overflow(read)".to_owned(),
+                crashline: line.to_owned(),
+                stack: vec![],
+                cluster: None,
+            }),
+            origin: CrashOrigin::Target,
+        }
+    }
+
+    /// The Dashboard listed one utf8.c:31 overflow five times, once per run
+    /// that hit it (two of them unsymbolized).
+    #[test]
+    fn the_dashboard_lists_each_bug_of_a_target_once() {
+        let target = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let crashes = vec![
+            crash(target, 3, "/work/utf8.c:31:27"),
+            crash(target, 2, "/work/runs/b/input/harness+0x111dfc"),
+            crash(target, 1, "/work/utf8.c:31:27"),
+            crash(target, 1, "/work/runs/a/input/harness+0x111dfc"),
+            crash(other, 1, "/work/utf8.c:31:27"),
+        ];
+        let kept = one_finding_per_bug(crashes);
+        let for_target: Vec<_> = kept.iter().filter(|c| c.target_id == target).collect();
+        assert_eq!(
+            for_target.len(),
+            2,
+            "one symbolized, one module+offset: {kept:#?}"
+        );
+        assert_eq!(
+            for_target[0].run_id,
+            Uuid::from_u128(3),
+            "the newest report is kept"
+        );
+        assert_eq!(kept.iter().filter(|c| c.target_id == other).count(), 1);
     }
 }

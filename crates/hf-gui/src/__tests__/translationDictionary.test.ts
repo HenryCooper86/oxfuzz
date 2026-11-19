@@ -12,8 +12,8 @@ function dictionaryDigest(dictionary: Record<string, string>) {
 it("preserves every shipped English and Chinese key and value", () => {
   expect(Object.keys(enExtra)).toHaveLength(2050);
   expect(Object.keys(zhExtra)).toHaveLength(2048);
-  expect(dictionaryDigest(enExtra)).toBe("cb9a9fb4167cb7653cac2c2d7669636d4ee4ee43a266fdf003edecab1223c3a3");
-  expect(dictionaryDigest(zhExtra)).toBe("8c9340ecb4bc98338891db2940889ac8135dd2e245aa924068c87718c272cb9b");
+  expect(dictionaryDigest(enExtra)).toBe("4448143558f2c1ff36ea0e0c35f389dca701f86d713fd400d7858ed2a4add016");
+  expect(dictionaryDigest(zhExtra)).toBe("f1c7fe26b60d3e1b1dd5d6d36ebf3187023ad064d3ebfaec7ba73f4f239a4a77");
 });
 it("preserves deliberate missing Chinese entries and existing locale fallback", () => {
   expect(Object.keys(enExtra).filter(key => !(key in zhExtra)).sort()).toEqual(["triage.downloadRepro", "triage.reproSaved"]);

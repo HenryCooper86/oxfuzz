@@ -39,6 +39,9 @@ retain only the current release; older entries remain here as the record.
   label (a campaign that peaked at 6,005/s was recorded as 2,953). The Run
   view shows a finished run's measured peak instead of "Unknown", and a
   selected smoke run no longer shows a "not a campaign" health error.
+- Dashboard: Crash Handoff and the crash total list each bug of a target once
+  (one utf8.c:31 overflow was listed five times, once per run that hit it),
+  and Recent Runs reads "N crashing inputs" rather than "N crashes".
 - A report whose latest run retained crashing inputs that were never triaged
   says so and recommends triaging them first, instead of calling earlier
   findings not re-observed or the campaign clean.

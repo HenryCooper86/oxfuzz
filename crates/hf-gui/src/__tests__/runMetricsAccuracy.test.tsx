@@ -43,6 +43,9 @@ describe("total executions", () => {
     // 2972 bugs next to Triage's single finding.
     expect(enExtra["runs.crashes"]).toBe("Crashing inputs");
     expect(zhExtra["runs.crashes"]).toBe("崩溃输入");
+    // The Dashboard's Recent Runs row read "2972 crashes" for the same figure.
+    expect(enExtra["dashboard.crashesCount"]).toBe("{count} crashing inputs");
+    expect(zhExtra["dashboard.crashesCount"]).toBe("{count} 个崩溃输入");
   });
 
   it("show a finished run's measured peak rate instead of Unknown", () => {

@@ -931,7 +931,7 @@ export const [enExtra, zhExtra] = dictionaries({
   "dashboard.couldNotStartDD": ["Could not start DefectDojo","无法启动 DefectDojo"],
   "dashboard.couldNotStopDD": ["Could not stop DefectDojo","无法停止 DefectDojo"],
   "dashboard.crashHandoff": ["Crash Handoff","崩溃移交"],
-  "dashboard.crashesCount": ["{count} crashes","{count} 个崩溃"],
+  "dashboard.crashesCount": ["{count} crashing inputs","{count} 个崩溃输入"],
   "dashboard.crashesNeedingReports": ["Crashes needing reports","待生成报告的崩溃"],
   "dashboard.crashesToTriage": ["{n} to triage","{n} 个待分类"],
   "dashboard.ddNotConfigured": ["not configured","未配置"],
