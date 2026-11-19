@@ -45,6 +45,21 @@ describe("total executions", () => {
     expect(zhExtra["runs.crashes"]).toBe("崩溃输入");
   });
 
+  it("show a finished run's measured peak rate instead of Unknown", () => {
+    // A selected smoke run measured 3,232 exec/s, but the peak card read only
+    // live telemetry and said Unknown.
+    const run = source("../views/RunView.tsx");
+    expect(run).toContain("value={liveStats.peakExecs ?? (running ? null : summary?.execs ?? null)}");
+  });
+
+  it("do not ask a smoke run for campaign health history", () => {
+    // Selecting a smoke run printed "Health history unavailable: validation
+    // error: run '...' is not a campaign".
+    const run = source("../views/RunView.tsx");
+    expect(run).toContain('const showsCampaignHealth = selectedRun?.kind.toLowerCase() !== "smoke";');
+    expect(run).toContain("{showsCampaignHealth && (healthEvents.length > 0");
+  });
+
   it("are labelled in both languages", () => {
     for (const key of ["run.totalExecutions", "runs.totalExecutions", "run.notMeasured"]) {
       expect(enExtra[key], key).toBeTruthy();

@@ -477,6 +477,32 @@ fn retained_coverage_samples(
         .collect()
 }
 
+/// The run's peak rate: the higher of the terminal figure and every rate the
+/// run streamed live. AFL++ and honggfuzz terminal statistics state the
+/// whole-run average, while the live samples are what the Run view showed as
+/// the peak.
+fn with_live_peak(
+    terminal: Option<f64>,
+    series: &std::sync::Mutex<Vec<(f64, u64, f64)>>,
+) -> Option<f64> {
+    let live = series
+        .lock()
+        .ok()
+        // Swallowed: only a panicked sample writer poisons this lock; the
+        // terminal figure then stands alone.
+        .and_then(|samples| {
+            samples
+                .iter()
+                .map(|(_, _, rate)| *rate)
+                .filter(|rate| rate.is_finite())
+                .max_by(f64::total_cmp)
+        });
+    match (terminal, live) {
+        (Some(terminal), Some(live)) => Some(terminal.max(live)),
+        (terminal, live) => terminal.or(live),
+    }
+}
+
 async fn persist_terminal_run_evidence(
     store: &Store,
     run_id: Uuid,
@@ -3608,6 +3634,28 @@ mod sandbox_build_tests {
             error.to_string().contains("docker/sandbox/Dockerfile"),
             "{error}"
         );
+    }
+}
+
+#[cfg(test)]
+mod live_peak_tests {
+    use super::with_live_peak;
+
+    /// A live honggfuzz campaign on `utf8_decoder` showed a 6,005 exec/s peak
+    /// in the Run view, while history stored the 2,953 whole-run average from
+    /// the terminal statistics row as its "peak".
+    #[test]
+    fn the_stored_peak_is_the_highest_rate_the_run_showed() {
+        let series = std::sync::Mutex::new(vec![
+            (1.0, 11, 1792.0),
+            (30.0, 13, 6005.0),
+            (59.0, 13, 5645.0),
+        ]);
+        assert_eq!(with_live_peak(Some(2953.0), &series), Some(6005.0));
+        assert_eq!(with_live_peak(None, &series), Some(6005.0));
+        let empty = std::sync::Mutex::new(Vec::new());
+        assert_eq!(with_live_peak(Some(2953.0), &empty), Some(2953.0));
+        assert_eq!(with_live_peak(None, &empty), None);
     }
 }
 

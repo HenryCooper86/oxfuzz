@@ -51,6 +51,8 @@ export function RunView({
   // Run output (log/stats/summary/running) lives in a shared, always-mounted
   // context, so a run keeps streaming and is preserved when you navigate away.
   const { log, stats: liveStats, coverageSeries = [], summary, running, cancelling, lastEngine, selectedRun, requestState, requestError, healthState, healthEvents = [], loadOlderHealthEvents, runFuzzer, runSyzkaller, cancelRun } = useRunOutput();
+  // Campaign health is recorded for campaigns only; a smoke run has none.
+  const showsCampaignHealth = selectedRun?.kind.toLowerCase() !== "smoke";
   const { settings: fuzzingSettings, loaded: fuzzingPolicyLoaded, error: fuzzingPolicyError } = useFuzzingSettings();
   // One project for the whole app: the active project (changed through
   // ActiveProjectBar), embedded or not.
@@ -397,7 +399,7 @@ export function RunView({
           <StatCard icon={<AlertTriangle size={16} />} label={t("run.rawCrashSignals")} value={liveStats.rawCrashSignals} color="var(--error)" />
           <StatCard icon={<Play size={16} />} label={t("run.currentExecs")} value={liveStats.currentExecs} color="var(--accent)" />
           <StatCard icon={<Play size={16} />} label={t("run.meanExecs")} value={liveStats.meanExecs} color="var(--accent)" />
-          <StatCard icon={<Play size={16} />} label={t("run.execsPeak")} value={liveStats.peakExecs} color="var(--accent)" />
+          <StatCard icon={<Play size={16} />} label={t("run.execsPeak")} value={liveStats.peakExecs ?? (running ? null : summary?.execs ?? null)} color="var(--accent)" />
         </div>
       )}
 
@@ -494,7 +496,7 @@ export function RunView({
         </div>
       )}
 
-      {(healthEvents.length > 0 || healthState?.loading || healthState?.error || healthState?.hasOlder) && (
+      {showsCampaignHealth && (healthEvents.length > 0 || healthState?.loading || healthState?.error || healthState?.hasOlder) && (
         <section className="flex flex-col gap-2" aria-label={t("run.healthHistory")}>
           <span className="text-sm font-semibold">{t("run.healthHistory")}</span>
           {healthState?.loading && <p role="status" className="text-xs">{t("run.healthLoading")}</p>}

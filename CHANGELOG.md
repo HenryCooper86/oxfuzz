@@ -34,6 +34,11 @@ retain only the current release; older entries remain here as the record.
   as 0 edges); runs stored earlier are repaired from the retained AFL++ and
   honggfuzz statistics files the first time history or a report reads them.
   Coverage an engine never reported is stored as unknown, not 0.
+- A run's stored peak executions per second is the highest rate it showed
+  live; AFL++ and honggfuzz runs stored their whole-run average under that
+  label (a campaign that peaked at 6,005/s was recorded as 2,953). The Run
+  view shows a finished run's measured peak instead of "Unknown", and a
+  selected smoke run no longer shows a "not a campaign" health error.
 - A report whose latest run retained crashing inputs that were never triaged
   says so and recommends triaging them first, instead of calling earlier
   findings not re-observed or the campaign clean.

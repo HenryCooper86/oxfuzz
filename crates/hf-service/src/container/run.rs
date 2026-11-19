@@ -1596,7 +1596,7 @@ impl ServiceContainer {
 
         // Summarize from the parsed events. Live streaming already forwarded
         // them to `on_progress`, so do not re-emit here.
-        let metrics = match terminal_run_metrics(engine, &artifacts, &result).await {
+        let mut metrics = match terminal_run_metrics(engine, &artifacts, &result).await {
             Ok(metrics) => metrics,
             Err(error) => {
                 let error =
@@ -1606,6 +1606,7 @@ impl ServiceContainer {
                 return Err(error);
             }
         };
+        metrics.execs = super::with_live_peak(metrics.execs, &series);
         if let Err(error) =
             persist_terminal_run_evidence(store, run_record.id, &metrics, &series).await
         {
