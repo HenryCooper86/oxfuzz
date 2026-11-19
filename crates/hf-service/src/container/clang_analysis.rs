@@ -1058,8 +1058,11 @@ mod executor_tests {
         }
         std::fs::write(config.join("oxfuzz.toml"), "").unwrap();
 
+        // A source file the compile database does not list. Discovery no
+        // longer offers functions defined in headers, so the uncompiled
+        // target lives in a `.c` file outside the database instead.
         std::fs::write(
-            project.join("not_compiled.h"),
+            project.join("not_compiled.c"),
             "int header_parse(int x){return x;}",
         )
         .unwrap();
@@ -1108,7 +1111,8 @@ mod executor_tests {
             })
             .await
             .unwrap();
-        runtime.started.notified().await;
+        // The uncompiled target fails before any sandbox command starts, so
+        // wait for the terminal state rather than for the runtime to start.
         let mut terminal = None;
         for _ in 0..1000 {
             let record = service
