@@ -445,7 +445,7 @@ async fn discover_harness_run_triage_end_to_end() {
     assert_eq!(summary.termination, CommandTermination::Completed);
     assert_eq!(summary.crashes, 1);
     assert_eq!(summary.edges, 42);
-    assert!(summary.execs > 0.0);
+    assert!(summary.execs.is_some_and(|rate| rate > 0.0));
 
     let run = store.get_run(summary.run_id).await.unwrap().unwrap();
     assert_eq!(run.status, hf_storage::RunStatus::Done);

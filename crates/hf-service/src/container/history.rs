@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
+use hf_core::engine::EngineKind;
 use hf_core::error::ClassifiedError;
 use hf_core::harness::Harness;
 use hf_storage::{RunKind, RunRecord, RunStatus, Store};
@@ -179,6 +180,60 @@ impl ServiceContainer {
         }
     }
 
+    /// Recover terminal figures a finished run stored before the engine's own
+    /// statistics file was read in full: the execution total (AFL++
+    /// `execs_done`, honggfuzz `total_exec`) and, for honggfuzz, the
+    /// saved-crash counter where the stored count was the 1024-file ingest
+    /// cap. The recovered figures are written back, so each run is repaired
+    /// once. Runs without retained statistics are left as recorded.
+    pub(crate) async fn recover_retained_figures(&self, store: &Store, run: &mut RunRecord) {
+        if run.execs_total.is_some()
+            || !run_has_crash_evidence(run.status)
+            || !matches!(run.engine, EngineKind::AflPlusPlus | EngineKind::Honggfuzz)
+            || self.active_run_ids().contains(&run.id)
+        {
+            return;
+        }
+        // An unresolvable or missing evidence root (deleted workspace, legacy
+        // layout) leaves the run as recorded; history still lists it.
+        let root = match self.run_evidence_root_locked(store, run).await {
+            Ok(Some(root)) => root,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::debug!(run_id = %run.id, %error, "run figures not recoverable");
+                return;
+            }
+        };
+        let Some(figures) = super::engine_figures::read_async(run.engine, root.join("out")).await
+        else {
+            return;
+        };
+        let Some(total) = figures.execs_total else {
+            return;
+        };
+        let crashes = run
+            .crash_count
+            .unwrap_or(0)
+            .max(figures.saved_crashes.unwrap_or(0));
+        let edges = match (run.edges, figures.edges) {
+            (Some(recorded), Some(reported)) => Some(recorded.max(reported)),
+            (recorded, reported) => recorded.or(reported),
+        };
+        let stats = hf_storage::RunStats {
+            edges,
+            execs_per_sec: run.execs,
+            execs_total: Some(total),
+            crashes,
+        };
+        if let Err(error) = store.set_run_stats(run.id, &stats).await {
+            tracing::warn!(run_id = %run.id, %error, "recovered run figures were not stored");
+            return;
+        }
+        run.edges = edges;
+        run.execs_total = Some(total);
+        run.crash_count = Some(crashes);
+    }
+
     /// Run history for a project (or all projects when `None`), newest first,
     /// enriched with the crash count per run. Powers the Runs history view.
     pub async fn run_history(
@@ -189,7 +244,7 @@ impl ServiceContainer {
             return Ok(Vec::new());
         };
         let canonical_project = project.map(project_lookup_identity);
-        let runs = store
+        let mut runs = store
             .list_runs(None)
             .await?
             .into_iter()
@@ -199,6 +254,9 @@ impl ServiceContainer {
                 })
             })
             .collect::<Vec<_>>();
+        for run in &mut runs {
+            self.recover_retained_figures(store, run).await;
+        }
         // The fallback must feed the same deduped view every other crash
         // surface (report, SARIF, DefectDojo) reports, or a legacy run's
         // history count silently exceeds its own triaged findings. Dedup is
@@ -300,6 +358,7 @@ impl ServiceContainer {
                     // (libFuzzer reports none for a run that ends inside its
                     // first second); unknown is not zero executions a second.
                     execs: r.execs.filter(|rate| *rate > 0.0),
+                    execs_total: r.execs_total,
                     harness_rev: r.harness_rev,
                     binary_rev: r.binary_rev,
                     evidence_dir: r.evidence_dir,
@@ -1256,6 +1315,58 @@ mod workspace_lease_tests {
             let _cleanup = gate.write_owned().await;
         });
         (writer, waiting_rx)
+    }
+
+    /// A honggfuzz run stored before its statistics file was read in full
+    /// kept the 1024-file ingest cap as its crash count and no execution
+    /// total; history recovers both from the retained `honggfuzz.stats` and
+    /// stores them, so every later reader sees the engine's own figures.
+    #[tokio::test]
+    async fn history_recovers_figures_an_older_run_stored_from_engine_statistics() {
+        let _environment = ServiceContainer::workspace_environment_test_gate()
+            .lock()
+            .await;
+        let (container, store, template, evidence_root) = fixture().await;
+        let mut run = template.clone();
+        run.id = Uuid::new_v4();
+        run.engine = EngineKind::Honggfuzz;
+        if let Some(config) = run.config.as_mut() {
+            config.engine = EngineKind::Honggfuzz;
+        }
+        run.evidence_dir = Some(format!("runs/{}/out", run.id));
+        // Smoke rows stored 0 edges for coverage they never read.
+        run.edges = Some(0);
+        run.execs = Some(2510.0);
+        run.crash_count = Some(1024);
+        store.insert_run(&run).await.unwrap();
+        let out = evidence_root
+            .parent()
+            .unwrap()
+            .join(run.id.to_string())
+            .join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(
+            out.join(hf_core::engine::HONGGFUZZ_STATS_FILE),
+            "1794462734, 1794462732, 153111, 2510, 3280, 2972, 0, 13, 0\n",
+        )
+        .unwrap();
+
+        let history = container.run_history(None).await.unwrap();
+        let item = history
+            .iter()
+            .find(|item| item.id == run.id.to_string())
+            .unwrap();
+        assert_eq!(item.crashes, 2972);
+        assert_eq!(item.execs_total, Some(153_111));
+        let stored = store.get_run(run.id).await.unwrap().unwrap();
+        assert_eq!(stored.crash_count, Some(2972));
+        assert_eq!(stored.execs_total, Some(153_111));
+        assert_eq!(stored.execs, Some(2510.0), "the rate is left as measured");
+        assert_eq!(
+            stored.edges,
+            Some(13),
+            "coverage comes from the engine's file"
+        );
     }
 
     #[tokio::test]

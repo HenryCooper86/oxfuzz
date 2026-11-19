@@ -136,9 +136,12 @@ describe("RunsView destructive interactions", () => {
     vi.useRealTimers();
   });
 
-  it("keeps the destructive clear unavailable in a browser session without a project scope", async () => {
+  it("asks for a project in a browser session without one instead of reporting an error", async () => {
+    // The web API serves history only for an approved project; an unscoped
+    // request is refused with "project is required", which the view used to
+    // show as a red load failure above a "No runs yet" empty state.
     mocks.invoke.mockImplementation((command: string) => {
-      if (command === "run_history") return Promise.resolve(runs);
+      if (command === "run_history") throw new Error("must not be requested without a project");
       if (command === "clear_all_runs") throw new Error("must not be invoked without a scope");
       if (command === "read_config") return Promise.resolve("");
       if (command === "config_toml_to_value") return Promise.resolve({});
@@ -148,10 +151,10 @@ describe("RunsView destructive interactions", () => {
     await act(async () => root.render(<StrictMode><Providers project="" /></StrictMode>));
     await flush();
 
-    // The browser route clears exactly one project, so with no project
-    // selected the action has no valid scope and must not be offered even
-    // though the unscoped history list shows runs.
-    expect(container.textContent).toContain("parse");
+    expect(mocks.invoke).not.toHaveBeenCalledWith("run_history", expect.anything());
+    expect(container.textContent).toContain("runs.chooseProjectHint");
+    expect(container.textContent).not.toContain("runs.loadError");
+    expect(container.textContent).not.toContain("runs.emptyTitle");
     expect(clearAllButton(container)).toBeUndefined();
   });
 

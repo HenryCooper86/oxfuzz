@@ -75,9 +75,9 @@ pub use store::{
     AutomotiveStateCorpusRecord, CampaignHealthEventPageRecord, CampaignHealthEventRecord,
     CampaignHealthEvidenceRecord, FiledIssueClaim, FiledIssueComplete, GuardrailDecisionRecord,
     HarnessAiReviewRecord, HarnessApprovalKind, HarnessApprovalRecord, ProjectAutoRevert,
-    PromotedHarness, RetainedHealthSample, RunKind, RunRecord, RunStatus, RunTelemetryRecord,
-    SemgrepFindingRecord, SemgrepFindingSeverity, SemgrepPublication, SemgrepRunRecord,
-    SemgrepRunStatus, SemgrepTargetScoreRecord, StorageError, Store,
+    PromotedHarness, RetainedHealthSample, RunKind, RunRecord, RunStats, RunStatus,
+    RunTelemetryRecord, SemgrepFindingRecord, SemgrepFindingSeverity, SemgrepPublication,
+    SemgrepRunRecord, SemgrepRunStatus, SemgrepTargetScoreRecord, StorageError, Store,
     MAX_CAMPAIGN_HEALTH_EVENT_PAGE_SIZE, MAX_CAMPAIGN_HEALTH_SAMPLES,
 };
 pub use transcript::JsonlTranscriptStore;

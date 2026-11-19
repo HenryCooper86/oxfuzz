@@ -128,17 +128,20 @@ export function parseSummary(value: unknown): RunSummary | null {
   if (!record(value)) return null;
   const edges = count(value.edges),
     crashes = count(value.crashes),
-    execs = rate(value.execs);
+    execs = rate(value.execs),
+    executions = count(value.execs_total);
   if (
     crashes === null ||
     (value.edges != null && edges === null) ||
-    (value.execs != null && execs === null)
+    (value.execs != null && execs === null) ||
+    (value.execs_total != null && executions === null)
   )
     return null;
   return {
     edges,
     crashes,
     execs,
+    executions,
     stagnation: typeof value.stagnation === "string" ? value.stagnation : null,
     autoRevert: parseAutoRevert(value.auto_revert ?? value.autoRevert),
     stoppedAtFirstCrash: value.stopped_at_first_crash === true,

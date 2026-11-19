@@ -469,6 +469,7 @@ describe("transport", () => {
               crashes: 2,
               edges: 41,
               execs: 123.5,
+              execs_total: 4_821_007,
               stopped_at_first_crash: true,
             },
           ]),
@@ -496,6 +497,8 @@ describe("transport", () => {
         edges: 41,
         crashes: 2,
         execs: 123.5,
+        // Total executions travel with the rate so the browser shows them too.
+        execs_total: 4_821_007,
         exit_code: null,
         termination: "completed",
         stagnation: null,

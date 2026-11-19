@@ -299,8 +299,12 @@ pub struct RunRecord {
     pub config: Option<FuzzRunConfig>,
     /// Peak edge coverage reached, once the run finished.
     pub edges: Option<u64>,
-    /// Peak executions/second reached, once the run finished.
+    /// Peak executions/second reached, once the run finished. `None` when
+    /// the engine never measured a rate (a libFuzzer run that ended inside its
+    /// first second prints only `exec/s: 0`).
     pub execs: Option<f64>,
+    /// Inputs the engine executed over the whole run, when it reported them.
+    pub execs_total: Option<u64>,
     /// Crashes the fuzzer reported during the run (raw, pre-triage-dedup).
     pub crash_count: Option<u64>,
     /// Full SHA-256 digest of the approved harness source the run used, so a
@@ -342,6 +346,7 @@ impl RunRecord {
             config,
             edges: None,
             execs: None,
+            execs_total: None,
             crash_count: None,
             harness_rev: None,
             binary_rev: None,
@@ -352,6 +357,19 @@ impl RunRecord {
             sandbox_rev: None,
         }
     }
+}
+
+/// Terminal figures of one run, written together by [`Store::set_run_stats`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RunStats {
+    /// Peak edge coverage reached; `None` when the engine reported none.
+    pub edges: Option<u64>,
+    /// Peak executions per second; `None` when the engine never measured one.
+    pub execs_per_sec: Option<f64>,
+    /// Inputs executed over the run, when the engine reported a total.
+    pub execs_total: Option<u64>,
+    /// Crashing inputs the engine retained.
+    pub crashes: u64,
 }
 
 /// Latest bounded live telemetry retained for one campaign run.
@@ -760,8 +778,8 @@ impl Store {
             None => None,
         };
         sqlx::query(
-            "INSERT INTO runs (id, project_root, engine, status, started_at, ended_at, config_json, edges, execs, crash_count, harness_rev, binary_rev, evidence_dir, run_kind, context_rev, source_rev, corpus_rev, sandbox_rev)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+            "INSERT INTO runs (id, project_root, engine, status, started_at, ended_at, config_json, edges, execs, crash_count, harness_rev, binary_rev, evidence_dir, run_kind, context_rev, source_rev, corpus_rev, sandbox_rev, execs_total)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
         )
         .bind(run.id.to_string())
         .bind(&run.project_root)
@@ -781,6 +799,7 @@ impl Store {
         .bind(run.source_rev.as_deref())
         .bind(run.corpus_rev.as_deref())
         .bind(run.sandbox_rev.as_deref())
+        .bind(run.execs_total.map(|n| i64::try_from(n).unwrap_or(i64::MAX)))
         .execute(connection)
         .await?;
         Ok(())
@@ -1693,21 +1712,21 @@ impl Store {
     ///
     /// # Errors
     /// Returns an error on a SQL failure.
-    pub async fn set_run_stats(
-        &self,
-        id: Uuid,
-        edges: u64,
-        execs: f64,
-        crashes: u64,
-    ) -> Result<(), StorageError> {
-        let result =
-            sqlx::query("UPDATE runs SET edges = ?2, execs = ?3, crash_count = ?4 WHERE id = ?1")
-                .bind(id.to_string())
-                .bind(i64::try_from(edges).unwrap_or(i64::MAX))
-                .bind(execs)
-                .bind(i64::try_from(crashes).unwrap_or(i64::MAX))
-                .execute(&self.pool)
-                .await?;
+    pub async fn set_run_stats(&self, id: Uuid, stats: &RunStats) -> Result<(), StorageError> {
+        let result = sqlx::query(
+            "UPDATE runs SET edges = ?2, execs = ?3, crash_count = ?4, execs_total = ?5 WHERE id = ?1",
+        )
+        .bind(id.to_string())
+        .bind(stats.edges.map(|edges| i64::try_from(edges).unwrap_or(i64::MAX)))
+        .bind(stats.execs_per_sec)
+        .bind(i64::try_from(stats.crashes).unwrap_or(i64::MAX))
+        .bind(
+            stats
+                .execs_total
+                .map(|n| i64::try_from(n).unwrap_or(i64::MAX)),
+        )
+        .execute(&self.pool)
+        .await?;
         require_one_run(result.rows_affected(), id)?;
         Ok(())
     }
@@ -3431,6 +3450,27 @@ impl Store {
             .collect()
     }
 
+    /// List crashes recorded against a target across all of its runs, ordered
+    /// by the start time of the run that found them, newest first.
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure or malformed stored data.
+    pub async fn list_crashes_by_target(
+        &self,
+        target_id: Uuid,
+    ) -> Result<Vec<Crash>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT c.data_json FROM crashes c LEFT JOIN runs r ON r.id = c.run_id \
+             WHERE c.target_id = ?1 ORDER BY r.started_at DESC, c.rowid DESC",
+        )
+        .bind(target_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|r| json_col(&r, "data_json"))
+            .collect()
+    }
+
     /// List every persisted crash across all runs, newest insertion first.
     ///
     /// [`Crash`] has no creation timestamp, so the table's stable `SQLite`
@@ -4551,6 +4591,7 @@ pub(crate) fn run_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<RunRecord, S
     };
     let edges: Option<i64> = row.try_get("edges")?;
     let execs: Option<f64> = row.try_get("execs")?;
+    let execs_total: Option<i64> = row.try_get("execs_total")?;
     let crash_count: Option<i64> = row.try_get("crash_count")?;
     let harness_rev: Option<String> = row.try_get("harness_rev")?;
     let binary_rev: Option<String> = row.try_get("binary_rev")?;
@@ -4572,6 +4613,7 @@ pub(crate) fn run_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<RunRecord, S
         config,
         edges: edges.map(|e| u64::try_from(e).unwrap_or(0)),
         execs,
+        execs_total: execs_total.map(|n| u64::try_from(n).unwrap_or(0)),
         crash_count: crash_count.map(|c| u64::try_from(c).unwrap_or(0)),
         harness_rev,
         binary_rev,

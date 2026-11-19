@@ -116,7 +116,7 @@ function Providers({ children, locale = "en", translate = (key) => key, selected
       }}>
         <PipelineContext.Provider value={{ completed: [], isDone: () => false, currentStage: "triage", coreStages: [], isSkipped: () => false, markDone: () => undefined, markSkipped: () => undefined, reset: () => undefined }}>
           <TargetContext.Provider value={{ target: selectedTarget, engine: "libfuzzer", lang: "c", compiled: false, selectionRepair: null, storageError: null, setTarget: () => undefined, setEngine: () => undefined, setLang: () => undefined, setCompiled: () => undefined, canResetTargetSelections: false, resetTargetSelections: () => undefined, retryStorage: () => undefined }}>
-            <RunOutputContext.Provider value={{ log: [], stats: EMPTY_RUN_STATS, summary: { edges: 12, crashes: 1, execs: 40 }, running: false, cancelling: false, lastTarget, lastEngine: "libfuzzer", runFuzzer: async () => 0, replayRun: async () => 0, runSyzkaller: async () => 0, cancelRun: async () => undefined }}>
+            <RunOutputContext.Provider value={{ log: [], stats: EMPTY_RUN_STATS, summary: { edges: 12, crashes: 1, execs: 40, executions: null }, running: false, cancelling: false, lastTarget, lastEngine: "libfuzzer", runFuzzer: async () => 0, replayRun: async () => 0, runSyzkaller: async () => 0, cancelRun: async () => undefined }}>
               <ToastContext.Provider value={{ toast: () => undefined }}>
                 <ConfirmContext.Provider value={async () => true}>
                   <FindingSelectionProvider>

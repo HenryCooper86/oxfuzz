@@ -22,7 +22,10 @@ export interface AutoRevert {
 export interface RunSummary {
   edges: number | null;
   crashes: number;
+  /** Peak executions per second; null when the engine never measured one. */
   execs: number | null;
+  /** Inputs executed over the run; null when the engine reported no total. */
+  executions: number | null;
   stagnation?: string | null;
   autoRevert?: AutoRevert | null;
   /** The engine ended the run at its first crash, before the requested budget. */

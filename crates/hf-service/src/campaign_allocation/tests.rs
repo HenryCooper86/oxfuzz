@@ -215,6 +215,7 @@ fn observation(candidate: &AllocationCandidate, order: u8, edges: u64) -> RunHis
         crashes: 0,
         edges: Some(edges),
         execs: None,
+        execs_total: None,
         harness_rev: Some(candidate.source_sha256.clone()),
         binary_rev: Some("b".repeat(64)),
         evidence_dir: None,

@@ -350,6 +350,7 @@ interface RunHistorySnapshot {
   crashes: number;
   edges: number | null;
   execs: number | null;
+  execs_total?: number | null;
   stopped_at_first_crash?: boolean;
 }
 
@@ -389,7 +390,7 @@ function isTerminalStatus(status: RunLifecycleStatus): boolean {
 }
 
 /** Pass an unmeasured metric through as null; only finite numbers survive. */
-function finiteMetric(value: number | null): number | null {
+function finiteMetric(value: number | null | undefined): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
@@ -522,6 +523,7 @@ export function createHttpTransport(options: HttpTransportOptions = {}): Transpo
         edges: finiteMetric(completed.edges),
         crashes: finiteMetric(completed.crashes) ?? 0,
         execs: finiteMetric(completed.execs),
+        execs_total: finiteMetric(completed.execs_total),
         exit_code: null,
         termination: status === "cancelled" ? "cancelled" : "completed",
         stagnation: null,

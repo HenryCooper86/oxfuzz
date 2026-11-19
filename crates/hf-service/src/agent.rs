@@ -635,6 +635,7 @@ impl ServiceContainer {
                 Ok(serde_json::json!({
                     "edges": summary.edges,
                     "execs_per_sec": summary.execs,
+                    "execs_total": summary.execs_total,
                     "crashes": summary.crashes,
                 })
                 .to_string())

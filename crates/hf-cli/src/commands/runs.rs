@@ -121,9 +121,12 @@ pub(crate) fn run_detail_lines(detail: &RunDetailView) -> Vec<String> {
     lines.push(format!("edges:      {}", format_optional(run.edges)));
     lines.push(format!(
         "execs/s:    {}",
-        run.execs
-            .map_or_else(|| "-".to_owned(), |execs| format!("{execs:.1}"))
+        run.execs.map_or_else(
+            || "not measured".to_owned(),
+            |execs| format!("{execs:.1} (peak)")
+        )
     ));
+    lines.push(format!("executions: {}", format_optional(run.execs_total)));
     if let Some(harness_rev) = &run.harness_rev {
         lines.push(format!("harness:    {harness_rev}"));
     }
@@ -341,6 +344,7 @@ mod tests {
             crashes: 3,
             edges: Some(1523),
             execs: Some(842.5),
+            execs_total: None,
             harness_rev: Some("ab".repeat(32)),
             binary_rev: Some("cd".repeat(32)),
             evidence_dir: Some(format!("runs/{id}/out")),
@@ -468,7 +472,7 @@ mod tests {
         assert!(text.contains("target:     -"));
         assert!(text.contains("duration:   -"));
         assert!(text.contains("edges:      -"));
-        assert!(text.contains("execs/s:    -"));
+        assert!(text.contains("execs/s:    not measured"));
         assert!(!text.contains("ended:"));
         assert!(!text.contains("harness:"));
         assert!(!text.contains("telemetry:"));

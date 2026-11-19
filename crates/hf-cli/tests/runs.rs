@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use hf_service::test_support::{RunRecord, RunStatus, Store};
+use hf_service::test_support::{RunRecord, RunStats, RunStatus, Store};
 use hf_service::EngineKind;
 use uuid::Uuid;
 
@@ -217,7 +217,15 @@ fn runs_status_prints_the_detail_view_for_a_full_id_or_prefix() {
                 Store::connect(&database)
                     .await
                     .unwrap()
-                    .set_run_stats(id, 1523, 842.5, 3)
+                    .set_run_stats(
+                        id,
+                        &RunStats {
+                            edges: Some(1523),
+                            execs_per_sec: Some(842.5),
+                            execs_total: None,
+                            crashes: 3,
+                        },
+                    )
                     .await
                     .unwrap();
             });

@@ -34,6 +34,8 @@ it("focuses the requested retained run and explains a missing history entry", as
 
 it("keeps a failed coverage read distinct from missing evidence and retries it", async () => {
  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true); localStorage.clear();
+ // A browser session lists history only for a selected project.
+ localStorage.setItem("hf_active_project", "/project"); localStorage.setItem("hf_recent_projects", JSON.stringify(["/project"]));
  let reads = 0;
  mocks.invoke.mockImplementation(async (command: string) => {
    if (command === "run_history") return history;

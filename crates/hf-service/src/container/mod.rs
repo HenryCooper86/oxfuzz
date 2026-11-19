@@ -57,6 +57,7 @@ pub use harness_work_order::HarnessWorkOrderExportRequest;
 mod harness_workspace;
 mod history;
 pub(crate) use history::run_crash_count;
+mod engine_figures;
 mod honggfuzz_stats;
 mod lifecycle;
 #[cfg(all(test, feature = "run-closeout"))]
@@ -442,7 +443,12 @@ async fn merge_run_discoveries(
 
 struct TerminalRunMetrics {
     edges: u64,
-    execs: f64,
+    /// Peak measured executions per second; `None` when the engine never
+    /// reported a measurement.
+    execs: Option<f64>,
+    /// Inputs executed over the run, from the engine's own counter.
+    execs_total: Option<u64>,
+    /// Crashing inputs the engine retained.
     crashes: u64,
     /// Per-input-timeout findings retained by the engine: AFL++ `saved_hangs`
     /// from the terminal `fuzzer_stats`, honggfuzz's peak `Timeouts` tick, and
@@ -478,7 +484,15 @@ async fn persist_terminal_run_evidence(
     series: &std::sync::Mutex<Vec<(f64, u64, f64)>>,
 ) -> Result<(), ClassifiedError> {
     store
-        .set_run_stats(run_id, metrics.edges, metrics.execs, metrics.crashes)
+        .set_run_stats(
+            run_id,
+            &hf_storage::RunStats {
+                edges: Some(metrics.edges),
+                execs_per_sec: metrics.execs,
+                execs_total: metrics.execs_total,
+                crashes: metrics.crashes,
+            },
+        )
         .await
         .map_err(|error| ClassifiedError::Storage(error.to_string()))?;
     let samples = retained_coverage_samples(series);
@@ -500,13 +514,15 @@ async fn terminal_run_metrics(
     result: &hf_engine::runner::RunResult,
 ) -> Result<TerminalRunMetrics, ClassifiedError> {
     let mut edges = 0_u64;
-    let mut execs = 0.0_f64;
+    let mut execs: Option<f64> = None;
+    let mut execs_total: Option<u64> = None;
     let mut reported_crashes = 0_u64;
     let mut hangs: Option<u64> = None;
+    let peak = |current: Option<f64>, value: f64| Some(current.map_or(value, |c| c.max(value)));
     for progress in &result.progress {
         match progress {
             FuzzProgress::EdgesCovered(value) => edges = edges.max(*value),
-            FuzzProgress::ExecsPerSec(value) => execs = execs.max(*value),
+            FuzzProgress::ExecsPerSec(value) => execs = peak(execs, *value),
             FuzzProgress::CrashesFound(count) => {
                 reported_crashes = reported_crashes.max(u64::from(*count));
             }
@@ -517,7 +533,11 @@ async fn terminal_run_metrics(
                     edges = edges.max(value);
                 }
                 if let Some(value) = stats.execs_per_sec {
-                    execs = execs.max(value);
+                    execs = peak(execs, value);
+                }
+                // Each engine's execution counter is cumulative within a run.
+                if let Some(value) = stats.execs_total {
+                    execs_total = Some(execs_total.map_or(value, |total| total.max(value)));
                 }
                 // honggfuzz reports its timeout total on `Timeouts` ticks (and
                 // the AFL++ poller restates `saved_hangs` here); the peak of a
@@ -546,13 +566,44 @@ async fn terminal_run_metrics(
                 edges = edges.max(value);
             }
             if let Some(value) = stats.execs_per_sec {
-                execs = execs.max(value);
+                execs = peak(execs, value);
+            }
+            if let Some(value) = stats.execs_done {
+                execs_total = Some(execs_total.map_or(value, |total| total.max(value)));
             }
             if let Some(value) = stats.saved_hangs {
                 hangs = Some(peak_hangs(hangs, value));
             }
             terminal_afl_crashes = stats.saved_crashes.unwrap_or(0);
             afl_stats = Some(stats);
+        }
+    }
+    // honggfuzz's final statistics row carries the saved-crash counter. The
+    // artifact walk below stops at the ingest cap, so on a run that saved more
+    // files than the cap only this counter states how many it kept.
+    let mut terminal_honggfuzz_crashes = 0_u64;
+    if engine == EngineKind::Honggfuzz {
+        let output = artifacts.output_host.clone();
+        let snapshot =
+            tokio::task::spawn_blocking(move || hf_engine::honggfuzz::read_stats(&output))
+                .await
+                .map_err(|error| {
+                    ClassifiedError::Internal(format!("join honggfuzz statistics task: {error}"))
+                })?;
+        match snapshot {
+            Ok(Some(snapshot)) => {
+                terminal_honggfuzz_crashes = snapshot.saved_crashes;
+                if let Some(value) = snapshot.stats.edges_covered {
+                    edges = edges.max(value);
+                }
+                if let Some(value) = snapshot.stats.execs_total {
+                    execs_total = Some(execs_total.map_or(value, |total| total.max(value)));
+                }
+            }
+            Ok(None) => {}
+            // A torn or malformed telemetry file never fails a finished run;
+            // the live readings and the artifact walk remain the evidence.
+            Err(error) => tracing::warn!(%error, "terminal honggfuzz statistics unreadable"),
         }
     }
     // Recursive crash-artifact walk over a possibly large output tree: run it on
@@ -584,9 +635,11 @@ async fn terminal_run_metrics(
     Ok(TerminalRunMetrics {
         edges,
         execs,
+        execs_total,
         crashes: artifact_crashes
             .max(reported_crashes)
-            .max(terminal_afl_crashes),
+            .max(terminal_afl_crashes)
+            .max(terminal_honggfuzz_crashes),
         hangs,
         afl_stats,
     })
@@ -2171,8 +2224,11 @@ pub struct RunHistoryItem {
     pub crashes: usize,
     /// Peak edge coverage, once the run finished (None for older/pending runs).
     pub edges: Option<u64>,
-    /// Peak executions/second, once the run finished.
+    /// Peak executions/second, once the run finished; `None` when the engine
+    /// never measured a rate.
     pub execs: Option<f64>,
+    /// Inputs executed over the run, when the engine reported a total.
+    pub execs_total: Option<u64>,
     /// Full SHA-256 of the approved harness source the run used.
     pub harness_rev: Option<String>,
     /// Full SHA-256 of the staged executable the run used.
@@ -2333,7 +2389,12 @@ pub struct RunSummary {
     /// Persisted run that owns this summary and its evidence.
     pub run_id: Uuid,
     pub edges: u64,
-    pub execs: f64,
+    /// Peak measured executions per second; `None` when the engine never
+    /// reported a measurement.
+    pub execs: Option<f64>,
+    /// Inputs executed over the run, when the engine reported a total.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execs_total: Option<u64>,
     pub crashes: u64,
     /// Per-input-timeout (hang) findings the engine retained: AFL++
     /// `saved_hangs`, honggfuzz's `Timeouts` total, libFuzzer's `timeout-*`
@@ -2568,7 +2629,12 @@ pub fn syzkaller_target_id(project: &Path, label: &str) -> uuid::Uuid {
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct SyzkallerSummary {
     pub edges: u64,
-    pub execs: f64,
+    /// Peak executions per second derived from syz-manager's cumulative
+    /// counter between status lines; `None` before two status lines arrived.
+    pub execs: Option<f64>,
+    /// Programs syz-manager executed over the campaign (its cumulative
+    /// `executed` counter).
+    pub execs_total: u64,
     pub crashes: u64,
     pub exit_code: Option<i32>,
     /// Authoritative reason the sandbox stopped.
@@ -3578,6 +3644,46 @@ mod terminal_metrics_tests {
             progress,
             termination: CommandTermination::Completed,
         }
+    }
+
+    /// The final row of a real honggfuzz run on `utf8_decoder`: 3280 crashing
+    /// executions, 2972 saved inputs. Only two crash files are on disk here, and
+    /// the ingest walk stops at its artifact cap on a real tree, so the saved
+    /// figure must come from the engine's own counter, as AFL++
+    /// `saved_crashes` does. The run used to report the 1024-file cap.
+    #[tokio::test]
+    async fn honggfuzz_retained_crashes_come_from_its_saved_counter() {
+        let out = tempfile::tempdir().unwrap();
+        std::fs::write(
+            out.path().join(hf_core::engine::HONGGFUZZ_STATS_FILE),
+            "# unix_time, last_cov_update, total_exec, exec_per_sec, crashes, unique_crashes, hangs, edge_cov, block_cov\n\
+             1794462734, 1794462732, 153111, 2510, 3280, 2972, 0, 13, 0\n",
+        )
+        .unwrap();
+        for pc in ["aaaae2b61e00", "aaaaafca1e00"] {
+            std::fs::write(
+                out.path().join(format!(
+                    "SIGABRT.PC.{pc}.STACK.1f57aa010.CODE.-6.ADDR.0.INSTR.ldr.fuzz"
+                )),
+                b"\xc3",
+            )
+            .unwrap();
+        }
+
+        let metrics = terminal_run_metrics(
+            EngineKind::Honggfuzz,
+            &artifacts(out.path().to_path_buf()),
+            &result(Vec::new()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            metrics.crashes, 2972,
+            "honggfuzz saved 2972 crashing inputs"
+        );
+        assert_eq!(metrics.edges, 13);
+        assert_eq!(metrics.execs_total, Some(153_111));
     }
 
     #[tokio::test]

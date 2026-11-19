@@ -18,7 +18,7 @@ use hf_storage::{
     HarnessWorkOrderAttemptStatus, HarnessWorkOrderRecord, HarnessWorkOrderSubmissionInsertError,
     HarnessWorkOrderSubmissionRecord, NewScheduleOccurrence, ProjectAutoRevert,
     RemediationOperationCompletion, RemediationOperationRecord, RemediationOperationStage,
-    RemediationOperationStatus, RunKind, RunRecord, RunStatus, RunTelemetryRecord,
+    RemediationOperationStatus, RunKind, RunRecord, RunStats, RunStatus, RunTelemetryRecord,
     ScheduleOccurrenceAcknowledgement, ScheduleOccurrenceInspection, ScheduleOccurrenceReservation,
     ScheduleOccurrenceTransition, ScheduleOccurrenceTransitionResult, SemgrepFindingRecord,
     SemgrepFindingSeverity, SemgrepPublication, SemgrepRunRecord, SemgrepRunStatus,
@@ -5642,15 +5642,143 @@ async fn set_run_stats_persists_edges_and_execs() {
     // Fresh run has no stats yet.
     assert!(store.get_run(id).await.unwrap().unwrap().edges.is_none());
 
-    store.set_run_stats(id, 142, 3800.0, 5).await.unwrap();
+    store
+        .set_run_stats(
+            id,
+            &RunStats {
+                edges: Some(142),
+                execs_per_sec: Some(3800.0),
+                execs_total: Some(1_250_000),
+                crashes: 5,
+            },
+        )
+        .await
+        .unwrap();
 
     let got = store.get_run(id).await.unwrap().unwrap();
     assert_eq!(got.edges, Some(142));
     assert_eq!(got.execs, Some(3800.0));
+    assert_eq!(got.execs_total, Some(1_250_000));
     assert_eq!(got.crash_count, Some(5));
     // Round-trips through list_runs too.
     let listed = store.list_runs(Some("/proj")).await.unwrap();
     assert_eq!(listed[0].edges, Some(142));
+    assert_eq!(listed[0].execs_total, Some(1_250_000));
+}
+
+/// A rate the engine never measured is stored as absent, not as 0 exec/s.
+#[tokio::test]
+async fn set_run_stats_keeps_an_unmeasured_rate_absent() {
+    let (store, _dir) = temp_store().await;
+    let run = RunRecord::new("/proj", EngineKind::LibFuzzer, None, Utc::now());
+    store.insert_run(&run).await.unwrap();
+    store
+        .set_run_stats(
+            run.id,
+            &RunStats {
+                edges: Some(10),
+                execs_per_sec: None,
+                execs_total: Some(1_800),
+                crashes: 1,
+            },
+        )
+        .await
+        .unwrap();
+    let got = store.get_run(run.id).await.unwrap().unwrap();
+    assert_eq!(got.execs, None);
+    assert_eq!(got.execs_total, Some(1_800));
+    assert_eq!(got.edges, Some(10));
+}
+
+/// Rows written before `execs_total` existed: syzkaller kept its cumulative
+/// executed count in the rate column, and a run that ended inside libFuzzer's
+/// first second kept 0 exec/s although it covered edges and crashed. The
+/// migration moves the count to its own column and clears the non-measurement.
+#[tokio::test]
+async fn migration_separates_legacy_execution_counts_from_rates() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("legacy.db");
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(&path)
+        .create_if_missing(true);
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .unwrap();
+    let mut migrations = sqlx::migrate!();
+    migrations
+        .migrations
+        .to_mut()
+        .retain(|migration| migration.version <= 52);
+    migrations.run(&pool).await.unwrap();
+    for (id, engine, edges, execs, crashes) in [
+        (
+            "00000000-0000-0000-0000-000000000001",
+            "syzkaller",
+            6789,
+            12345.0,
+            0,
+        ),
+        (
+            "00000000-0000-0000-0000-000000000002",
+            "libfuzzer",
+            10,
+            0.0,
+            1,
+        ),
+        (
+            "00000000-0000-0000-0000-000000000003",
+            "afl++",
+            11,
+            16637.22,
+            3,
+        ),
+        (
+            "00000000-0000-0000-0000-000000000004",
+            "libfuzzer",
+            0,
+            0.0,
+            0,
+        ),
+    ] {
+        sqlx::query(
+            "INSERT INTO runs (id, project_root, engine, status, started_at, edges, execs, crash_count) \
+             VALUES (?1, '/proj', ?2, 'done', '2026-11-12T05:06:16Z', ?3, ?4, ?5)",
+        )
+        .bind(id)
+        .bind(engine)
+        .bind(edges)
+        .bind(execs)
+        .bind(crashes)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    pool.close().await;
+
+    let store = Store::connect(&path).await.unwrap();
+    let get = |n: u128| {
+        let store = &store;
+        async move { store.get_run(Uuid::from_u128(n)).await.unwrap().unwrap() }
+    };
+    let syzkaller = get(1).await;
+    assert_eq!(syzkaller.execs_total, Some(12_345));
+    assert_eq!(syzkaller.execs, None, "a cumulative count is not a rate");
+    let early_crash = get(2).await;
+    assert_eq!(
+        early_crash.execs, None,
+        "0 exec/s while covering edges is not a measurement"
+    );
+    let afl = get(3).await;
+    assert_eq!(afl.execs, Some(16637.22));
+    assert_eq!(afl.execs_total, None);
+    let idle = get(4).await;
+    assert_eq!(
+        idle.execs,
+        Some(0.0),
+        "a run with no evidence of execution keeps its reading"
+    );
 }
 
 #[tokio::test]
@@ -5697,7 +5825,17 @@ async fn run_mutations_fail_when_the_run_does_not_exist() {
         Err(StorageError::NotFound(_))
     ));
     assert!(matches!(
-        store.set_run_stats(missing, 1, 1.0, 0).await,
+        store
+            .set_run_stats(
+                missing,
+                &RunStats {
+                    edges: Some(1),
+                    execs_per_sec: Some(1.0),
+                    execs_total: None,
+                    crashes: 0
+                }
+            )
+            .await,
         Err(StorageError::NotFound(_))
     ));
     assert!(matches!(
@@ -7870,4 +8008,55 @@ async fn bundled_sqlite_includes_wal_page_size_fix() {
         components.as_slice() >= [3, 54, 0].as_slice(),
         "SQLite {version} predates the WAL page-size repair in 3.54.0"
     );
+}
+
+#[tokio::test]
+async fn crashes_by_target_span_runs_newest_run_first() {
+    let (store, _dir) = temp_store().await;
+    let target = Uuid::new_v4();
+    let mut older = RunRecord::new(
+        "/proj",
+        EngineKind::AflPlusPlus,
+        None,
+        Utc::now() - Duration::hours(1),
+    );
+    older.status = RunStatus::Done;
+    let newer = RunRecord::new("/proj", EngineKind::AflPlusPlus, None, Utc::now());
+    store.insert_run(&older).await.unwrap();
+    store.insert_run(&newer).await.unwrap();
+    let crash_for = |run: &RunRecord, target_id: Uuid, signature: &str| Crash {
+        reproduction: None,
+        id: Uuid::new_v4(),
+        run_id: run.id,
+        target_id,
+        input_path: PathBuf::from("/work/out/crash"),
+        stack_signature: signature.to_owned(),
+        kind: CrashKind::Asan,
+        summary: signature.to_owned(),
+        minimized: false,
+        bug_report: None,
+        casr: None,
+        origin: hf_core::crash::CrashOrigin::Target,
+    };
+    store
+        .upsert_crash(&crash_for(&older, target, "old"))
+        .await
+        .unwrap();
+    store
+        .upsert_crash(&crash_for(&newer, target, "new"))
+        .await
+        .unwrap();
+    store
+        .upsert_crash(&crash_for(&newer, Uuid::new_v4(), "other-target"))
+        .await
+        .unwrap();
+
+    let listed: Vec<_> = store
+        .list_crashes_by_target(target)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|crash| crash.stack_signature)
+        .collect();
+    assert_eq!(listed, ["new", "old"]);
 }

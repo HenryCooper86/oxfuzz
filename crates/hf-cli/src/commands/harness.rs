@@ -498,7 +498,13 @@ pub(crate) async fn cmd_run(
         }?
     };
     println!("\n--- Run summary ---");
-    println!("  execs/sec: {:.0}", summary.execs);
+    match summary.execs {
+        Some(rate) => println!("  execs/sec (peak): {rate:.0}"),
+        None => println!("  execs/sec: not measured (the engine reported no rate)"),
+    }
+    if let Some(total) = summary.execs_total {
+        println!("  total executions: {total}");
+    }
     println!("  crashes detected: {}", summary.crashes);
     if let Some(hangs) = summary.hangs {
         println!("  hangs (per-input timeouts): {hangs}");

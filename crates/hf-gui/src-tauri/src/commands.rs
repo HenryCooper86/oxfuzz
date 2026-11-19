@@ -2147,7 +2147,7 @@ pub async fn run_fuzzer(
             "run_id": serde_json::Value::Null,
             "edges": 0,
             "crashes": 0,
-            "execs": 0.0,
+            "execs": serde_json::Value::Null,
             "termination": "completed",
             "exit_code": 0
         }));
@@ -2206,6 +2206,7 @@ pub async fn run_fuzzer(
             "edges": summary.edges,
             "crashes": summary.crashes,
             "execs": summary.execs,
+            "execs_total": summary.execs_total,
             "hangs": summary.hangs,
             // A coverage-stagnation proposal (e.g. "new_harness") when the run
             // plateaued, so the UI can offer an iterate-next affordance; null
@@ -4004,6 +4005,7 @@ pub async fn run_syzkaller(
             "edges": summary.edges,
             "crashes": summary.crashes,
             "execs": summary.execs,
+            "execs_total": summary.execs_total,
             "exit_code": summary.exit_code,
             // The run and target the campaign was recorded under, so the
             // workspace can triage it without guessing either.

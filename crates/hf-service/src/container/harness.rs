@@ -385,6 +385,23 @@ impl HarnessBuildObserver<'_> {
     }
 }
 
+/// The figures a smoke run retains: its measured rate and crashes, plus the
+/// coverage and execution total the engine wrote to its statistics file. A
+/// zero rate is what libFuzzer prints for a run that ended inside its first
+/// second, so it is stored as unmeasured; unreported coverage stays unknown.
+fn smoke_run_stats(
+    summary: &hf_core::harness::SmokeRunSummary,
+    figures: Option<super::engine_figures::EngineFigures>,
+) -> hf_storage::RunStats {
+    let figures = figures.unwrap_or_default();
+    hf_storage::RunStats {
+        edges: figures.edges,
+        execs_per_sec: (summary.execs_per_sec > 0.0).then_some(summary.execs_per_sec),
+        execs_total: figures.execs_total,
+        crashes: u64::from(summary.crashes).max(figures.saved_crashes.unwrap_or(0)),
+    }
+}
+
 impl ServiceContainer {
     async fn harness_review_locked_detailed(
         &self,
@@ -2465,13 +2482,10 @@ impl ServiceContainer {
         summary.binary_sha256 = Some(artifacts.binary_sha256.clone());
         summary.run_id = Some(smoke_record.id);
         let summary = summary.clone();
+        let figures =
+            super::engine_figures::read_async(smoked.engine, artifacts.output_host.clone()).await;
         if let Err(error) = store
-            .set_run_stats(
-                smoke_record.id,
-                0,
-                summary.execs_per_sec,
-                u64::from(summary.crashes),
-            )
+            .set_run_stats(smoke_record.id, &smoke_run_stats(&summary, figures))
             .await
         {
             let _ = store
@@ -5032,5 +5046,46 @@ mod seed_dispatch_tests {
             0,
             "an unretained prompt is never dispatched"
         );
+    }
+}
+
+#[cfg(test)]
+mod smoke_run_stats_tests {
+    use super::smoke_run_stats;
+
+    fn summary(execs_per_sec: f64) -> hf_core::harness::SmokeRunSummary {
+        serde_json::from_value(serde_json::json!({
+            "duration_secs": 10,
+            "execs_per_sec": execs_per_sec,
+            "crashes": 1,
+            "passed": false,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_smoke_that_measured_no_rate_stores_none_not_zero() {
+        assert_eq!(smoke_run_stats(&summary(0.0), None).execs_per_sec, None);
+        assert_eq!(
+            smoke_run_stats(&summary(512.0), None).execs_per_sec,
+            Some(512.0)
+        );
+    }
+
+    /// A live honggfuzz smoke on `utf8_decoder` stored 0 edges and no total
+    /// while its statistics file said 13 edges and 197,178 executions.
+    #[test]
+    fn a_smoke_keeps_the_engine_reported_coverage_and_total() {
+        let figures = super::super::engine_figures::EngineFigures {
+            edges: Some(13),
+            execs_total: Some(197_178),
+            saved_crashes: Some(1),
+        };
+        let stats = smoke_run_stats(&summary(3232.0), Some(figures));
+        assert_eq!(stats.edges, Some(13));
+        assert_eq!(stats.execs_total, Some(197_178));
+        assert_eq!(stats.crashes, 1);
+        let unknown = smoke_run_stats(&summary(3232.0), None);
+        assert_eq!(unknown.edges, None, "unreported coverage is unknown, not 0");
     }
 }

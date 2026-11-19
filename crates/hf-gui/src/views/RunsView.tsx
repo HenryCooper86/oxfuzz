@@ -91,8 +91,21 @@ function ScopedRunsView({ onNavigate, focusedId, onClearFocus, onReviewFindings 
     if (series[id] === undefined) void loadCurve(id);
   }, [series, loadCurve]);
 
+  // The web API serves history only for an approved project; the desktop
+  // shell may list every project's runs.
+  const needsProject = !isTauriEnvironment() && activeProject === "";
+
   const load = useCallback(async () => {
     const generation = ++requestGeneration.current;
+    if (needsProject) {
+      setRuns([]);
+      setError(null);
+      setMorning(null);
+      setMorningError(null);
+      setLoading(false);
+      setMorningLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
     setMorningLoading(true);
@@ -117,7 +130,7 @@ function ScopedRunsView({ onNavigate, focusedId, onClearFocus, onReviewFindings 
           if (generation === requestGeneration.current) setMorningLoading(false);
         }),
     ]);
-  }, [activeProject]);
+  }, [activeProject, needsProject]);
 
   async function deleteRun(r: RunHistoryItem) {
     if (destructiveInFlight.current) return;
@@ -293,7 +306,7 @@ function ScopedRunsView({ onNavigate, focusedId, onClearFocus, onReviewFindings 
         {!loading && !runs.some(run => run.id === focusedId) && <p>{t("recovery.missing")}</p>}
         <Button onClick={onClearFocus}>{t("recovery.showAll")}</Button>
       </div>}
-      <MorningHealth summary={morning} loading={morningLoading} error={morningError} t={t} onSelect={(id) => { setFilter(id); if (expanded !== id) void toggleCurve(id); }} />
+      {!needsProject && <MorningHealth summary={morning} loading={morningLoading} error={morningError} t={t} onSelect={(id) => { setFilter(id); if (expanded !== id) void toggleCurve(id); }} />}
 
       <details className="surface-card p-3"><summary className="cursor-pointer text-sm">{t("gui.policySettings")}</summary><AutoRevertPolicyCard project={activeProject} /></details>
 
@@ -369,7 +382,8 @@ function ScopedRunsView({ onNavigate, focusedId, onClearFocus, onReviewFindings 
                 <CompareRow label={t("runs.status")} value={r.status} />
                 <CompareRow label={t("runs.harness")} value={revLabel(r.harness_rev) ?? "—"} />
                 <CompareRow label={t("runs.coverageEdges")} value={r.edges != null ? r.edges.toLocaleString() : "—"} />
-                <CompareRow label={t("runs.execsPeak")} value={r.execs != null ? Math.round(r.execs).toLocaleString() : "—"} />
+                <CompareRow label={t("runs.execsPeak")} value={r.execs != null ? Math.round(r.execs).toLocaleString() : t("run.notMeasured")} />
+                <CompareRow label={t("runs.totalExecutions")} value={r.execs_total != null ? r.execs_total.toLocaleString() : t("run.notMeasured")} />
                 <CompareRow label={t("runs.crashes")} value={String(r.crashes)} />
                 <CompareRow label={t("runs.duration")} value={fmtDuration(r.duration_secs)} />
               </div>
@@ -380,6 +394,8 @@ function ScopedRunsView({ onNavigate, focusedId, onClearFocus, onReviewFindings 
 
       {loading ? (
         <p className="text-sm text-text-muted">{t("runs.loadingRuns")}</p>
+      ) : needsProject ? (
+        <EmptyState icon={<Play size={20} />} title={t("workflow.noProjectSelected")} hint={t("runs.chooseProjectHint")} />
       ) : runs.length === 0 ? (
         <EmptyState icon={<Play size={20} />} title={t("runs.emptyTitle")} hint={t("gui.noRunsHint")} action={<Button onClick={() => onNavigate?.("workflow")}>{t("gui.workflowAction")}</Button>} />
       ) : (
@@ -437,6 +453,11 @@ function ScopedRunsView({ onNavigate, focusedId, onClearFocus, onReviewFindings 
                       <Zap size={12} />
                       {r.execs != null ? Math.round(r.execs).toLocaleString() : "—"}
                     </span>
+                    {r.execs_total != null && (
+                      <span className="text-xs text-text-muted shrink-0 hidden lg:inline" title={t("runs.totalExecutions")}>
+                        {t("runs.executionsShort", { n: r.execs_total.toLocaleString() })}
+                      </span>
+                    )}
                     <span className="text-xs text-text-muted flex items-center gap-1 shrink-0" title={t("runs.crashes")}>
                       <Bug size={12} style={{ color: r.crashes > 0 ? "var(--error)" : "var(--text-muted)" }} />
                       {r.crashes}

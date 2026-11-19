@@ -413,6 +413,30 @@ fn syzkaller_terminal_status(termination: hf_core::runtime::CommandTermination) 
     }
 }
 
+/// Executions per second derived from syz-manager's cumulative `executed`
+/// counter between consecutive status lines, and the peak of those rates (the
+/// figure the `execs` column holds for every other engine).
+#[derive(Debug, Default)]
+struct CumulativeRate {
+    last: Option<(std::time::Instant, u64)>,
+    peak: Option<f64>,
+}
+
+impl CumulativeRate {
+    /// Record a counter reading; the rate since the previous one, if any.
+    fn observe(&mut self, now: std::time::Instant, executed: u64) -> Option<f64> {
+        let rate = self.last.and_then(|(time, previous)| {
+            let elapsed = now.duration_since(time).as_secs_f64();
+            (elapsed > 0.0 && executed >= previous).then(|| (executed - previous) as f64 / elapsed)
+        });
+        if let Some(rate) = rate {
+            self.peak = Some(self.peak.map_or(rate, |peak| peak.max(rate)));
+        }
+        self.last = Some((now, executed));
+        rate
+    }
+}
+
 impl ServiceContainer {
     fn register_active_run(&self, run_id: Uuid) -> (CancellationToken, ActiveRunGuard) {
         let cancel = self.operation_cancel_token();
@@ -996,6 +1020,7 @@ impl ServiceContainer {
                         "engine": engine.as_str(),
                         "edges": summary.edges,
                         "execs": summary.execs,
+                        "execs_total": summary.execs_total,
                         "crashes": summary.crashes,
                         "hangs": summary.hangs,
                         "termination": summary.termination,
@@ -1593,6 +1618,7 @@ impl ServiceContainer {
         let TerminalRunMetrics {
             edges,
             execs,
+            execs_total,
             crashes,
             hangs,
             afl_stats,
@@ -1650,6 +1676,7 @@ impl ServiceContainer {
             run_id,
             edges,
             execs,
+            execs_total,
             crashes,
             hangs,
             termination: result.termination,
@@ -2879,9 +2906,7 @@ impl ServiceContainer {
         let peak_edges = AtomicU64::new(0);
         let last_execs = AtomicU64::new(0);
         let peak_crashes = AtomicU64::new(0);
-        // Previous (sample time, cumulative execs) for deriving an exec *rate*
-        // from syzkaller's cumulative counter.
-        let exec_rate_state = std::sync::Mutex::new(Option::<(std::time::Instant, u64)>::None);
+        let exec_rate_state = std::sync::Mutex::new(CumulativeRate::default());
         #[cfg(feature = "campaign-health")]
         let campaign_telemetry = Arc::clone(&self.campaign_telemetry);
         let emit_progress = |progress: FuzzProgress| {
@@ -2906,16 +2931,10 @@ impl ServiceContainer {
                 // syzkaller reports a cumulative execution count; convert it to a
                 // per-second rate before emitting on the rate channel so the
                 // throughput chart does not render a monotonically climbing total.
-                if let Ok(mut guard) = exec_rate_state.lock() {
-                    let now = std::time::Instant::now();
-                    if let Some((prev_time, prev_execs)) = *guard {
-                        let elapsed = now.duration_since(prev_time).as_secs_f64();
-                        if elapsed > 0.0 && executed >= prev_execs {
-                            let rate = (executed - prev_execs) as f64 / elapsed;
-                            emit_progress(FuzzProgress::ExecsPerSec(rate));
-                        }
+                if let Ok(mut state) = exec_rate_state.lock() {
+                    if let Some(rate) = state.observe(std::time::Instant::now(), executed) {
+                        emit_progress(FuzzProgress::ExecsPerSec(rate));
                     }
-                    *guard = Some((now, executed));
                 }
                 emit_progress(FuzzProgress::LogLine(line.to_owned()));
             } else if !line.trim().is_empty() {
@@ -3077,7 +3096,10 @@ impl ServiceContainer {
         }
         let summary = SyzkallerSummary {
             edges: peak_edges.load(Ordering::Relaxed),
-            execs: last_execs.load(Ordering::Relaxed) as f64,
+            // A poisoned lock only means a progress callback panicked; no
+            // rate is then claimed for the run.
+            execs: exec_rate_state.lock().ok().and_then(|state| state.peak),
+            execs_total: last_execs.load(Ordering::Relaxed),
             crashes: peak_crashes.load(Ordering::Relaxed),
             exit_code: Some(result.exit_code),
             termination: Some(result.termination),
@@ -3090,7 +3112,15 @@ impl ServiceContainer {
         // as a campaign that found nothing.
         if let Some(store) = self.store.as_ref() {
             let stats_update = store
-                .set_run_stats(run_id, summary.edges, summary.execs, summary.crashes)
+                .set_run_stats(
+                    run_id,
+                    &hf_storage::RunStats {
+                        edges: Some(summary.edges),
+                        execs_per_sec: summary.execs,
+                        execs_total: Some(summary.execs_total),
+                        crashes: summary.crashes,
+                    },
+                )
                 .await;
             if let Err(error) = stats_update {
                 if let Err(status_error) =
@@ -4352,5 +4382,30 @@ mod afl_stats_polling_tests {
             vec![42],
             "only the valid snapshot is emitted"
         );
+    }
+}
+
+#[cfg(test)]
+mod cumulative_rate_tests {
+    use std::time::{Duration, Instant};
+
+    use super::CumulativeRate;
+
+    /// syz-manager reports a cumulative count; the stored figure is the peak
+    /// rate between status lines, never the count itself.
+    #[test]
+    fn peak_is_the_highest_rate_between_readings_not_the_count() {
+        let start = Instant::now();
+        let mut rate = CumulativeRate::default();
+        assert_eq!(rate.observe(start, 1_000), None, "one reading is no rate");
+        assert_eq!(
+            rate.observe(start + Duration::from_secs(2), 1_400),
+            Some(200.0)
+        );
+        assert_eq!(
+            rate.observe(start + Duration::from_secs(3), 1_500),
+            Some(100.0)
+        );
+        assert_eq!(rate.peak, Some(200.0));
     }
 }

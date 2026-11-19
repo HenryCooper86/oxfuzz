@@ -167,6 +167,8 @@ export interface FuzzerRunResult {
   crashes: number;
   /** Null when the engine never reported a throughput sample. */
   execs: number | null;
+  /** Inputs executed over the run; null when the engine reported no total. */
+  execs_total?: number | null;
   exit_code: number | null;
   termination: "completed" | "timed_out" | "cancelled";
   stagnation: string | null;

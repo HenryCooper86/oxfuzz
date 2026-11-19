@@ -44,7 +44,7 @@ listed in their individual sections below.
 | `ended_at` | `TEXT` | nullable |
 | `config_json` | `TEXT` | nullable serialized `FuzzRunConfig` |
 | `edges` | `INTEGER` | nullable terminal peak edge count |
-| `execs` | `REAL` | nullable terminal executions/second |
+| `execs` | `REAL` | nullable terminal peak executions/second; NULL when the engine never measured a rate |
 | `crash_count` | `INTEGER` | nullable terminal crash count |
 | `samples_json` | `TEXT` | nullable serialized run samples |
 | `harness_rev` | `TEXT` | nullable SHA-256 of approved harness source |
@@ -56,6 +56,7 @@ listed in their individual sections below.
 | `source_rev` | `TEXT` | nullable SHA-256 of staged target-source inputs |
 | `corpus_rev` | `TEXT` | nullable SHA-256 of the starting corpus snapshot |
 | `sandbox_rev` | `TEXT` | nullable typed exact identity, `docker-image-id-sha256:<digest>`; legacy untyped values are not proof-bearing |
+| `execs_total` | `INTEGER` | nullable inputs executed over the run (migration 0053 moved syzkaller's cumulative count here from `execs`) |
 
 Indexes: `idx_runs_project(project_root)`, `idx_runs_status(status)`.
 

@@ -112,7 +112,18 @@ async fn run_detail_reports_terminal_metrics_without_live_telemetry() {
     let id = Uuid::new_v4();
     let (_dir, store) =
         store_with_runs(&[stored_run("/p", EngineKind::LibFuzzer, RunStatus::Done, id)]).await;
-    store.set_run_stats(id, 1523, 842.5, 3).await.unwrap();
+    store
+        .set_run_stats(
+            id,
+            &hf_storage::RunStats {
+                edges: Some(1523),
+                execs_per_sec: Some(842.5),
+                execs_total: Some(9_000_000),
+                crashes: 3,
+            },
+        )
+        .await
+        .unwrap();
     let container = ServiceContainer::stubbed().with_store(store);
 
     let detail = container.run_detail(&id.to_string()).await.unwrap();

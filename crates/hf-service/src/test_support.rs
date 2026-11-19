@@ -16,7 +16,7 @@ pub use hf_core::provider::{
 };
 pub use hf_core::types::ProviderId;
 use hf_scheduler::{ExecutionStatus, Schedule, ScheduleExecution, TriggerConfig};
-pub use hf_storage::{HarnessApprovalKind, RunRecord, RunStatus, Store};
+pub use hf_storage::{HarnessApprovalKind, RunRecord, RunStats, RunStatus, Store};
 use hf_storage::{NewScheduleOccurrence, ScheduleOccurrenceTransition};
 pub use hf_test_utils::defectdojo_stub;
 

@@ -49,7 +49,10 @@ export interface RunHistoryItem {
   duration_secs: number | null;
   crashes: number;
   edges: number | null;
+  /** Peak executions per second; null when the engine never measured one. */
   execs: number | null;
+  /** Inputs executed over the run; null when the engine reported no total. */
+  execs_total?: number | null;
   harness_rev: string | null;
   binary_rev: string | null;
   evidence_dir: string | null;

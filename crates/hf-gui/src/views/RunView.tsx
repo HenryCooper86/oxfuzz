@@ -413,7 +413,8 @@ export function RunView({
         >
           {lastEngine === "syzkaller" && <StatCard icon={<Activity size={16} />} label={t("run.coverage")} value={summary.edges} color="var(--success)" />}
           <StatCard icon={<AlertTriangle size={16} />} label={t("run.retainedCrashes")} value={summary.crashes} color="var(--error)" />
-          {lastEngine === "syzkaller" && <StatCard icon={<Play size={16} />} label={t("run.executed")} value={summary.execs} color="var(--accent)" />}
+          <StatCard icon={<Play size={16} />} label={t("run.totalExecutions")} value={summary.executions} color="var(--accent)" />
+          {lastEngine === "syzkaller" && <StatCard icon={<Play size={16} />} label={t("run.execsPeak")} value={summary.execs} color="var(--accent)" />}
         </div>
       )}
 
