@@ -137,62 +137,11 @@ pub struct Cwe {
 
 /// Map a crash to its most specific CWE, preferring the CASR short description
 /// (e.g. `heap-buffer-overflow(write)`) and falling back to the crash kind.
+/// The classification lives in [`crate::weakness`], shared with the report.
 #[must_use]
 pub fn cwe_for(crash: &Crash) -> Cwe {
-    let short = crash
-        .casr
-        .as_ref()
-        .map(|c| c.severity_short.to_ascii_lowercase())
-        .unwrap_or_default();
-
-    let cwe = |id, name| Cwe { id, name };
-
-    if short.contains("use-after-free") {
-        return cwe("CWE-416", "Use After Free");
-    }
-    if short.contains("double-free") {
-        return cwe("CWE-415", "Double Free");
-    }
-    if short.contains("stack-buffer-overflow") || short.contains("stack-overflow") {
-        return cwe("CWE-121", "Stack-based Buffer Overflow");
-    }
-    if short.contains("heap-buffer-overflow") || short.contains("global-buffer-overflow") {
-        // Distinguish write (787) from read (125) when CASR says so.
-        if short.contains("read") {
-            return cwe("CWE-125", "Out-of-bounds Read");
-        }
-        return cwe("CWE-787", "Out-of-bounds Write");
-    }
-    if short.contains("out-of-bounds") || short.contains("buffer-overflow") {
-        return cwe("CWE-787", "Out-of-bounds Write");
-    }
-    if short.contains("integer-overflow") || short.contains("signed integer overflow") {
-        return cwe("CWE-190", "Integer Overflow or Wraparound");
-    }
-    if short.contains("memory-leak") || short.contains("leak") {
-        return cwe("CWE-401", "Missing Release of Memory");
-    }
-    if short.contains("null") {
-        return cwe("CWE-476", "NULL Pointer Dereference");
-    }
-
-    match crash.kind {
-        CrashKind::Asan => cwe("CWE-787", "Out-of-bounds Write"),
-        CrashKind::Ubsan => cwe("CWE-758", "Reliance on Undefined Behavior"),
-        // The specific kernel class (KASAN, WARN_ON, GPF, ...) lives in the
-        // summary; one CWE cannot span them, and guessing a memory-safety CWE
-        // for a `WARN_ON` would be the mistake this variant exists to avoid.
-        CrashKind::KernelBug => cwe("CWE-noinfo", "Kernel Bug"),
-        CrashKind::Leak => cwe(
-            "CWE-401",
-            "Missing Release of Memory after Effective Lifetime",
-        ),
-        CrashKind::Segv => cwe("CWE-476", "NULL Pointer Dereference"),
-        CrashKind::Abort => cwe("CWE-617", "Reachable Assertion"),
-        CrashKind::Timeout => cwe("CWE-834", "Excessive Iteration"),
-        CrashKind::Panic => cwe("CWE-248", "Uncaught Exception"),
-        CrashKind::Other => cwe("CWE-noinfo", "Uncategorized Crash"),
-    }
+    let (id, name) = crate::weakness::classify(crash).cwe();
+    Cwe { id, name }
 }
 
 /// The GitHub `security-severity` score (0.0-10.0) for a crash, from CASR
@@ -203,7 +152,15 @@ pub fn security_severity(crash: &Crash) -> f64 {
         match casr.severity {
             CrashSeverity::Exploitable => return 9.0,
             CrashSeverity::ProbablyExploitable => return 7.0,
-            CrashSeverity::NotExploitable => return 3.5,
+            // CASR rates code-execution exploitability. A memory-safety class
+            // it calls not exploitable still discloses or corrupts memory.
+            CrashSeverity::NotExploitable => {
+                return if crate::weakness::classify(crash).is_memory_safety() {
+                    5.0
+                } else {
+                    3.5
+                };
+            }
             CrashSeverity::Undefined => {}
         }
     }

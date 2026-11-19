@@ -125,6 +125,35 @@ fn collect_bundle_sources_in(
 }
 use super::ServiceContainer;
 
+/// Findings a report carries from earlier runs, at most.
+const MAX_EARLIER_FINDINGS: usize = 50;
+
+/// Target findings from runs other than `reported_run` whose stack signature
+/// the reported run did not produce, first occurrence (newest run) kept.
+/// Harness defects of earlier harness revisions say nothing about the target
+/// and are left out.
+fn earlier_findings(
+    newest_first: Vec<hf_core::crash::Crash>,
+    reported_run: Option<Uuid>,
+    reported: &[hf_core::crash::Crash],
+) -> Vec<hf_core::crash::Crash> {
+    let reported_keys: std::collections::HashSet<String> =
+        reported.iter().flat_map(hf_crash::identity_keys).collect();
+    let earlier: Vec<_> = newest_first
+        .into_iter()
+        .filter(|crash| Some(crash.run_id) != reported_run)
+        .filter(|crash| crash.origin != hf_core::crash::CrashOrigin::Harness)
+        .filter(|crash| {
+            hf_crash::identity_keys(crash)
+                .iter()
+                .all(|key| !reported_keys.contains(key))
+        })
+        .collect();
+    let mut earlier = hf_crash::dedup(earlier);
+    earlier.truncate(MAX_EARLIER_FINDINGS);
+    earlier
+}
+
 impl ServiceContainer {
     /// Persisted crashes for the most recent matching run (empty without a
     /// store or matching runs). `target = None` selects project-wide history.
@@ -484,19 +513,31 @@ impl ServiceContainer {
         let target_id = candidate.as_ref().map_or_else(Uuid::nil, |c| c.id);
 
         // Latest run + its crashes from the store, when persistence is wired.
-        let (run, crashes) = if let Some(store) = &self.store {
-            let run = self.latest_run_record(project, Some(target)).await?;
+        let (run, crashes, earlier_findings) = if let Some(store) = &self.store {
+            let mut run = self.latest_run_record(project, Some(target)).await?;
             ensure_expected_latest_run(expected_run_id, run.as_ref().map(|run| run.id))?;
+            if let Some(run) = run.as_mut() {
+                self.recover_retained_figures(store, run).await;
+            }
             let crashes = match &run {
                 // Collapse any pre-existing duplicate rows by signature so the
                 // report never lists the same crash twice.
                 Some(r) => hf_crash::dedup(store.list_crashes_by_run(r.id).await?),
                 None => Vec::new(),
             };
-            (run, crashes)
+            let earlier = if target_id.is_nil() {
+                Vec::new()
+            } else {
+                earlier_findings(
+                    store.list_crashes_by_target(target_id).await?,
+                    run.as_ref().map(|run| run.id),
+                    &crashes,
+                )
+            };
+            (run, crashes, earlier)
         } else {
             ensure_expected_latest_run(expected_run_id, None)?;
-            (None, Vec::new())
+            (None, Vec::new(), Vec::new())
         };
 
         // Live coverage (best-effort) and corpus composition.
@@ -513,6 +554,7 @@ impl ServiceContainer {
             candidate,
             run,
             crashes,
+            earlier_findings,
             coverage,
             covered_functions,
             corpus,

@@ -95,6 +95,7 @@ pub mod triage_disposition;
 #[cfg(feature = "unreached-surface")]
 pub mod unreached_surface;
 pub mod verification;
+pub mod weakness;
 pub mod workbench;
 pub mod workflow_approval;
 

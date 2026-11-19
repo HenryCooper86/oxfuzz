@@ -13,6 +13,8 @@
 
 use std::fmt::Write as _;
 
+mod guidance;
+
 use hf_core::crash::{Crash, CrashOrigin, CrashSeverity};
 use hf_core::error::ClassifiedError;
 use hf_core::target::TargetCandidate;
@@ -116,6 +118,10 @@ pub struct ReportData {
     pub run: Option<RunRecord>,
     /// Triaged, deduplicated crashes for the run.
     pub crashes: Vec<Crash>,
+    /// Findings earlier runs of the target confirmed that the reported run did
+    /// not re-observe (deduplicated by stack signature, newest run first).
+    /// Absent from a run is not fixed, so they stay in the report.
+    pub earlier_findings: Vec<Crash>,
     /// Line/function/region coverage, if it could be computed.
     pub coverage: Option<CoverageSummary>,
     /// Number of project functions covered by the corpus.
@@ -134,6 +140,9 @@ pub struct ReportData {
 /// names, figures -- is never routed through this struct and is never
 /// translated.
 pub struct Labels {
+    /// The language these labels are written in; selects the weakness
+    /// guidance text, which lives with the weakness classes.
+    pub language: ReportLanguage,
     // Document header
     pub title_prefix: &'static str,
     pub project: &'static str,
@@ -284,6 +293,68 @@ pub struct Labels {
     // the report's language, so it belongs with the labels rather than being a
     // literal at the export call site.
     pub report_noun: &'static str,
+    // Measured run figures
+    pub row_total_execs: &'static str,
+    pub row_peak_execs: &'static str,
+    pub row_edges: &'static str,
+    pub row_crashing_inputs: &'static str,
+    pub row_unique_findings: &'static str,
+    /// Value for a figure the engine did not report; never rendered as 0.
+    pub not_measured: &'static str,
+    // Run status, in place of the storage enum's identifiers
+    pub status_pending: &'static str,
+    pub status_running: &'static str,
+    pub status_completed: &'static str,
+    pub status_failed: &'static str,
+    pub status_cancelled: &'static str,
+    // Severity rating bands of the 0-10 security-severity score
+    pub severity_critical: &'static str,
+    pub severity_high: &'static str,
+    pub severity_medium: &'static str,
+    pub severity_low: &'static str,
+    /// Executive-summary bullet naming the most severe finding's rating.
+    pub highest_severity: &'static str,
+    /// Value of that bullet when there is no finding.
+    pub severity_none: &'static str,
+    // Per-finding guidance
+    pub col_weakness: &'static str,
+    pub bullet_weakness: &'static str,
+    pub bullet_severity: &'static str,
+    pub impact_heading: &'static str,
+    pub remediation_heading: &'static str,
+    pub verification_heading: &'static str,
+    pub verification_text: &'static str,
+    // Recommendations. `{name}` slots are filled by the renderer with data.
+    pub recommendations_section: &'static str,
+    /// `{n}` finding number, `{severity}`, `{cwe}`, `{name}`, `{location}`, `{step}`.
+    pub rec_fix_finding: &'static str,
+    /// `{n}` count of further findings not itemized.
+    pub rec_more_findings: &'static str,
+    pub rec_verify_fixes: &'static str,
+    /// `{n}` harness defect count.
+    pub rec_harness_defects: &'static str,
+    pub rec_first_crash: &'static str,
+    /// `{percent}`, `{missing}`, `{total}`.
+    pub rec_coverage: &'static str,
+    /// `{duration}`.
+    pub rec_duration: &'static str,
+    pub rec_sanitizer_address_only: &'static str,
+    pub rec_sanitizer_none: &'static str,
+    /// `{rate}`.
+    pub rec_throughput: &'static str,
+    pub rec_seeds: &'static str,
+    /// `{coverage}`.
+    pub rec_clean: &'static str,
+    // Findings confirmed by earlier runs and not re-observed by this one
+    pub earlier_findings_section: &'static str,
+    pub earlier_findings_note: &'static str,
+    pub earlier_findings_line: &'static str,
+    /// Earlier-findings note when the reported run retained crashing inputs
+    /// that have not been triaged; `{n}` is their count.
+    pub earlier_findings_note_untriaged: &'static str,
+    /// First recommendation when the reported run has untriaged crashing
+    /// inputs; `{n}` is their count.
+    pub rec_triage_pending: &'static str,
 }
 
 impl Labels {
@@ -292,6 +363,7 @@ impl Labels {
     #[must_use]
     pub const fn english() -> Self {
         Self {
+            language: ReportLanguage::En,
             title_prefix: "Fuzzing Report",
             project: "Project",
             target: "Target",
@@ -408,6 +480,84 @@ impl Labels {
             footer_on: "on",
             composed_by: "Composed by oxfuzz",
             report_noun: "report",
+            row_total_execs: "Total executions",
+            row_peak_execs: "Executions per second (peak)",
+            row_edges: "Edges covered",
+            row_crashing_inputs: "Crashing inputs retained",
+            row_unique_findings: "Unique findings",
+            not_measured: "not measured",
+            status_pending: "Pending",
+            status_running: "Running",
+            status_completed: "Completed",
+            status_failed: "Failed",
+            status_cancelled: "Cancelled",
+            severity_critical: "Critical",
+            severity_high: "High",
+            severity_medium: "Medium",
+            severity_low: "Low",
+            highest_severity: "Highest severity",
+            severity_none: "none",
+            col_weakness: "Weakness",
+            bullet_weakness: "Weakness",
+            bullet_severity: "Severity",
+            impact_heading: "Impact.",
+            remediation_heading: "Remediation.",
+            verification_heading: "Verification.",
+            verification_text: "Rebuild with the same sanitizer and replay this finding's \
+                                reproducer in the sandbox: the fixed build must no longer \
+                                crash. Keep the reproducer in the regression corpus so the \
+                                bug cannot return unnoticed.",
+            recommendations_section: "Recommendations",
+            rec_fix_finding: "Fix Finding {n} ({severity}, {cwe} {name}) at {location}: {step}",
+            rec_more_findings: "Fix the remaining {n} finding(s) in the order of the findings \
+                                table, following each finding's remediation.",
+            rec_verify_fixes: "After each fix, replay every reproducer against the patched \
+                               build and rerun the campaign from the same corpus to confirm \
+                               the fix and catch regressions.",
+            rec_harness_defects: "Fix the {n} harness defect(s) listed below first: a crash \
+                                  in the harness ends each execution before the target code \
+                                  under test runs.",
+            rec_first_crash: "The run stopped at its first crash, so code behind it went \
+                              untested. After fixing that crash, rerun the campaign for its \
+                              full budget.",
+            rec_coverage: "Line coverage is {percent}% and {missing} of {total} functions \
+                           were never reached. Extend the harness to call them, add seed \
+                           inputs that exercise them, or supply a dictionary of the input \
+                           format's tokens.",
+            rec_duration: "The campaign ran for {duration}. Short campaigns find shallow \
+                           bugs; run for hours to days, or continuously in CI, to reach \
+                           deeper program states.",
+            rec_sanitizer_address_only: "This campaign used AddressSanitizer only. Also \
+                                         fuzz an UndefinedBehaviorSanitizer build (and \
+                                         MemorySanitizer for C and C++): those bug classes \
+                                         are invisible to AddressSanitizer.",
+            rec_sanitizer_none: "This campaign ran without a sanitizer, so memory errors \
+                                 that do not crash went unreported. Fuzz AddressSanitizer \
+                                 and UndefinedBehaviorSanitizer builds.",
+            rec_throughput: "Throughput peaked at {rate} executions per second. Below about \
+                             1,000 per second, profile the harness: per-input file I/O, \
+                             process start-up, logging, and large allocations are the \
+                             usual causes.",
+            rec_seeds: "The corpus started without seed inputs. Add a few small, valid \
+                        samples of the input format so the fuzzer starts from realistic \
+                        structure instead of random bytes.",
+            rec_clean: "No crash was found. This does not show the target is free of bugs; \
+                        it bounds the risk to the inputs this campaign reached, at {coverage} \
+                        coverage.",
+            earlier_findings_section: "Findings from earlier runs",
+            earlier_findings_note: "Earlier runs of this target confirmed these findings, and \
+                                    the latest run did not re-observe them. That does not show \
+                                    they are fixed: replay each reproducer against the current \
+                                    build to confirm before closing it.",
+            earlier_findings_line: "Findings from earlier runs (not re-observed in this run)",
+            earlier_findings_note_untriaged: "Earlier runs of this target confirmed these \
+                                              findings. The latest run retained {n} crashing \
+                                              input(s) that have not been triaged yet, so \
+                                              whether it hit them again is not known: triage \
+                                              that run, or replay each reproducer against the \
+                                              current build, before closing them.",
+            rec_triage_pending: "Triage the latest run first: it retained {n} crashing \
+                                 input(s) that no finding accounts for yet.",
         }
     }
 
@@ -429,6 +579,7 @@ impl Labels {
     #[must_use]
     pub const fn chinese() -> Self {
         Self {
+            language: ReportLanguage::Zh,
             title_prefix: "模糊测试报告",
             project: "项目",
             target: "目标",
@@ -543,6 +694,71 @@ impl Labels {
             footer_on: "于",
             composed_by: "由 oxfuzz 撰写",
             report_noun: "报告",
+            row_total_execs: "总执行次数",
+            row_peak_execs: "每秒执行次数（峰值）",
+            row_edges: "已覆盖边数",
+            row_crashing_inputs: "保留的崩溃输入",
+            row_unique_findings: "去重后的发现项",
+            not_measured: "未测得",
+            status_pending: "等待中",
+            status_running: "运行中",
+            status_completed: "已完成",
+            status_failed: "失败",
+            status_cancelled: "已取消",
+            severity_critical: "严重",
+            severity_high: "高",
+            severity_medium: "中",
+            severity_low: "低",
+            highest_severity: "最高严重程度",
+            severity_none: "无",
+            col_weakness: "缺陷类型",
+            bullet_weakness: "缺陷类型",
+            bullet_severity: "严重程度",
+            impact_heading: "影响。",
+            remediation_heading: "修复方法。",
+            verification_heading: "验证。",
+            verification_text: "使用相同的消毒器重新构建，并在沙箱中回放该发现项的复现输入：\
+                                修复后的构建不应再崩溃。将复现输入保留在回归语料库中，\
+                                以免该缺陷再次出现而不被察觉。",
+            recommendations_section: "修复建议与后续工作",
+            rec_fix_finding: "修复发现项 {n}（{severity}，{cwe} {name}，位置 {location}）：{step}",
+            rec_more_findings: "按发现项表格的顺序修复其余 {n} 个发现项，并遵循各自的修复方法。",
+            rec_verify_fixes: "每次修复后，用打过补丁的构建回放所有复现输入，并从相同的语料库\
+                               重新运行测试活动，以确认修复并发现回归。",
+            rec_harness_defects: "请先修复下文列出的 {n} 个测试桩缺陷：测试桩中的崩溃会在\
+                                  被测目标代码运行之前结束每次执行。",
+            rec_first_crash: "本次运行在第一个崩溃处停止，其后的代码未被测试。修复该崩溃后，\
+                              请按完整预算重新运行测试活动。",
+            rec_coverage: "行覆盖率为 {percent}%，{total} 个函数中有 {missing} 个从未被执行到。\
+                           请扩展测试桩以调用这些函数、添加能触达它们的种子输入，\
+                           或提供输入格式的词典。",
+            rec_duration: "本次测试活动运行了 {duration}。短时间的测试只能发现浅层缺陷；\
+                           请运行数小时到数天，或在 CI 中持续运行，以到达更深的程序状态。",
+            rec_sanitizer_address_only: "本次测试活动只使用了 AddressSanitizer。请同时对 \
+                                         UndefinedBehaviorSanitizer 构建（C 和 C++ 还应包括 \
+                                         MemorySanitizer）进行模糊测试：这些缺陷类型 \
+                                         AddressSanitizer 无法发现。",
+            rec_sanitizer_none: "本次测试活动未使用消毒器，未导致崩溃的内存错误不会被报告。\
+                                 请对 AddressSanitizer 和 UndefinedBehaviorSanitizer \
+                                 构建进行模糊测试。",
+            rec_throughput: "吞吐量峰值为每秒 {rate} 次执行。低于每秒约 1,000 次时，请分析\
+                             测试桩的性能：逐输入的文件 I/O、进程启动、日志和大块内存分配\
+                             是常见原因。",
+            rec_seeds: "语料库在开始时没有种子输入。请添加几个小而合法的输入格式样本，\
+                        使模糊器从真实的结构出发，而不是从随机字节出发。",
+            rec_clean: "未发现崩溃。这并不能证明目标没有缺陷；它只说明在本次测试活动\
+                        到达的输入范围内（覆盖率 {coverage}）风险有限。",
+            earlier_findings_section: "早期运行的发现项",
+            earlier_findings_note: "这些发现项由该目标的早期运行确认，最近一次运行未再次观察到。\
+                                    这并不能说明它们已被修复：关闭之前，请用当前构建回放每个\
+                                    复现输入进行确认。",
+            earlier_findings_line: "早期运行的发现项（本次运行未再次观察到）",
+            earlier_findings_note_untriaged: "这些发现项由该目标的早期运行确认。最近一次运行\
+                                              保留了 {n} 个尚未分类定级的崩溃输入，因此无法\
+                                              确定它是否再次触发了这些发现项：关闭之前，请先对\
+                                              该运行进行分类定级，或用当前构建回放每个复现输入。",
+            rec_triage_pending: "请先对最近一次运行进行分类定级：它保留了 {n} 个尚无发现项\
+                                 对应的崩溃输入。",
         }
     }
 }
@@ -617,6 +833,8 @@ pub fn render_markdown(data: &ReportData, labels: &Labels) -> String {
     render_coverage(&mut md, data, labels);
     render_corpus(&mut md, data, labels);
     render_findings(&mut md, data, labels);
+    render_earlier_findings(&mut md, data, labels);
+    guidance::render_recommendations(&mut md, data, harness_defects.len(), labels);
     render_casr_verdicts(&mut md, data, labels);
     render_harness_defects(&mut md, &harness_defects, labels);
 
@@ -682,14 +900,13 @@ fn render_executive_summary(md: &mut String, data: &ReportData, labels: &Labels)
             )
         })
         .count();
-    let status = data.run.as_ref().map_or_else(
-        || labels.status_unknown.to_owned(),
-        |r| format!("{:?}", r.status),
-    );
-    let engine = data.run.as_ref().map_or_else(
-        || labels.engine_unknown.to_owned(),
-        |r| format!("{:?}", r.engine),
-    );
+    let status = data.run.as_ref().map_or(labels.status_unknown, |r| {
+        guidance::status_label(r.status, labels)
+    });
+    let engine = data
+        .run
+        .as_ref()
+        .map_or(labels.engine_unknown, |r| guidance::engine_name(r.engine));
     let cov = data.coverage.map_or_else(
         || labels.coverage_unknown.to_owned(),
         |c| format!("{:.1}% {}", c.line_percent(), labels.line_coverage_unit),
@@ -733,6 +950,29 @@ fn render_executive_summary(md: &mut String, data: &ReportData, labels: &Labels)
         md,
         "- {}{}**{exploitable}**",
         labels.exploitable_line, labels.bullet_colon
+    );
+    if !data.earlier_findings.is_empty() {
+        let _ = writeln!(
+            md,
+            "- {}{}**{}**",
+            labels.earlier_findings_line,
+            labels.bullet_colon,
+            data.earlier_findings.len()
+        );
+    }
+    let highest = data
+        .crashes
+        .iter()
+        .chain(&data.earlier_findings)
+        .map(crate::sarif::security_severity)
+        .max_by(f64::total_cmp)
+        .map_or(labels.severity_none, |score| {
+            guidance::severity_band(score, labels)
+        });
+    let _ = writeln!(
+        md,
+        "- {}{}**{highest}**",
+        labels.highest_severity, labels.bullet_colon
     );
     let _ = writeln!(
         md,
@@ -979,8 +1219,18 @@ fn render_run(md: &mut String, data: &ReportData, labels: &Labels) {
     };
     let _ = writeln!(md, "| {} | {} |", labels.col_property, labels.col_value);
     let _ = writeln!(md, "|---|---|");
-    let _ = writeln!(md, "| {} | {:?} |", labels.row_engine, r.engine);
-    let _ = writeln!(md, "| {} | {:?} |", labels.row_status, r.status);
+    let _ = writeln!(
+        md,
+        "| {} | {} |",
+        labels.row_engine,
+        guidance::engine_name(r.engine)
+    );
+    let _ = writeln!(
+        md,
+        "| {} | {} |",
+        labels.row_status,
+        guidance::status_label(r.status, labels)
+    );
     let _ = writeln!(
         md,
         "| {} | {} |",
@@ -993,12 +1243,54 @@ fn render_run(md: &mut String, data: &ReportData, labels: &Labels) {
         let _ = writeln!(md, "| {} | {} |", labels.row_duration, human_duration(secs));
     }
     if let Some(cfg) = &r.config {
-        let _ = writeln!(md, "| {} | {:?} |", labels.row_sanitizer, cfg.sanitizer);
+        let _ = writeln!(
+            md,
+            "| {} | {} |",
+            labels.row_sanitizer,
+            cfg.sanitizer.as_str()
+        );
         if let Some(d) = cfg.duration {
             let budget = i64::try_from(d.as_secs()).unwrap_or(i64::MAX);
             let _ = writeln!(md, "| {} | {} |", labels.row_budget, human_duration(budget));
         }
     }
+    // Measured figures. An absent figure was not reported by the engine and
+    // is said so; it is never printed as zero.
+    let measured = |value: Option<String>| value.unwrap_or_else(|| labels.not_measured.to_owned());
+    let _ = writeln!(
+        md,
+        "| {} | {} |",
+        labels.row_total_execs,
+        measured(r.execs_total.map(guidance::grouped))
+    );
+    let _ = writeln!(
+        md,
+        "| {} | {} |",
+        labels.row_peak_execs,
+        measured(
+            r.execs
+                .filter(|rate| *rate > 0.0)
+                .map(guidance::grouped_rate)
+        )
+    );
+    let _ = writeln!(
+        md,
+        "| {} | {} |",
+        labels.row_edges,
+        measured(r.edges.map(guidance::grouped))
+    );
+    let _ = writeln!(
+        md,
+        "| {} | {} |",
+        labels.row_crashing_inputs,
+        measured(r.crash_count.map(guidance::grouped))
+    );
+    let _ = writeln!(
+        md,
+        "| {} | {} |",
+        labels.row_unique_findings,
+        data.crashes.len()
+    );
     let _ = writeln!(md);
 }
 
@@ -1128,42 +1420,70 @@ fn render_findings(md: &mut String, data: &ReportData, labels: &Labels) {
         return;
     }
 
-    // Summary table.
+    render_finding_list(md, &data.crashes, 1, labels);
+}
+
+/// Findings earlier runs confirmed and the reported run did not re-observe,
+/// numbered after the run's own findings so every "Finding N" is unique.
+fn render_earlier_findings(md: &mut String, data: &ReportData, labels: &Labels) {
+    if data.earlier_findings.is_empty() {
+        return;
+    }
+    let _ = writeln!(md, "## {}", labels.earlier_findings_section);
+    let _ = writeln!(md);
+    match untriaged_crashing_inputs(data) {
+        0 => {
+            let _ = writeln!(md, "{}", labels.earlier_findings_note);
+        }
+        n => {
+            let _ = writeln!(
+                md,
+                "{}",
+                labels
+                    .earlier_findings_note_untriaged
+                    .replace("{n}", &n.to_string())
+            );
+        }
+    }
+    let _ = writeln!(md);
+    render_finding_list(md, &data.earlier_findings, data.crashes.len() + 1, labels);
+}
+
+/// Crashing inputs the reported run retained beyond its triaged findings: a
+/// run with retained crashes and no findings has not been triaged.
+pub(crate) fn untriaged_crashing_inputs(data: &ReportData) -> u64 {
+    match &data.run {
+        Some(run) if data.crashes.is_empty() => run.crash_count.unwrap_or(0),
+        _ => 0,
+    }
+}
+
+/// A findings table and each finding's detail, numbered from `first`.
+fn render_finding_list(md: &mut String, crashes: &[Crash], first: usize, labels: &Labels) {
     let _ = writeln!(
         md,
         "| {} | {} | {} | {} | {} |",
         labels.col_index,
-        labels.bullet_kind,
+        labels.col_weakness,
         labels.col_severity,
         labels.col_location,
         labels.row_signature
     );
     let _ = writeln!(md, "|---:|---|---|---|---|");
-    for (i, c) in data.crashes.iter().enumerate() {
-        let severity = c.casr.as_ref().map_or(labels.casr_undefined, |r| {
-            casr_severity_label(r.severity, labels)
-        });
-        let location = c
-            .casr
-            .as_ref()
-            .map(|r| r.crashline.clone())
-            .filter(|l| !l.is_empty())
-            .unwrap_or_else(|| "-".to_owned());
+    for (i, c) in crashes.iter().enumerate() {
         let _ = writeln!(
             md,
-            "| {} | {:?} | {} | {} | {} |",
-            i + 1,
-            c.kind,
-            escape_markdown_text(severity),
-            table_inline_code(&location),
+            "| {} | {} | {} | {} | {} |",
+            first + i,
+            escape_markdown_text(&guidance::weakness_label(c)),
+            escape_markdown_text(&guidance::severity_rating(c, labels)),
+            table_inline_code(&guidance::location(c)),
             table_inline_code(&truncate(&c.stack_signature, 60))
         );
     }
     let _ = writeln!(md);
-
-    // Per-crash detail.
-    for (i, c) in data.crashes.iter().enumerate() {
-        render_crash_detail(md, i + 1, c, labels);
+    for (i, c) in crashes.iter().enumerate() {
+        render_crash_detail(md, first + i, c, labels);
     }
 }
 
@@ -1248,7 +1568,7 @@ fn render_crash_detail(md: &mut String, n: usize, c: &Crash, labels: &Labels) {
         .bug_report
         .as_ref()
         .map(|b| b.title.clone())
-        .filter(|t| !t.trim().is_empty())
+        .filter(|t| !t.trim().is_empty() && !hf_crash::report::is_fallback_title(c, t))
         .unwrap_or_else(|| c.summary.clone());
     let _ = writeln!(
         md,
@@ -1258,6 +1578,20 @@ fn render_crash_detail(md: &mut String, n: usize, c: &Crash, labels: &Labels) {
         escape_markdown_text(&title)
     );
     let _ = writeln!(md);
+    let _ = writeln!(
+        md,
+        "- {}{}**{}**",
+        labels.bullet_weakness,
+        labels.bullet_colon,
+        escape_markdown_text(&guidance::weakness_label(c))
+    );
+    let _ = writeln!(
+        md,
+        "- {}{}**{}**",
+        labels.bullet_severity,
+        labels.bullet_colon,
+        escape_markdown_text(&guidance::severity_rating(c, labels))
+    );
     let _ = writeln!(
         md,
         "- {}{}`{:?}`",
@@ -1375,6 +1709,7 @@ fn render_crash_detail(md: &mut String, n: usize, c: &Crash, labels: &Labels) {
             let _ = writeln!(md);
         }
     }
+    guidance::render_finding_guidance(md, c, labels);
     let _ = writeln!(md);
 }
 
@@ -1430,7 +1765,11 @@ pub fn report_user_prompt(facts: &str, data: &ReportData, language: ReportLangua
          about untested code; include the coverage graphs.\n\
          4. Findings - for EACH crash: a clear title, impact, likely root cause, \
          exploitability rationale (from the CASR severity), and concrete \
-         remediation guidance. Include the severity graphs.\n\
+         remediation guidance. Keep each finding's Weakness (CWE), Severity, \
+         Impact, Remediation, and Verification from the data sheet; expand on \
+         them but never contradict or drop them. Keep findings from earlier runs \
+         in their own subsection and say they were not re-observed. Include \
+         the severity graphs.\n\
          5. Risk Assessment - prioritize the findings and state residual risk.\n\
          6. Recommendations - prioritized, actionable next steps (fixes, more \
          fuzzing, harness/corpus improvements).\n\
@@ -1439,7 +1778,8 @@ pub fn report_user_prompt(facts: &str, data: &ReportData, language: ReportLangua
          there are no crashes, focus on coverage achieved, residual risk, and how \
          to drive deeper.\n\n\
          Output ONLY the Markdown report, starting with a single `#` title. Do not \
-         wrap the whole thing in a code fence.\n\n\
+         wrap the whole thing in a code fence, and do not copy the data sheet's \
+         generator footer: one is appended for you.\n\n\
          {language_rules}---\n\
          # DATA SHEET (ground truth)\n\n\
          {facts}",
@@ -1466,7 +1806,7 @@ pub fn ensure_required_evidence(ai_markdown: &str, data: &ReportData, labels: &L
     // the preserved fact sheet already states.
     let (_harness_defects, data) = partition_harness_defects(data);
     let data = data.as_ref();
-    let mut out = ai_markdown.trim_end().to_owned();
+    let mut out = without_generated_footer(ai_markdown, labels).to_owned();
     for crash in &data.crashes {
         if crash.reproduction.is_some() {
             // The fact sheet renders exactly this deterministic bullet, so
@@ -1506,6 +1846,23 @@ pub fn ensure_required_evidence(ai_markdown: &str, data: &ReportData, labels: &L
         labels.narrative_full_stop
     );
     out
+}
+
+/// `markdown` without a trailing fact-sheet footer (`---` then the italic
+/// "Generated by" line) that a model copied from the data sheet, so the
+/// composed report ends with exactly one footer.
+fn without_generated_footer<'a>(markdown: &'a str, labels: &Labels) -> &'a str {
+    let trimmed = markdown.trim_end();
+    let marker = format!("_{} ", labels.generated_by);
+    let Some(start) = trimmed.rfind(&marker) else {
+        return trimmed;
+    };
+    let footer = &trimmed[start..];
+    if footer.lines().count() != 1 {
+        return trimmed; // Not the last line: the model used the words in prose.
+    }
+    let before = trimmed[..start].trim_end();
+    before.strip_suffix("---").unwrap_or(before).trim_end()
 }
 
 // -- formatting helpers ------------------------------------------------------
@@ -1603,6 +1960,7 @@ mod ensure_required_evidence_tests {
             candidate: None,
             run: None,
             crashes,
+            earlier_findings: vec![],
             coverage: None,
             covered_functions: 0,
             corpus: super::CorpusStats::default(),

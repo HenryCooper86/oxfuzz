@@ -214,7 +214,7 @@ async fn run_campaign_runs_full_pipeline_and_picks_a_target() {
         .expect("deterministic campaign report");
     assert!(report.starts_with("# Fuzzing Report: `parse_entry`"));
     assert!(report.contains("No crashes were found"));
-    assert!(report.contains("| Status | Done |"));
+    assert!(report.contains("| Status | Completed |"));
 
     let report_path = dir.path().join("campaign-report.md");
     reporting
@@ -229,7 +229,7 @@ async fn run_campaign_runs_full_pipeline_and_picks_a_target() {
         .expect("release report export");
     let exported_report = std::fs::read_to_string(report_path).unwrap();
     assert!(exported_report.starts_with("# Fuzzing Report: `parse_entry`"));
-    assert!(exported_report.contains("| Status | Done |"));
+    assert!(exported_report.contains("| Status | Completed |"));
 }
 
 /// A runtime whose fuzz runs emit libFuzzer pulse and terminal stat lines, so

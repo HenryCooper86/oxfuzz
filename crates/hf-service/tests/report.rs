@@ -88,6 +88,7 @@ fn populated() -> ReportData {
             config: None,
             edges: None,
             execs: None,
+            execs_total: None,
             crash_count: None,
             harness_rev: None,
             binary_rev: None,
@@ -98,6 +99,7 @@ fn populated() -> ReportData {
             sandbox_rev: None,
         }),
         crashes: vec![sample_crash()],
+        earlier_findings: vec![],
         coverage: Some(CoverageSummary {
             lines_covered: 120,
             lines_total: 200,
@@ -559,6 +561,7 @@ fn empty_report_is_honest_not_fabricated() {
         candidate: None,
         run: None,
         crashes: vec![],
+        earlier_findings: vec![],
         coverage: None,
         covered_functions: 0,
         corpus: CorpusStats::default(),
@@ -648,7 +651,9 @@ fn english_labels_render_the_same_report_as_before() {
     assert!(md.contains("# Fuzzing Report:"));
     assert!(md.contains("| Property | Value |"));
     assert!(md.contains("| Metric | Covered | Total | Percent |"));
-    assert!(md.contains("| # | Kind | Severity | Location | Signature |"));
+    // The findings table leads with the weakness (CWE) rather than the
+    // sanitizer kind since 2026-11-19; the kind stays in each finding's detail.
+    assert!(md.contains("| # | Weakness | Severity | Location | Signature |"));
 }
 
 #[test]
@@ -663,7 +668,7 @@ fn nonzero_crash_narrative_sentence_is_assembled_correctly() {
     assert!(
         md.contains(
             "The campaign surfaced **1 unique crash(es)**, of which **1** rank as exploitable \
-             or probably exploitable (engine LibFuzzer, status Done)."
+             or probably exploitable (engine libFuzzer, status Completed)."
         ),
         "nonzero-crash narrative sentence mismatch:\n{md}"
     );
@@ -679,6 +684,7 @@ fn zero_crash_narrative_sentence_is_assembled_correctly() {
         candidate: None,
         run: None,
         crashes: vec![],
+        earlier_findings: vec![],
         coverage: None,
         covered_functions: 0,
         corpus: CorpusStats::default(),
@@ -969,4 +975,206 @@ fn harness_defects_do_not_count_toward_the_crash_total() {
         count_line(widened_findings),
         "a harness defect changed the target crash count"
     );
+}
+
+// -- Professional report content (2026-11-19) --------------------------------
+
+/// The AFL++ `utf8_decoder` campaign's terminal figures, as `fuzzer_stats`
+/// reported them.
+fn measured() -> ReportData {
+    let mut data = populated();
+    let run = data.run.as_mut().unwrap();
+    run.engine = EngineKind::AflPlusPlus;
+    run.edges = Some(11);
+    run.execs = Some(16_637.22);
+    run.execs_total = Some(998_483);
+    run.crash_count = Some(3);
+    run.config = Some(hf_core::engine::FuzzRunConfig {
+        harness_id: Uuid::nil(),
+        engine: EngineKind::AflPlusPlus,
+        duration: Some(std::time::Duration::from_secs(60)),
+        max_mem_mb: 2048,
+        max_cpus: 1,
+        seed_corpus: None,
+        sanitizer: hf_core::target::Sanitizer::Address,
+        env: vec![],
+        extra_args: vec![],
+        seed: None,
+        replay_of: None,
+        input_manifest_sha256: None,
+        input_timeout: None,
+        resume: false,
+        cmplog: false,
+    });
+    // The fixture's run ended one minute after it started.
+    run.ended_at = Some(run.started_at + chrono::Duration::seconds(60));
+    data
+}
+
+#[test]
+fn run_section_states_the_measured_performance_figures() {
+    let md = render_markdown(&measured(), &Labels::english());
+    for row in [
+        "| Engine | AFL++ |",
+        "| Status | Completed |",
+        "| Total executions | 998,483 |",
+        "| Executions per second (peak) | 16,637 |",
+        "| Edges covered | 11 |",
+        "| Crashing inputs retained | 3 |",
+        "| Unique findings | 1 |",
+    ] {
+        assert!(md.contains(row), "missing {row}:\n{md}");
+    }
+}
+
+#[test]
+fn an_unmeasured_rate_is_reported_as_not_measured_rather_than_zero() {
+    let mut data = measured();
+    data.run.as_mut().unwrap().execs = None;
+    let md = render_markdown(&data, &Labels::english());
+    assert!(
+        md.contains("| Executions per second (peak) | not measured |"),
+        "{md}"
+    );
+    assert!(!md.contains("| Executions per second (peak) | 0 |"));
+}
+
+#[test]
+fn each_finding_carries_its_weakness_severity_and_remediation() {
+    let md = render_markdown(&measured(), &Labels::english());
+    assert!(
+        md.contains("| # | Weakness | Severity | Location | Signature |"),
+        "{md}"
+    );
+    assert!(md.contains("CWE-787"), "{md}");
+    assert!(md.contains("Out-of-bounds Write"));
+    assert!(md.contains("Critical (9.0)"), "{md}");
+    assert!(md.contains("**Impact.**"), "{md}");
+    assert!(md.contains("**Remediation.**"));
+    assert!(md.contains("bounded forms that take the destination size"));
+    assert!(md.contains("**Verification.**"));
+}
+
+/// Guidance must not depend on a provider having drafted a bug report.
+#[test]
+fn remediation_is_present_without_a_model_written_bug_report() {
+    let mut data = measured();
+    data.crashes[0].bug_report = None;
+    data.crashes[0].casr.as_mut().unwrap().severity = CrashSeverity::NotExploitable;
+    data.crashes[0].casr.as_mut().unwrap().severity_short = "heap-buffer-overflow(read)".to_owned();
+    let md = render_markdown(&data, &Labels::english());
+    assert!(md.contains("CWE-125"), "{md}");
+    assert!(md.contains("Medium (5.0)"), "{md}");
+    assert!(md.contains("**Remediation.**"));
+    assert!(md.contains("against the buffer length before every read"));
+}
+
+#[test]
+fn recommendations_put_the_most_severe_finding_first_and_name_gaps() {
+    let md = render_markdown(&measured(), &Labels::english());
+    let section = md
+        .split("## Recommendations")
+        .nth(1)
+        .expect("a Recommendations section")
+        .split("\n## ")
+        .next()
+        .unwrap();
+    let first = section
+        .lines()
+        .find(|line| line.starts_with("1. "))
+        .expect("a numbered first recommendation");
+    assert!(first.contains("Finding 1"), "{first}");
+    assert!(first.contains("CWE-787"), "{first}");
+    // Coverage is 60% of lines, 7 of 10 functions.
+    assert!(section.contains("3 of 10 functions"), "{section}");
+    // A one-minute campaign is short.
+    assert!(section.contains("1m 0s"), "{section}");
+    // AddressSanitizer alone misses undefined behavior.
+    assert!(section.contains("UndefinedBehaviorSanitizer"), "{section}");
+}
+
+#[test]
+fn a_clean_campaign_still_states_residual_risk_and_next_steps() {
+    let mut data = measured();
+    data.crashes.clear();
+    // Clean means no crashing input at all; retained crashes without a
+    // finding are untriaged, not clean.
+    data.run.as_mut().unwrap().crash_count = Some(0);
+    let md = render_markdown(&data, &Labels::english());
+    let section = md.split("## Recommendations").nth(1).expect("section");
+    assert!(
+        section.contains("does not show the target is free of bugs"),
+        "{section}"
+    );
+}
+
+#[test]
+fn chinese_report_carries_chinese_remediation_and_recommendations() {
+    let md = render_markdown(&measured(), &Labels::chinese());
+    assert!(md.contains("## 修复建议与后续工作"), "{md}");
+    assert!(md.contains("**修复方法。**"), "{md}");
+    assert!(md.contains("CWE-787"));
+    assert!(md.contains("| 总执行次数 | 998,483 |"), "{md}");
+}
+
+/// A composed report copied the fact sheet's "Generated by" footer and then
+/// gained the "Composed by" one: two rules and two footers.
+#[test]
+fn a_composed_report_carries_exactly_one_footer() {
+    let data = populated();
+    let facts = render_markdown(&data, &Labels::english());
+    let composed = ensure_required_evidence(&facts, &data, &Labels::english());
+    assert_eq!(
+        composed.matches("_Generated by oxfuzz").count(),
+        0,
+        "{composed}"
+    );
+    assert_eq!(
+        composed.matches("_Composed by oxfuzz").count(),
+        1,
+        "{composed}"
+    );
+    assert!(!composed.contains("---\n\n---"), "{composed}");
+}
+
+#[test]
+fn the_composition_prompt_keeps_the_deterministic_guidance() {
+    let data = populated();
+    let facts = render_markdown(&data, &Labels::english());
+    let prompt = report_user_prompt(&facts, &data, ReportLanguage::En);
+    assert!(prompt.contains("Remediation"), "{prompt}");
+    assert!(prompt.contains("CWE"), "{prompt}");
+    assert!(prompt.contains("earlier runs"), "{prompt}");
+    assert!(prompt.contains("footer"), "{prompt}");
+}
+
+/// The latest run kept a crashing input nobody has triaged yet: the report
+/// cannot say the earlier finding was not re-observed, and the first thing to
+/// do is triage that run.
+#[test]
+fn untriaged_crashing_inputs_are_named_rather_than_reported_as_clean() {
+    let mut data = measured();
+    let earlier = data.crashes.remove(0);
+    data.earlier_findings = vec![earlier];
+    data.run.as_mut().unwrap().crash_count = Some(1);
+    let md = render_markdown(&data, &Labels::english());
+    let earlier_section = md
+        .split("## Findings from earlier runs")
+        .nth(1)
+        .expect("section");
+    assert!(
+        earlier_section.contains("not been triaged"),
+        "{earlier_section}"
+    );
+    assert!(
+        !earlier_section.contains("did not re-observe"),
+        "{earlier_section}"
+    );
+    let recommendations = md.split("## Recommendations").nth(1).unwrap();
+    let first = recommendations
+        .lines()
+        .find(|l| l.starts_with("1. "))
+        .unwrap();
+    assert!(first.contains("Triage"), "{first}");
+    assert!(first.contains("1 crashing input"), "{first}");
 }

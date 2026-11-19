@@ -10,6 +10,56 @@ retain only the current release; older entries remain here as the record.
 
 ## Unreleased
 
+### Fixed
+
+- Run figures, checked against each engine's own statistics files: a
+  honggfuzz run reported 1024 crashes (the ingest file cap) where honggfuzz
+  saved 2972 files; it now reports honggfuzz's saved-crash counter. honggfuzz
+  also saved one bug thousands of times, because the sandbox silently keeps
+  ASLR on and honggfuzz named crashes by PC; it now runs with
+  `--linux_keep_aslr` and names them by stack hash (460 files of one bug became
+  1 in a sandbox check). AFL++ startup lines (`exec speed = 999 us`, queue
+  names with `execs:N`) no longer appear as executions per second.
+- A run whose rate was never measured (libFuzzer crashing inside its first
+  second) shows "not measured" instead of 0 exec/s, and syzkaller's cumulative
+  execution count no longer sits in the executions-per-second column.
+  Migration 0053 adds `runs.execs_total`, moves syzkaller counts into it, and
+  clears zero rates of runs that covered edges or crashed.
+- One bug is one finding: a crash whose replay was not symbolized
+  (`harness+0x111dfc`) is matched to the symbolized report of the same
+  faulting addresses, and unsymbolized signatures no longer differ by run
+  directory.
+- Smoke runs store the coverage and execution total the engine wrote
+  (a honggfuzz smoke reported 13 edges and 197,178 executions and was stored
+  as 0 edges); runs stored earlier are repaired from the retained AFL++ and
+  honggfuzz statistics files the first time history or a report reads them.
+  Coverage an engine never reported is stored as unknown, not 0.
+- A report whose latest run retained crashing inputs that were never triaged
+  says so and recommends triaging them first, instead of calling earlier
+  findings not re-observed or the campaign clean.
+- A target's report no longer says "No crashes were found" when its latest
+  run failed or did not re-observe a bug an earlier run confirmed: those
+  findings are listed under "Findings from earlier runs".
+- CWE mapping: `stack-overflow` (stack exhaustion) is CWE-674, not CWE-121;
+  `use-after-poison`, `bad-free`, `alloc-dealloc-mismatch`,
+  `stack-use-after-return`, `FPE`, `allocation-size-too-big`, and
+  `out-of-memory` map to their own weaknesses instead of CWE-787. A
+  memory-safety finding CASR rates not exploitable scores 5.0 (Medium), not
+  3.5.
+
+### Added
+
+- Total executions for every engine in the Run view, run history, run
+  comparison, CLI (`oxfuzz runs show`, `oxfuzz run` summary), and reports.
+- Reports: the Run section states total executions, peak executions per
+  second, edges, crashing inputs retained, and unique findings; each finding
+  carries its CWE, a severity rating (Critical/High/Medium/Low with the score),
+  impact, remediation steps, and a verification step, without needing a model;
+  a prioritized Recommendations section covers fix order, verification,
+  coverage gaps, campaign length, sanitizer breadth, throughput, and seeds.
+  Engine and status read as product names (AFL++, Completed). A composed
+  report ends with one footer.
+
 ### Changed
 
 - Discover: `static` and other internal helper functions now count toward
