@@ -14,6 +14,10 @@ fn reads_latest_complete_csv_snapshot_and_ignores_an_unfinished_write() {
     assert_eq!(snapshot.stats.edges_covered, Some(15));
     assert_eq!(snapshot.stats.hangs, Some(4));
     assert_eq!(snapshot.stats.last_find_age_secs, Some(12));
+    assert_eq!(
+        snapshot.saved_crashes, 2,
+        "unique_crashes is the saved-file count"
+    );
 }
 
 #[test]

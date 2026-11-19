@@ -159,7 +159,9 @@ fn libfuzzer_final_stat(rest: &str) -> Option<EngineStats> {
         }
         "average_exec_per_sec" => {
             let rate = value.trim().parse::<f64>().ok()?;
-            if !rate.is_finite() || rate.is_sign_negative() {
+            // libFuzzer divides by whole elapsed seconds: a run that ended in
+            // its first second prints 0 at any speed, which is no measurement.
+            if !rate.is_finite() || rate <= 0.0 {
                 return None;
             }
             Some(EngineStats {
@@ -355,23 +357,43 @@ fn execs_from_line(line: &str) -> Option<f64> {
     let lower = line.to_ascii_lowercase();
     if lower.contains("exec/s") {
         libfuzzer_measured_rate(line)
-    } else if lower.contains("execs") {
-        let pos = lower.find("execs")?;
-        let after = &line[pos + "execs".len()..];
-        if after.starts_with("/sec") {
-            rate_numbers(&line[..pos])
-                .next_back()
-                .or_else(|| rate_numbers(after).next())
-        } else {
-            rate_numbers(after).next()
-        }
+    } else if let Some(pos) = lower.find("execs/sec") {
+        rate_numbers(&line[..pos])
+            .next_back()
+            .or_else(|| rate_numbers(&line[pos + "execs/sec".len()..]).next())
     } else if lower.contains("speed") {
         // honggfuzz "Speed : N/sec" and AFL "exec speed : N/sec" carry neither
         // "exec/s" nor "execs", so without this branch their rate is invisible.
-        rate_after_keyword(line, "speed")
+        // Only a figure stated per second is a rate: AFL++ calibration prints
+        // `exec speed = 999 us`, the latency of one input.
+        per_second_rate_after_keyword(line, "speed")
     } else {
+        // A bare `execs` figure is a counter (AFL++ queue names carry
+        // `execs:152`), never a throughput.
         None
     }
+}
+
+/// The first number after `keyword`, when the text right after it names a
+/// per-second unit (`246/sec`, `246/s`).
+fn per_second_rate_after_keyword(line: &str, keyword: &str) -> Option<f64> {
+    let lower = line.to_ascii_lowercase();
+    let after = &lower[lower.find(keyword)? + keyword.len()..];
+    let start = after.find(|c: char| c.is_ascii_digit())?;
+    if after[..start].ends_with('-') {
+        return None; // A negative rate is not a measurement.
+    }
+    let number_len = after[start..]
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .unwrap_or(after.len() - start);
+    let unit = after[start + number_len..].trim_start();
+    if !(unit.starts_with("/sec") || unit.starts_with("/s")) {
+        return None;
+    }
+    after[start..start + number_len]
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
 }
 
 /// Find the `u64` nearest `word` used as a whole token, preferring a number
@@ -593,6 +615,51 @@ mod tests {
             ),
             "AFL exec speed line must yield execs/sec, got {afl:?}"
         );
+    }
+
+    /// AFL++ dry-run lines retained from a real `utf8_decoder` campaign: the
+    /// calibration latency (`exec speed = 999 us`) and the `execs:` counter in
+    /// a queue entry name were each read as a rate, so the run's first samples
+    /// alternated between 0 and 999 exec/s. Neither is a throughput.
+    #[test]
+    fn calibration_latency_and_queue_counters_are_not_rates() {
+        for line in [
+            "    len = 4, map size = 5, exec speed = 999 us, hash = 1a2b3c4d5e6f7081",
+            "[*] Attempting dry run with 'id:000000,time:0,execs:0,orig:seed_high_byte'...",
+            "[*] Attempting dry run with 'id:000021,src:000011,time:1,execs:152,op:havoc,rep:15,+cov'...",
+        ] {
+            let events = parse_progress_events(line);
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, FuzzProgress::ExecsPerSec(_))),
+                "{line:?} is not a rate, got {events:?}"
+            );
+        }
+    }
+
+    /// libFuzzer's final average divides by whole elapsed seconds, so a run that
+    /// ended inside its first second prints 0 at any speed. The execution total
+    /// on the neighbouring line is still a real count.
+    #[test]
+    fn libfuzzer_final_zero_average_is_not_a_measurement() {
+        let rate = parse_progress_events("stat::average_exec_per_sec:     0");
+        assert!(
+            !rate.iter().any(|event| matches!(
+                event,
+                FuzzProgress::ExecsPerSec(_)
+                    | FuzzProgress::Stats(hf_core::engine::EngineStats {
+                        execs_per_sec: Some(_),
+                        ..
+                    })
+            )),
+            "{rate:?}"
+        );
+        let total = parse_progress_events("stat::number_of_executed_units: 1834");
+        assert!(total.iter().any(|event| matches!(
+            event,
+            FuzzProgress::Stats(stats) if stats.execs_total == Some(1834)
+        )));
     }
 
     #[test]

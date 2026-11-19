@@ -22,6 +22,9 @@ pub struct HonggfuzzStats {
     pub observed_at: u64,
     /// Engine-reported metrics; CSV throughput is the whole-run average.
     pub stats: EngineStats,
+    /// Crashing inputs honggfuzz saved (its `unique_crashes` column): the
+    /// files it wrote, which the crash directory holds.
+    pub saved_crashes: u64,
 }
 
 /// Read the last complete CSV row without loading an unbounded statistics file.
@@ -63,7 +66,7 @@ pub fn read_stats(output: &Path) -> std::io::Result<Option<HonggfuzzStats>> {
         .map(|value| value.trim().parse::<u64>())
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| invalid())?;
-    let [observed_at, last_coverage, executions, average, _crashes, _unique, hangs, edges, _blocks] =
+    let [observed_at, last_coverage, executions, average, _crashes, saved, hangs, edges, _blocks] =
         values.as_slice()
     else {
         return Err(invalid());
@@ -78,6 +81,7 @@ pub fn read_stats(output: &Path) -> std::io::Result<Option<HonggfuzzStats>> {
             last_find_age_secs: Some(observed_at.saturating_sub(*last_coverage)),
             ..EngineStats::default()
         },
+        saved_crashes: *saved,
     }))
 }
 
@@ -144,6 +148,12 @@ pub fn build_run_args(
     args.push(out.to_owned());
     args.push("--report".to_owned());
     args.push(format!("{out}/HONGGFUZZ.REPORT.TXT"));
+    // honggfuzz tries to turn ASLR off with `personality(ADDR_NO_RANDOMIZE)`,
+    // which the container's default seccomp profile denies without an error.
+    // Believing ASLR is off, it names each saved crash by its PC, so one bug
+    // was saved thousands of times. Telling it ASLR stays on makes it name a
+    // crash by its stack hash, which is what uniqueness means here.
+    args.push("--linux_keep_aslr".to_owned());
     // `cfg.env` is deliberately absent from the argument list: both callers pass
     // the same map through `ResourceLimits.env`, which the sandbox renders onto
     // the container. An `env K=V` wrapper here would be a second home for one

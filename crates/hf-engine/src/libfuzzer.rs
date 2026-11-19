@@ -42,6 +42,10 @@ pub fn build_run_args(
     // dictionary. Placed before `extra_args` so a caller can override with
     // `-use_value_profile=0` (libFuzzer takes the last occurrence).
     args.push("-use_value_profile=1".to_owned());
+    // Final counters (`stat::number_of_executed_units`, the average rate) are
+    // printed on exit and from the crash handler, so a run that crashes before
+    // its first pulse line still reports how many inputs it executed.
+    args.push("-print_final_stats=1".to_owned());
     // An allocation above one runs libFuzzer's own multi-process mode: the
     // parent coordinates N children over the shared corpus directory,
     // continues after a child crash (artifacts still land through

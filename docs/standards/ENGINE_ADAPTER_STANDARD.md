@@ -448,8 +448,28 @@ once per second and at exit, independently of terminal display and coverage
 growth. The service polls a bounded 4 KiB tail, rejects unsafe files and malformed
 complete rows, and skips partial writes. Consecutive timestamps and execution
 totals yield interval throughput; the first observation uses the reported average.
-The last snapshot also supplies terminal edges and hangs. CSV crash counters do
-not produce extra raw crash signals, since those already arrive through logs.
+The last snapshot also supplies terminal edges, hangs, and total executions, and
+its `unique_crashes` column (the crashing inputs honggfuzz saved) is the run's
+retained-crash figure: the crash-directory walk stops at the ingest cap of 1024
+files and cannot state a larger count. CSV crash counters do not produce extra
+raw crash signals, since those already arrive through logs.
+
+Honggfuzz runs with `--linux_keep_aslr`. Inside the container its
+`personality(ADDR_NO_RANDOMIZE)` call is denied by the default seccomp profile
+without an error, so ASLR stays on; believing it off, honggfuzz named each saved
+crash by its PC and saved one bug thousands of times. With the flag it names a
+crash by its stack hash.
+
+libFuzzer runs with `-print_final_stats=1`, so a run that crashes before its
+first pulse line still reports `stat::number_of_executed_units`. libFuzzer
+divides by whole elapsed seconds, so `exec/s: 0` on a status line and a final
+`average_exec_per_sec` of 0 are not measurements and are dropped.
+
+A rate is read only from a figure stated per second (`exec/s`, `execs/sec`,
+`N/sec`). AFL++ calibration latency (`exec speed = 999 us`) and the `execs:`
+counter in queue entry names are not rates. An unmeasured rate is stored as
+absent and shown as "not measured", never as zero. Total executions are stored
+in their own column; a cumulative count never occupies the rate field.
 
 ## 5. Crash Output
 

@@ -3677,8 +3677,9 @@ Iterations : 12345
         )
         .unwrap();
         // The real libFuzzer adapter argv for the same single-instance
-        // config: self-limit, artifact prefix, value profile, and the corpus
-        // positional.
+        // config: self-limit, artifact prefix, value profile, final counters
+        // (so a smoke that crashes at once still reports its executions), and
+        // the corpus positional.
         assert_eq!(
             cmd,
             vec![
@@ -3686,6 +3687,7 @@ Iterations : 12345
                 "-max_total_time=60",
                 "-artifact_prefix=/work/out/",
                 "-use_value_profile=1",
+                "-print_final_stats=1",
                 "/work/corpus",
             ]
         );

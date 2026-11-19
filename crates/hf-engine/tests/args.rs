@@ -26,6 +26,32 @@ fn cfg(engine: EngineKind, duration_secs: u64) -> FuzzRunConfig {
     }
 }
 
+/// A run that crashes before libFuzzer's first pulse line reports no execution
+/// total unless it prints its final counters (`stat::number_of_executed_units`),
+/// which it does on exit and from its crash handler.
+#[test]
+fn libfuzzer_prints_final_stats_so_short_runs_report_their_executions() {
+    let args = hf_engine::libfuzzer::build_run_args(
+        &cfg(EngineKind::LibFuzzer, 60),
+        "/work/fuzz_bin",
+        "/work/corpus",
+        "/work/out",
+    )
+    .unwrap();
+    let corpus = args
+        .iter()
+        .position(|a| a == "/work/corpus")
+        .expect("corpus");
+    let stats = args
+        .iter()
+        .position(|a| a == "-print_final_stats=1")
+        .expect("-print_final_stats=1");
+    assert!(
+        stats < corpus,
+        "a flag, before the corpus argument: {args:?}"
+    );
+}
+
 #[test]
 fn libfuzzer_enables_value_profile_comparison_feedback() {
     let c = cfg(EngineKind::LibFuzzer, 3600);
@@ -359,6 +385,31 @@ fn honggfuzz_args_have_run_time() {
         .position(|a| a == "--statsfile")
         .expect("--statsfile");
     assert_eq!(args[stats + 1], "/work/out/honggfuzz.stats");
+}
+
+/// honggfuzz names a saved crash by PC unless it believes ASLR is off. The
+/// sandbox's default seccomp profile denies `personality(ADDR_NO_RANDOMIZE)`,
+/// so ASLR stays on and every crash of one bug got a new PC and a new file
+/// (2972 files of one stack in a 60 s run). `--linux_keep_aslr` states the
+/// truth, and honggfuzz then names a crash by its stack hash.
+#[test]
+fn honggfuzz_keeps_aslr_so_crashes_deduplicate_by_stack() {
+    let args = hf_engine::honggfuzz::build_run_args(
+        &cfg(EngineKind::Honggfuzz, 10),
+        "/work/fuzz_bin",
+        "/work/corpus",
+        "/work/out",
+    )
+    .unwrap();
+    let separator = args.iter().position(|a| a == "--").expect("--");
+    let keep = args
+        .iter()
+        .position(|a| a == "--linux_keep_aslr")
+        .expect("--linux_keep_aslr");
+    assert!(
+        keep < separator,
+        "the flag belongs to honggfuzz, not the target"
+    );
 }
 
 #[test]
