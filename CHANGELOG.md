@@ -10,6 +10,8 @@ retain only the current release; older entries remain here as the record.
 
 ## Unreleased
 
+## 0.9.7 - 2026-11-19
+
 ### Fixed
 
 - Run figures, checked against each engine's own statistics files: a
