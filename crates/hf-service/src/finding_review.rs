@@ -50,4 +50,9 @@ pub struct FindingReviewItem {
     /// latest target run. Presentations must disable them for older evidence.
     pub latest_scoped_actions_allowed: bool,
     pub latest_scoped_action_reason: Option<String>,
+    /// Equal for findings of this target that are the same bug, across runs
+    /// ([`hf_crash::bug_keys`]): presentations group by it rather than by
+    /// the raw stack signature, which names each run's directory when a
+    /// replay was not symbolized.
+    pub bug_key: String,
 }

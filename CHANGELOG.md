@@ -39,6 +39,9 @@ retain only the current release; older entries remain here as the record.
   label (a campaign that peaked at 6,005/s was recorded as 2,953). The Run
   view shows a finished run's measured peak instead of "Unknown", and a
   selected smoke run no longer shows a "not a campaign" health error.
+- Triage groups findings by a service-derived bug key, so an overflow whose
+  replays were not symbolized in some runs is one group ("Seen 5 times in
+  3 runs") instead of three entries.
 - Dashboard: Crash Handoff and the crash total list each bug of a target once
   (one utf8.c:31 overflow was listed five times, once per run that hit it),
   and Recent Runs reads "N crashing inputs" rather than "N crashes".

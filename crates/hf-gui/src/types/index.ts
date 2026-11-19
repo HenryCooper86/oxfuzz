@@ -1011,6 +1011,8 @@ export interface FindingReviewItem {
   disposition: TriageDisposition;
   latest_scoped_actions_allowed: boolean;
   latest_scoped_action_reason: string | null;
+  /** Equal for findings of this target that are the same bug (service-derived). */
+  bug_key?: string;
 }
 
 /** A localizable readiness/next-action note: a stable code plus a count. */

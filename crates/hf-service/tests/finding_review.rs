@@ -913,3 +913,50 @@ async fn queue_and_report_share_failed_cancelled_selection_and_skip_active_missi
             .unwrap();
     }
 }
+
+/// Triage grouped findings by their raw signature, so one overflow whose
+/// replays were not symbolized stayed split across runs (the signature names
+/// each run's directory). The queue now carries one bug key per bug.
+#[tokio::test]
+async fn findings_of_one_bug_across_runs_share_a_bug_key() {
+    let (container, directory, mut target, harness) = fixture().await;
+    target.project_root = directory.path().to_path_buf();
+    let store = container.store().unwrap();
+    store.upsert_target(&target, Utc::now()).await.unwrap();
+    let project = directory.path().to_str().unwrap();
+    let first = run(project, harness.id, EngineKind::Honggfuzz, -10);
+    let second = run(project, harness.id, EngineKind::Honggfuzz, 0);
+    store.insert_run(&first).await.unwrap();
+    store.insert_run(&second).await.unwrap();
+    let mut keyed = Vec::new();
+    for owner in [&first, &second] {
+        let mut finding = crash(owner, &target, CrashOrigin::Target);
+        finding.stack_signature = format!("/work/runs/{}/input/harness+0x111dfc", owner.id);
+        store.upsert_crash(&finding).await.unwrap();
+        keyed.push(finding.id);
+    }
+    let mut unrelated = crash(&second, &target, CrashOrigin::Target);
+    unrelated.stack_signature = "/work/parser.c:88:3".to_owned();
+    store.upsert_crash(&unrelated).await.unwrap();
+
+    let items = container
+        .finding_review_queue(
+            directory.path(),
+            FindingReviewFilter {
+                disposition: FindingDispositionFilter::All,
+                ..FindingReviewFilter::default()
+            },
+        )
+        .await
+        .unwrap();
+    let key = |id: Uuid| {
+        items
+            .iter()
+            .find(|item| item.crash.id == id)
+            .unwrap()
+            .bug_key
+            .clone()
+    };
+    assert_eq!(key(keyed[0]), key(keyed[1]));
+    assert_ne!(key(keyed[0]), key(unrelated.id));
+}

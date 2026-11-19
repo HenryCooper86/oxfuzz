@@ -12,6 +12,23 @@ use crate::triage_disposition::Disposition;
 use crate::workbench::crash_review_items;
 
 use super::project_identity::retained_run_target_selector;
+
+/// [`hf_crash::bug_keys`] within each target, keyed by crash id.
+fn bug_keys_by_target(crashes: &[hf_core::crash::Crash]) -> HashMap<Uuid, String> {
+    let mut by_target: HashMap<Uuid, Vec<&hf_core::crash::Crash>> = HashMap::new();
+    for crash in crashes {
+        by_target.entry(crash.target_id).or_default().push(crash);
+    }
+    let mut keys = HashMap::new();
+    for (target, group) in by_target {
+        let owned: Vec<hf_core::crash::Crash> =
+            group.iter().map(|crash| (*crash).clone()).collect();
+        for (crash, key) in owned.iter().zip(hf_crash::bug_keys(&owned)) {
+            keys.insert(crash.id, format!("{target}:{key}"));
+        }
+    }
+    keys
+}
 use super::project_identity::{project_lookup_identity, stored_project_matches};
 use super::ServiceContainer;
 
@@ -105,6 +122,7 @@ impl ServiceContainer {
         #[cfg(not(feature = "patch-to-proof"))]
         let remediation_by_crash: HashMap<Uuid, RemediationOperationRecord> = HashMap::new();
 
+        let bug_key_by_crash = bug_keys_by_target(&crashes);
         let reviews = crash_review_items(crashes.clone(), &targets, &remediation_by_crash);
         let crash_by_id = crashes
             .into_iter()
@@ -144,6 +162,10 @@ impl ServiceContainer {
                 disposition: review.disposition,
                 latest_scoped_actions_allowed: latest,
                 latest_scoped_action_reason: (!latest).then(|| HISTORICAL_ACTION_REASON.to_owned()),
+                bug_key: bug_key_by_crash
+                    .get(&crash_id)
+                    .cloned()
+                    .unwrap_or_else(|| crash_id.to_string()),
             };
             if matches_filter(&item, &filter) {
                 items.push(item);

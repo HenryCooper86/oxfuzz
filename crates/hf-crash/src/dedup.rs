@@ -47,6 +47,44 @@ pub fn dedup(crashes: Vec<Crash>) -> Vec<Crash> {
     result
 }
 
+/// One key per crash, equal for crashes that are the same bug: the id of the
+/// first crash of its bug, grouping transitively through
+/// [`identity_keys`]. A crash with no identity is its own group.
+#[must_use]
+pub fn bug_keys(crashes: &[Crash]) -> Vec<String> {
+    // Union-find over crash positions; identity keys connect positions.
+    let mut parent: Vec<usize> = (0..crashes.len()).collect();
+    let mut owner: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (index, crash) in crashes.iter().enumerate() {
+        for key in identity_keys(crash) {
+            match owner.get(&key) {
+                Some(&other) => {
+                    let (a, b) = (root(&mut parent, index), root(&mut parent, other));
+                    // The earlier position stays the root, so the key is the
+                    // first crash of the bug in input order.
+                    let (keep, drop) = if a < b { (a, b) } else { (b, a) };
+                    parent[drop] = keep;
+                }
+                None => {
+                    owner.insert(key, index);
+                }
+            }
+        }
+    }
+    (0..crashes.len())
+        .map(|index| crashes[root(&mut parent, index)].id.to_string())
+        .collect()
+}
+
+/// The union-find root of `index`, compressing the path on the way.
+fn root(parent: &mut [usize], mut index: usize) -> usize {
+    while parent[index] != index {
+        parent[index] = parent[parent[index]];
+        index = parent[index];
+    }
+    index
+}
+
 /// Every key under which `crash` is the same bug as another crash.
 #[must_use]
 pub fn identity_keys(crash: &Crash) -> Vec<String> {
@@ -173,6 +211,46 @@ mod tests {
 
         assert_eq!(kept.len(), 1, "{kept:#?}");
         assert_eq!(kept[0].stack_signature, "/work/utf8.c:31:27");
+    }
+
+    /// Triage groups findings across runs by this key; the two unsymbolized
+    /// copies and the symbolized report of one overflow share it.
+    #[test]
+    fn findings_of_one_bug_share_a_bug_key() {
+        let unsymbolized = |run: &str| {
+            crash(
+                &format!("/work/runs/{run}/input/harness+0x111dfc"),
+                &[
+                    &format!("    #0 0xaaaaaabb1dfc  (/work/runs/{run}/input/harness+0x111dfc)"),
+                    &format!("    #1 0xaaaaaabb1b90  (/work/runs/{run}/input/harness+0x111b90)"),
+                ],
+            )
+        };
+        let symbolized = crash(
+            "/work/utf8.c:31:27",
+            &[
+                "    #0 0xaaaaaabb1dfc in decode_utf8 /work/utf8.c:31:27",
+                "    #1 0xaaaaaabb1b90 in LLVMFuzzerTestOneInput /work/harness.c:20:5",
+            ],
+        );
+        let other = crash(
+            "/work/b.c:20:1",
+            &[
+                "    #0 0xaaaaaabb3000 in b /work/b.c:20:1",
+                "    #1 0xaaaaaabb2000 in main",
+            ],
+        );
+        let crashes = vec![unsymbolized("a"), other, symbolized, unsymbolized("b")];
+        let keys = super::bug_keys(&crashes);
+        assert_eq!(keys[0], keys[2]);
+        assert_eq!(keys[0], keys[3]);
+        assert_ne!(keys[0], keys[1]);
+        let mut raw = crash("", &[]);
+        raw.casr = None;
+        let mut second = raw.clone();
+        second.id = Uuid::new_v4();
+        let alone = super::bug_keys(&[raw, second]);
+        assert_ne!(alone[0], alone[1], "no identity, no grouping");
     }
 
     #[test]

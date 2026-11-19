@@ -26,3 +26,17 @@ it("never merges findings without a signature or from different targets", () => 
   ]);
   expect(groups).toHaveLength(4);
 });
+
+it("groups by the service's bug key when present, across differing signatures", () => {
+  // One overflow: symbolized in one run, unsymbolized (run-specific path) in two.
+  const keyed = (id: string, run: string, signature: string, bug_key: string) =>
+    ({ ...item(id, run, signature), bug_key });
+  const groups = groupFindings([
+    keyed("c1", "r3", "/work/utf8.c:31:27", "t1:c1"),
+    keyed("c2", "r2", "/work/runs/r2/input/harness+0x111dfc", "t1:c1"),
+    keyed("c3", "r1", "/work/runs/r1/input/harness+0x111dfc", "t1:c1"),
+    keyed("c4", "r1", "/work/parser.c:88:3", "t1:c4"),
+  ]);
+  expect(groups.map(g => g.members.length)).toEqual([3, 1]);
+  expect(groups[0].runCount).toBe(3);
+});
