@@ -67,7 +67,7 @@ export const locales = {
       "Open a folder and get a ranked list of targets, with a reason for each. There is no harness to write by hand.",
     why_2_title: "Crashes you can prove",
     why_2_text:
-      "Every finding keeps its input, sanitizer report and stack trace, so anyone on your team can replay it.",
+      "Every finding keeps its input, sanitizer report and stack trace, so anyone on your team can replay it. A bug hit in several runs stays one finding.",
     why_3_title: "Nothing runs unreviewed",
     why_3_text:
       "Generated code is built and run in a container with no network, and only after you approve it.",
@@ -90,11 +90,11 @@ export const locales = {
     run_alt:
       "oxfuzz Run screen after a one-minute AFL++ campaign, showing edges covered, crash signals and executions per second",
     run_caption:
-      "<strong>Run.</strong> Start a time-limited campaign and watch coverage, speed and crashes live. Stop it whenever you like; the results stay.",
+      "<strong>Run.</strong> Start a time-limited campaign and watch coverage, speed, executions and crashes live, read from the engine's own statistics. Stop it whenever you like; the results stay.",
     triage_alt:
       "oxfuzz Triage screen showing one finding with its sanitizer classification and stack trace at utf8.c line 31",
     triage_caption:
-      "<strong>Triage.</strong> Crashes are replayed, grouped by stack and rated. Export a report, SARIF, or an issue draft.",
+      "<strong>Triage.</strong> Crashes are replayed, grouped into one finding per bug and rated. Export a report that gives each finding its CWE, severity, remediation steps and a fix-verification step, or SARIF, or an issue draft.",
 
     engines_title: "Four engines, one workflow",
     engines_intro:
@@ -242,7 +242,7 @@ export const locales = {
       "打开一个目录，就能得到排好序的目标列表，每个都附有理由。不用手写测试桩。",
     why_2_title: "拿得出证据的崩溃",
     why_2_text:
-      "每个发现都保留输入、sanitizer 报告和调用栈，团队里任何人都能重放。",
+      "每个发现都保留输入、sanitizer 报告和调用栈，团队里任何人都能重放。同一个缺陷在多次运行中出现，也只算一个发现。",
     why_3_title: "未经审查的代码不会运行",
     why_3_text:
       "生成的代码只在没有网络的容器里编译和运行，而且要先经过你的批准。",
@@ -265,11 +265,11 @@ export const locales = {
     run_alt:
       "oxfuzz 的运行界面，显示一分钟 AFL++ 测试结束后的覆盖边数、崩溃信号和每秒执行次数",
     run_caption:
-      "<strong>运行。</strong>启动一次限时测试，实时查看覆盖率、速度和崩溃。可以随时停止，结果会保留。",
+      "<strong>运行。</strong>启动一次限时测试，实时查看覆盖率、速度、执行次数和崩溃，数据直接读取自引擎自身的统计。可以随时停止，结果会保留。",
     triage_alt:
       "oxfuzz 的崩溃分类界面，显示一个发现及其 sanitizer 分类和位于 utf8.c 第 31 行的调用栈",
     triage_caption:
-      "<strong>崩溃分类。</strong>崩溃会被重放、按调用栈归并并评级。可以导出报告、SARIF 或 issue 草稿。",
+      "<strong>崩溃分类。</strong>崩溃会被重放、按缺陷归并为一个发现并评级。导出的报告为每个发现给出 CWE、严重程度、修复步骤和修复验证步骤；也可以导出 SARIF 或 issue 草稿。",
 
     engines_title: "四个引擎，一套流程",
     engines_intro:
