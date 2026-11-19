@@ -4,6 +4,15 @@
 [advisories]
 unmaintained = "workspace"
 yanked = "deny"
+# Unmaintained (not vulnerable) advisories accepted by the maintainer on
+# 2026-11-19 while the replacement is planned. chrono and chrono-tz carry every
+# persisted timestamp and the scheduler's time zones across the workspace;
+# moving to jiff or time is a workspace-wide migration tracked in TODO.md.
+# Remove these entries when that migration lands.
+ignore = [
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained; migration to jiff/time tracked in TODO.md" },
+    { id = "RUSTSEC-2026-0555", reason = "chrono-tz unmaintained; migrates with chrono, tracked in TODO.md" },
+]
 
 [licenses]
 allow = [

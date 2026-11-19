@@ -8,6 +8,12 @@ qualification from implementation.
 
 ## Functional improvements
 
+- [ ] Replace `chrono` and `chrono-tz` (unmaintained: RUSTSEC-2026-0543,
+  RUSTSEC-2026-0555) with `jiff` or `time` across the workspace: persisted
+  RFC 3339 timestamps, run durations, scheduler time zones, and `croner`'s
+  dependency. Both advisories are accepted in `deny.toml` until this lands;
+  remove those entries with the migration. Owner: `hf-core` / `hf-storage` /
+  `hf-scheduler`.
 - [x] Qualify retained-input replay and campaign function profiles on real engines.
   Implementation retains source, binary, initial corpus, dictionary, settings,
   and image identity; historical replay rejects missing or changed inputs.
