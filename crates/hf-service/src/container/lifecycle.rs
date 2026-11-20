@@ -125,6 +125,7 @@ impl ServiceContainer {
             turn_cancel: None,
             crash_scans: super::operation_registry::OperationRegistry::default(),
             scan_control: None,
+            triage_run_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             scheduler_events: Arc::new(std::sync::Mutex::new(None)),
             _health_task: None,
         }
@@ -205,6 +206,15 @@ impl ServiceContainer {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         Arc::clone(locks.entry(session.clone()).or_default())
+    }
+
+    /// The lock that serializes triage of one run.
+    pub(crate) fn triage_run_lock(&self, run_id: uuid::Uuid) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self
+            .triage_run_locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Arc::clone(locks.entry(run_id).or_default())
     }
 
     /// Replace the guardrail engine (e.g. install an interactive HITL gate),
@@ -511,6 +521,7 @@ impl ServiceContainer {
             turn_cancel: None,
             crash_scans: super::operation_registry::OperationRegistry::default(),
             scan_control: None,
+            triage_run_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             scheduler_events: Arc::new(std::sync::Mutex::new(None)),
             _health_task: Some(health_task),
         }

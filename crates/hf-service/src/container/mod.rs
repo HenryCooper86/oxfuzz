@@ -841,6 +841,11 @@ pub struct ServiceContainer {
     turn_cancel: Option<CancellationToken>,
     crash_scans: operation_registry::OperationRegistry,
     scan_control: Option<Arc<crash_scan::ScanControl>>,
+    /// One triage at a time per run: triage stages and rewrites the run's
+    /// `triage/` directories, so a second scan of the same run waits here.
+    /// Shared across clones, keyed by run id.
+    triage_run_locks:
+        Arc<std::sync::Mutex<std::collections::HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>>,
     /// Late-bound link to the campaign scheduler, shared across clones of this
     /// container so any operation in this process (scheduled or interactive)
     /// can emit scheduler events (crash found, run terminated). Set by

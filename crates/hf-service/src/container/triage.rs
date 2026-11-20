@@ -195,6 +195,19 @@ impl ServiceContainer {
         } else {
             self.acquire_workspace_operation().await?
         };
+        // The workspace lease is shared, so it does not keep two triages of
+        // one run apart; this does. A scan waiting here is still Queued and
+        // can be stopped without touching the scan that holds the lock.
+        let run_lock = self.triage_run_lock(run.id);
+        let _run_triage = if let Some(control) = &self.scan_control {
+            tokio::select! {
+                biased;
+                () = control.cancel.cancelled() => return Err(ClassifiedError::Cancelled),
+                guard = run_lock.lock_owned() => guard,
+            }
+        } else {
+            run_lock.lock_owned().await
+        };
 
         self.authorize_recorded(Action::Triage, "triage_run", Some(project))
             .await?;

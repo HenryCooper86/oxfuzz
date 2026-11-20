@@ -1070,7 +1070,9 @@ async fn scan_cancel_reaps_sandbox_retains_completed_reports_and_cancels_queued_
                 .await
         })
     };
-    tokio::task::yield_now().await;
+    // Give the queued scan time to get as far as it can. It must still be
+    // waiting for the running scan of the same run, not in the sandbox.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     service.cancel_crash_scan(queued_id);
     let queued_result = tokio::time::timeout(std::time::Duration::from_secs(2), queued)
         .await

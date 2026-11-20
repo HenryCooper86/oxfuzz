@@ -10,6 +10,14 @@ retain only the current release; older entries remain here as the record.
 
 ## Unreleased
 
+### Fixed
+
+- Triage: a second crash scan of the same run waits for the first instead of
+  running beside it. It reported "Waiting for workspace" but went on to
+  rewrite the run's CASR input and output directories while the first scan's
+  CASR was reading them; stopping it while it waits no longer reaches the
+  running scan.
+
 ## 0.9.7 - 2026-11-19
 
 ### Fixed
