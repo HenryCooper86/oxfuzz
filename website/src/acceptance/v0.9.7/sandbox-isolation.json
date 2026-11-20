@@ -1,0 +1,33 @@
+{
+  "schema_version": 3,
+  "claim": "sandbox_isolation",
+  "candidate_commit": "8e545fe2f93d71758c339488c9a1b3f510f05bf1",
+  "tag": "v0.9.7",
+  "platform": "macOS arm64 / Linux arm64 Docker",
+  "sandbox_image": {
+    "reference": "oxfuzz/fuzz-sandbox:0.2.2",
+    "id": "sha256:fa0101b94bcb30dbb43e0c7b804e22bc442a766479f8908f5436ded1aa84286f"
+  },
+  "command": "cargo test --locked -p hf-runtime --test live_isolation -- --ignored --test-threads=1 --nocapture",
+  "exit_code": 0,
+  "observed_on": "2026-11-19",
+  "scenarios_passed": [
+    "Network unavailable, input read-only, explicitly mounted output writable, 256 MiB and 1 CPU cgroup limits verified",
+    "Explicit numeric UID/GID can read private input and creates correctly owned output",
+    "Timeout awaits owned-container cleanup",
+    "Running container registered with owned workspace label",
+    "Runtime ownership records inaccessible inside the sandbox",
+    "Fresh runtime cleans up container left by terminated helper client"
+  ],
+  "helper": "Seventh test is the recovery child-process helper, not an independent scenario.",
+  "semgrep": {
+    "provenance": "Not repeated for v0.9.7. Retained from the v0.9.4 record: same sandbox image ID, Semgrep 1.169.0 and rules commit 4d66ecf30bfb1809a984085f2c86a8c3915bfc71."
+  },
+  "limitations": [
+    "Host is macOS arm64; this is not a Windows Docker or Linux KVM qualification.",
+    "Docker failure recovery scenarios cover only disposable owned containers.",
+    "All seven tests reported ok (six scenarios and the recovery helper). The Semgrep offline scan was not repeated for v0.9.6: the sandbox image, Semgrep version and rules snapshot are those qualified for v0.9.4."
+  ],
+  "candidate_delta": "The tag commit differs from c9cb973871d6ef756eacfc85bd0939bb0dd6c7ce only in deny.toml, TODO.md (two accepted chrono advisories and the migration item), and a #[cfg(test)] fixture in crates/hf-service/src/container/clang_analysis.rs; no production source, build, or runtime file changed.",
+  "observed_commit": "c9cb973871d6ef756eacfc85bd0939bb0dd6c7ce"
+}

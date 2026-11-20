@@ -1,0 +1,57 @@
+{
+  "schema_version": 3,
+  "claim": "userspace_engines",
+  "candidate_commit": "8e545fe2f93d71758c339488c9a1b3f510f05bf1",
+  "tag": "v0.9.7",
+  "qualification_commit": "c9cb973871d6ef756eacfc85bd0939bb0dd6c7ce",
+  "qualification_patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "candidate_delta": "The tag commit differs from c9cb973871d6ef756eacfc85bd0939bb0dd6c7ce only in deny.toml, TODO.md (two accepted chrono advisories and the migration item), and a #[cfg(test)] fixture in crates/hf-service/src/container/clang_analysis.rs; no production source, build, or runtime file changed.",
+  "source_sha256": "a21529ba223ec0a03b349e9f78b879eed69dc60d8d130dbac1b97fb7bf05a591",
+  "status": "passed",
+  "started_at": "2026-11-19T08:20:20.804587+00:00",
+  "ended_at": "2026-11-19T08:22:50.953017+00:00",
+  "platform": "macOS-27.2.1-arm64-arm-64bit",
+  "cycles": 1,
+  "cpu_cores": 1,
+  "memory_mib": 2048,
+  "smoke_and_replay_duration_secs": 10,
+  "review": "Normal configured provider review passed before execution; explicit human approval was supplied for this exact source pair.",
+  "cleanup": "verified_by_fixture",
+  "engines": {
+    "libfuzzer": {
+      "smoke_passed": true,
+      "smoke_duration_secs": 10,
+      "smoke_execs_per_sec": 1598776.0,
+      "smoke_crashes": 0,
+      "stop_ms": 515,
+      "campaign_run_id": "2340cd33-9130-4b18-9517-398d18bd55bb",
+      "replay_run_id": "9abc4b95-631c-4072-aaea-92abb327a48d",
+      "binary_sha256": "4bf4a4056cdb4b02400bd74b21261ce2f00b543fd47c1231d3ed8116858d63a2"
+    },
+    "afl++": {
+      "smoke_passed": true,
+      "smoke_duration_secs": 10,
+      "smoke_execs_per_sec": 263692.73,
+      "smoke_crashes": 0,
+      "stop_ms": 1445,
+      "campaign_run_id": "6199658e-664d-4656-a14a-bc83bb24a26a",
+      "replay_run_id": "b47e3eaa-ae66-4f72-97f0-284d5ae39fb8",
+      "binary_sha256": "87bc80a92dc98d0a254692a4e3f796a8f483e425564ffd01cde09584cc6ffb04"
+    },
+    "honggfuzz": {
+      "smoke_passed": true,
+      "smoke_duration_secs": 10,
+      "smoke_execs_per_sec": 148039.0,
+      "smoke_crashes": 0,
+      "stop_ms": 303,
+      "campaign_run_id": "63f772ae-a2e6-4f81-b343-ffd5444a2e3f",
+      "replay_run_id": "28f8f9e8-269c-4e55-accc-d376a8081f34",
+      "binary_sha256": "cf29269db3e44e6987f10d0e988aa437c3c0fe3e21202d493378cd80b1a1a054"
+    }
+  },
+  "limitations": [
+    "One short cycle per engine does not establish long-duration stability or a statistical latency percentile.",
+    "No crashes occurred; crash reproduction and symbolization are not claimed by this cycle.",
+    "Executed on macOS arm64 with a Linux arm64 Docker sandbox; not a Windows or Linux desktop installation test."
+  ]
+}

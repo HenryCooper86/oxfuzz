@@ -1,0 +1,36 @@
+{
+  "schema_version": 3,
+  "claim": "syzkaller",
+  "candidate_commit": "8e545fe2f93d71758c339488c9a1b3f510f05bf1",
+  "tag": "v0.9.7",
+  "qualification_provenance": "Retained local 2026-11-10 qualification of the syzkaller fixes committed in 12f5c8f4, published with v0.9.4. It was not rerun for v0.9.5, v0.9.6 or v0.9.7. v0.9.7 changes how a syzkaller run's figures are stored, not how the campaign runs: the cumulative executed count moves from the executions-per-second column to a total-executions column, and the stored rate is the peak of the rates derived between status lines. Those are covered by unit tests (status-line parsing, the derived-rate peak, and migration 0053 moving existing counts); no live syzkaller campaign was run on this candidate.",
+  "sandbox_image": "sha256:fa0101b94bcb30dbb43e0c7b804e22bc442a766479f8908f5436ded1aa84286f",
+  "kernel": "Linux 6.12.116, KCOV/KASAN",
+  "guest": "Debian bookworm arm64, QEMU TCG on macOS arm64",
+  "run_id": "6a6a33c4-f002-4600-b8a8-5b87310b613b",
+  "duration_secs": 180,
+  "cpu_cores": 2,
+  "memory_mib": 4096,
+  "vm_count": 1,
+  "execs": 1563,
+  "coverage": 2693,
+  "crashes_observed": 0,
+  "started_utc": "2026-11-10T08:34:57Z",
+  "ended_utc": "2026-11-10T08:37:57Z",
+  "termination": "completed; timeout wrapper exit 124 is expected",
+  "retention": "Corpus retained in managed run output; no test container remained.",
+  "limitations": [
+    "Not Linux/KVM performance qualification.",
+    "No kernel crash occurred; kernel crash reproduction and complete symbolization are not qualified.",
+    "Kernel/rootfs/private guest keys are not distributed with the application or website.",
+    "Only 1961 of 8051 described syscall variants were enabled by the prepared emulated guest.",
+    "The v0.9.7 storage of syzkaller execution totals and peak rates is verified by tests only, not by a live campaign on this candidate."
+  ],
+  "evidence_sha256": {
+    "report.md": "sha256:9f41677eef58abd1c6db8afa21a624c75c63ad56b076acb6a4ce86bc06381df9",
+    "campaign-final.log": "sha256:a672d02082628af69221ccbe5568cac3ffcc91c6e4d09e077924b5ca97821335",
+    "guest-ssh-green.log": "sha256:80aedbfd91e98efe0348cdb1dd52f1e52ca48228ae6ee36a2b4e7e776b9c210f"
+  },
+  "observed_commit": "c9cb973871d6ef756eacfc85bd0939bb0dd6c7ce",
+  "candidate_delta": "The tag commit differs from c9cb973871d6ef756eacfc85bd0939bb0dd6c7ce only in deny.toml, TODO.md (two accepted chrono advisories and the migration item), and a #[cfg(test)] fixture in crates/hf-service/src/container/clang_analysis.rs; no production source, build, or runtime file changed."
+}

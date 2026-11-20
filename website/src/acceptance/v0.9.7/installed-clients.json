@@ -1,0 +1,42 @@
+{
+  "schema_version": 3,
+  "claim": "installed_clients",
+  "candidate_commit": "8e545fe2f93d71758c339488c9a1b3f510f05bf1",
+  "tag": "v0.9.7",
+  "local_build_commit": "c9cb973871d6ef756eacfc85bd0939bb0dd6c7ce",
+  "production_delta": "The tag commit differs from c9cb973871d6ef756eacfc85bd0939bb0dd6c7ce only in deny.toml, TODO.md (two accepted chrono advisories and the migration item), and a #[cfg(test)] fixture in crates/hf-service/src/container/clang_analysis.rs; no production source, build, or runtime file changed.",
+  "platform": "macOS arm64",
+  "version_observed": "0.9.7",
+  "local_executable_sha256": "fb56cccdab3a5d07e670e18586ba923934f3ae25999e2a5063005260f0bbb9c2",
+  "observed_on": "2026-11-19",
+  "observed": {
+    "local_build": "Built with scripts/build-app.sh at the qualification commit; codesign --verify --deep --strict passed. Launched against the existing per-user data: the sidebar showed 0.9.7, the status bar reported Docker, sandbox, all four engines and DefectDojo ready, and Run History showed the migrated figures (honggfuzz runs with their saved crashing inputs and total executions recovered from honggfuzz.stats, an unmeasured libFuzzer rate shown as a dash).",
+    "same_day_walk": "Earlier on 2026-11-19, builds of this release's commits were exercised in browser mode on utf8_decoder against an isolated data copy: known-findings approval in the Harness step, a 60-second honggfuzz campaign from the Run view whose stored edges, total executions and retained crash equalled honggfuzz.stats, Run History, Dashboard, Triage grouping, deterministic and AI-composed reports.",
+    "not_observed": [
+      "First-run setup wizard",
+      "Windows and Linux desktop installations",
+      "Physical-bench automotive operations",
+      "syzkaller campaigns"
+    ]
+  },
+  "final_release_installer": {
+    "workflow_run": 44724635080,
+    "candidate_commit": "8e545fe2f93d71758c339488c9a1b3f510f05bf1",
+    "file": "oxfuzz_0.9.7_aarch64.dmg",
+    "sha256": "e42f12b270a3c7a372ab32f1616b11682326e013ab79ed011dee53ee42a988a3",
+    "executable_sha256": "78588d4fe69cbf174e7fb7cf441a4d16f149b52bb965fcf5883577999e8b1777",
+    "observed_on": "2026-11-20",
+    "checks": [
+      "Downloaded asset SHA-256 matches GitHub metadata, as do the other eight installers",
+      "DMG verification and read-only mount succeeded",
+      "Copied app passes codesign --verify --deep --strict (ad-hoc signature); bundle version 0.9.7",
+      "Installed to /Applications and launched against the existing local data; the process opened the per-user database",
+      "Window observed by the maintainer, not by the agent (screen access was unavailable to the agent): sidebar showed 0.9.7, the status bar reported the engines ready, and Run History showed earlier runs with their figures",
+      "No campaign was executed from the installer build"
+    ]
+  },
+  "limitations": [
+    "Only the macOS Apple silicon installer was launched; the other packages were built and digest-checked only.",
+    "macOS packages are ad-hoc signed and not notarized; Windows packages are unsigned."
+  ]
+}
