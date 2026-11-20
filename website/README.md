@@ -37,9 +37,17 @@ Never deploy the preview as a published release. It has no package links.
 
 Deploy the completed `dist/` into a new directory below `/srv/oxfuzz/releases/`.
 Verify its hashes, then atomically replace the `/srv/oxfuzz/current` symlink.
+Upload with `rsync -a --checksum --link-dest=/srv/oxfuzz/current/`. Every build
+rewrites every file with a new modification time, so without `--checksum` an
+unchanged file is copied with a new time, its ETag changes, and every returning
+visitor downloads the whole page again (the site sends `Cache-Control: no-cache`).
+With it, unchanged files are hard-linked to the live ones and keep their ETags.
 `nginx.conf` is the initial HTTP virtual host; Certbot manages the production TLS
 configuration. Do not replace Certbot's generated configuration with this template
 on subsequent deployments. Existing unrelated virtual hosts must be preserved.
+In that TLS configuration, serve HTTP/2 (`listen 443 ssl http2;` on nginx 1.24)
+and keep the template's `gzip` lines; over HTTP/1.1 a browser opens several TLS
+connections to load the page's assets.
 
 After each deployment, verify anonymous HTTPS downloads and their SHA-256 digests. Keep source, runtime data, SSH keys and GitHub credentials
 outside the web root. Retain the previous deployment for rollback.
