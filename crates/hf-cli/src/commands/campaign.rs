@@ -127,8 +127,38 @@ pub(crate) async fn cmd_trust(run: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub(crate) async fn cmd_coverage(project: PathBuf, target: &str) -> anyhow::Result<()> {
+pub(crate) async fn cmd_coverage(args: crate::args::CoverageArgs) -> anyhow::Result<()> {
+    let crate::args::CoverageArgs {
+        project,
+        target,
+        lcov,
+        html,
+    } = args;
+    let (target, lcov, html) = (target.as_str(), lcov.as_deref(), html.as_deref());
     let container = crate::approval::bootstrap().await;
+    if lcov.is_some() || html.is_some() {
+        // A requested report that cannot be produced is a failure, not a
+        // printed hint: a CI step must not pass with no file written.
+        let report = container.coverage_line_report(&project, target).await?;
+        if let Some(path) = lcov {
+            std::fs::write(path, &report.lcov)?;
+            println!("lcov tracefile written to {}", path.display());
+        }
+        if let Some(path) = html {
+            std::fs::write(path, &report.html)?;
+            println!("HTML coverage report written to {}", path.display());
+        }
+        println!(
+            "  {} of {} instrumented lines executed in {} file(s)",
+            report.lines_hit, report.lines_total, report.files
+        );
+        if report.skipped_files > 0 {
+            println!(
+                "  {} file(s) exceeded the report bounds and were left out",
+                report.skipped_files
+            );
+        }
+    }
     match container.coverage_summary(&project, target).await {
         Some(s) => {
             println!("Coverage for {target}:");
@@ -277,6 +307,392 @@ pub(crate) async fn cmd_defectdojo(
             .map(|u| format!(" -- {u}"))
             .unwrap_or_default()
     );
+    Ok(())
+}
+
+pub(crate) async fn cmd_issue(args: crate::args::IssueArgs) -> anyhow::Result<()> {
+    let crate::args::IssueArgs {
+        project,
+        crash,
+        draft,
+        test: test_only,
+    } = args;
+    let crash = crash.as_deref();
+    let container = crate::approval::bootstrap().await;
+    if test_only {
+        container.issue_tracker_test_connection().await?;
+        println!("Issue tracker connection OK.");
+        return Ok(());
+    }
+    // clap requires `--crash` whenever `--test` is absent.
+    let crash = crash.ok_or_else(|| anyhow::anyhow!("--crash is required"))?;
+    if draft {
+        print_issue_draft(&container.issue_export(&project, crash).await?);
+        return Ok(());
+    }
+    print_filed_issue(&container.file_issue(&project, crash).await?);
+    Ok(())
+}
+
+fn print_issue_draft(export: &hf_service::IssueExport) {
+    println!("Title:  {}", export.title);
+    println!("Labels: {}", export.labels.join(", "));
+    if let Some(url) = &export.issue_url {
+        println!("Open a prefilled issue: {url}");
+    }
+    println!("\n{}", export.description);
+}
+
+fn print_filed_issue(created: &hf_service::CreatedIssue) {
+    match created.number {
+        Some(number) => println!("Filed issue #{number}: {}", created.url),
+        None => println!("Filed issue: {}", created.url),
+    }
+}
+
+#[cfg(feature = "binary-only-fuzzing")]
+pub(crate) async fn cmd_binary_issue(args: crate::args::BinaryIssueArgs) -> anyhow::Result<()> {
+    let container = crate::approval::bootstrap().await;
+    if args.draft {
+        print_issue_draft(&container.binary_issue_export(
+            &args.project,
+            &args.report,
+            &args.finding,
+        )?);
+        return Ok(());
+    }
+    print_filed_issue(
+        &container
+            .binary_file_issue(&args.project, &args.report, &args.finding)
+            .await?,
+    );
+    Ok(())
+}
+
+pub(crate) async fn cmd_kernel(args: crate::args::KernelArgs) -> anyhow::Result<()> {
+    let duration_secs = crate::parse::parse_duration(&args.duration)?;
+    let container = crate::approval::bootstrap().await;
+    let path = |path: Option<PathBuf>| path.map(|path| path.to_string_lossy().into_owned());
+    let opts = hf_service::SyzkallerRunOpts {
+        project: args.project,
+        arch: args.arch,
+        duration_secs,
+        kernel_image: path(args.kernel_image),
+        disk_image: path(args.rootfs),
+        ssh_key: path(args.ssh_key),
+        manager_cfg: path(args.manager_cfg),
+        vm_count: args.vms,
+    };
+    let on_progress: Box<dyn Fn(FuzzProgress) + Send + Sync> = if args.json {
+        Box::new(crate::commands::status::eprinting_sink())
+    } else {
+        Box::new(crate::commands::status::printing_sink())
+    };
+    let summary = container.run_syzkaller(&opts, on_progress.as_ref()).await?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&summary)?);
+    } else {
+        println!("{}", kernel_summary(&summary, duration_secs));
+    }
+    Ok(())
+}
+
+/// The plain-text result of a kernel campaign.
+fn kernel_summary(summary: &hf_service::SyzkallerSummary, duration_secs: u64) -> String {
+    use hf_service::CommandTermination;
+    let Some(run_id) = summary.run_id else {
+        return "No kernel campaign was launched; see the guidance above.".to_owned();
+    };
+    let stopped = match summary.termination {
+        Some(CommandTermination::Completed) => "syz-manager exited",
+        Some(CommandTermination::TimedOut) => "the sandbox time limit ended it",
+        Some(CommandTermination::Cancelled) => "it was cancelled",
+        None => "the stop reason was not recorded",
+    };
+    let rate = summary.execs.map_or_else(
+        || "unavailable".to_owned(),
+        |rate| format!("{rate:.1} per second at peak"),
+    );
+    let exit = summary
+        .exit_code
+        .map_or_else(|| "none".to_owned(), |code| code.to_string());
+    // The programs syzkaller runs to probe the guest are counted as executed,
+    // so only coverage shows whether any fuzzing happened.
+    let without_coverage = if summary.edges == 0 {
+        "No coverage was recorded, so this campaign tested nothing: the guest did not finish a \
+         fuzzing program. Look above for a boot or SSH error. Without /dev/kvm the guest is \
+         emulated and needs ten minutes or more before its first program: use a longer \
+         --duration, and more CPUs and memory under [fuzzing.sandbox].\n"
+    } else {
+        ""
+    };
+    format!(
+        "Kernel campaign {run_id} on {} ran for up to {duration_secs}s: {stopped} (exit code {exit}).\n\
+         Programs executed: {}  ({rate})\n\
+         Coverage: {} edges  Crashes: {}\n\
+         {without_coverage}\
+         Triage it with: oxfuzz triage {} --target {}",
+        summary.target,
+        summary.execs_total,
+        summary.edges,
+        summary.crashes,
+        summary.project_root.display(),
+        summary.target,
+    )
+}
+
+#[cfg(feature = "binary-only-fuzzing")]
+pub(crate) async fn cmd_binary(args: crate::args::BinaryArgs) -> anyhow::Result<()> {
+    use hf_service::{BinaryFuzzRequest, BinaryInput};
+    let duration_secs = crate::parse::parse_duration(&args.duration)?;
+    let container = crate::approval::bootstrap().await;
+    let outcome = container
+        .binary_fuzz(&BinaryFuzzRequest {
+            project: args.project,
+            binary: args.binary,
+            input: if args.input.messages {
+                BinaryInput::SocketMessages
+            } else if args.input.socket {
+                BinaryInput::Socket
+            } else if args.input.stdin {
+                BinaryInput::Stdin
+            } else {
+                BinaryInput::File
+            },
+            seeds: args.seeds,
+            libraries: args.libs,
+            duration_secs,
+            timeout_ms: args.timeout_ms,
+        })
+        .await?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&outcome)?);
+        return Ok(());
+    }
+    println!("{}", binary_summary(&outcome));
+    Ok(())
+}
+
+/// The plain-text result of a binary-only session.
+#[cfg(feature = "binary-only-fuzzing")]
+fn binary_summary(outcome: &hf_service::BinaryFuzzOutcome) -> String {
+    use std::fmt::Write as _;
+    let count =
+        |value: Option<u64>| value.map_or_else(|| "unavailable".to_owned(), |v| v.to_string());
+    let mut text = format!(
+        "Fuzzed {} binary {} for {}s under AFL++ QEMU mode.\n\
+         Executions: {}  Edges: {}  Corpus: {}  Hangs: {}\n",
+        outcome.machine.uname(),
+        &outcome.binary_sha256[..16],
+        outcome.duration_secs,
+        count(outcome.execs_done),
+        count(outcome.edges_found),
+        count(outcome.corpus_count),
+        count(outcome.saved_hangs),
+    );
+    if outcome.findings.is_empty() {
+        text.push_str("No crashing input was saved.\n");
+    } else {
+        let _ = writeln!(
+            text,
+            "Crashing inputs: {} ({} distinct by stack signature)",
+            outcome.findings.len(),
+            outcome.distinct_findings
+        );
+    }
+    for finding in &outcome.findings {
+        let what = if finding.summary.is_empty() {
+            finding.fuzzer_signal.map_or_else(
+                || "signal unknown, no replay report".to_owned(),
+                |signal| {
+                    format!(
+                        "{} ({signal}), no replay report",
+                        hf_service::binary_signal_name(signal)
+                    )
+                },
+            )
+        } else {
+            finding.summary.clone()
+        };
+        let replay = if !finding.replayed {
+            "not replayed"
+        } else if finding.confirmed {
+            "replay confirmed"
+        } else {
+            "replay did not reproduce the signal"
+        };
+        let id = &finding.sha256[..finding.sha256.len().min(12)];
+        let _ = writeln!(text, "  {id}  {what}");
+        let _ = writeln!(
+            text,
+            "      {} bytes  {replay}  {}",
+            finding.size,
+            finding.input.display()
+        );
+        if let Some(first) = &finding.duplicate_of {
+            let _ = writeln!(
+                text,
+                "      same stack signature as {}",
+                &first[..first.len().min(12)]
+            );
+        }
+        if let Some(minimized) = &finding.minimized {
+            let _ = writeln!(
+                text,
+                "      minimized to {} bytes  {}",
+                minimized.size,
+                minimized.input.display()
+            );
+        }
+    }
+    if !outcome.findings.is_empty() {
+        let _ = writeln!(
+            text,
+            "Draft an issue for one: oxfuzz binary-issue <project> --report {} --finding <id> --draft",
+            outcome.workspace.join("report.json").display()
+        );
+    }
+    if outcome.findings_omitted > 0 {
+        let _ = writeln!(
+            text,
+            "{} more crash file(s) were saved by AFL++ and not read.",
+            outcome.findings_omitted
+        );
+    }
+    let _ = write!(text, "Session directory: {}", outcome.workspace.display());
+    text
+}
+
+#[cfg(feature = "crash-bisection")]
+pub(crate) async fn cmd_bisect(args: crate::args::BisectArgs) -> anyhow::Result<()> {
+    use hf_service::{BisectResult, BisectVerdict};
+    let container = crate::approval::bootstrap().await;
+    let outcome = container
+        .bisect_crash(
+            &args.project,
+            &args.target,
+            &args.crash,
+            &args.good,
+            Some(&args.bad),
+        )
+        .await?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&outcome)?);
+        return Ok(());
+    }
+    let short = |commit: &str| commit.chars().take(12).collect::<String>();
+    println!(
+        "Bisected {} commit(s) between {} (good) and {} (bad):",
+        outcome.candidates,
+        short(&outcome.good),
+        short(&outcome.bad)
+    );
+    for step in &outcome.steps {
+        let verdict = match step.verdict {
+            BisectVerdict::Good => "good",
+            BisectVerdict::Bad => "bad ",
+            BisectVerdict::Skip => "skip",
+        };
+        if step.note.is_empty() {
+            println!("  {verdict}  {}", short(&step.commit));
+        } else {
+            println!("  {verdict}  {}  {}", short(&step.commit), step.note);
+        }
+    }
+    match &outcome.result {
+        BisectResult::FirstBad { commit, subject } => {
+            println!("First commit at which the input crashes: {commit}");
+            println!("  {subject}");
+            println!(
+                "This is the first commit where the crash is observed; it may expose an older \
+                 defect rather than introduce it."
+            );
+        }
+        BisectResult::Undecided { commits } => {
+            println!(
+                "Undecided: the first crashing commit is one of these {} (oldest first); the \
+                 others could not be built or replayed:",
+                commits.len()
+            );
+            for commit in commits {
+                println!("  {commit}");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Store `file` as the operator's dictionary for `target`.
+pub(crate) async fn store_user_dictionary(
+    container: &hf_service::ServiceContainer,
+    project: &std::path::Path,
+    target: &str,
+    file: &std::path::Path,
+) -> anyhow::Result<()> {
+    let text = std::fs::read_to_string(file)
+        .map_err(|error| anyhow::anyhow!("cannot read dictionary {}: {error}", file.display()))?;
+    let tokens = container
+        .set_user_dictionary(project, target, &text)
+        .await?;
+    println!("Stored {tokens} dictionary token(s) for {target}; later runs use them first.");
+    Ok(())
+}
+
+/// The `run --dict` step: store the dictionary, then let the run proceed.
+pub(crate) async fn cmd_dict_before_run(
+    project: &std::path::Path,
+    target: &str,
+    file: &std::path::Path,
+) -> anyhow::Result<()> {
+    let container = crate::approval::bootstrap().await;
+    store_user_dictionary(&container, project, target, file).await
+}
+
+pub(crate) async fn cmd_dict(args: crate::args::DictArgs) -> anyhow::Result<()> {
+    let crate::args::DictArgs {
+        project,
+        target,
+        set,
+        clear,
+    } = args;
+    let target = target.as_str();
+    let container = crate::approval::bootstrap().await;
+    if let Some(file) = set.as_deref() {
+        return store_user_dictionary(&container, &project, target, file).await;
+    }
+    if clear {
+        container.clear_user_dictionary(&project, target).await?;
+        println!("Cleared the stored dictionary for {target}.");
+        return Ok(());
+    }
+    match container.user_dictionary(&project, target) {
+        Some(text) => print!("{text}"),
+        None => eprintln!("No dictionary is stored for {target}."),
+    }
+    Ok(())
+}
+
+#[cfg(feature = "crash-alerts")]
+pub(crate) async fn cmd_notify(args: crate::args::NotifyArgs) -> anyhow::Result<()> {
+    let crate::args::NotifyArgs {
+        project,
+        target,
+        test: test_only,
+    } = args;
+    let (project, target) = (project.as_deref(), target.as_deref());
+    let container = crate::approval::bootstrap().await;
+    if test_only {
+        container.notifications_test().await?;
+        println!("Notification webhook accepted the test message.");
+        return Ok(());
+    }
+    // clap requires both whenever `--test` is absent.
+    let project = project.ok_or_else(|| anyhow::anyhow!("a project path is required"))?;
+    let target = target.ok_or_else(|| anyhow::anyhow!("--target is required"))?;
+    match container.notify_latest_run(project, target).await? {
+        0 => println!("The latest run of {target} has no crashes; nothing was sent."),
+        crashes => println!("Sent an alert for {crashes} crash(es) in {target}."),
+    }
     Ok(())
 }
 
@@ -603,5 +1019,167 @@ mod report_cli_tests {
             message.contains("'en'") && message.contains("'zh'"),
             "{message}"
         );
+    }
+}
+
+#[cfg(test)]
+mod kernel_summary_tests {
+    use std::path::PathBuf;
+
+    use hf_service::CommandTermination;
+    use hf_service::SyzkallerSummary;
+
+    #[test]
+    fn the_summary_reports_the_run_its_counters_and_the_triage_command() {
+        let run_id = uuid::Uuid::from_u128(7);
+        let text = super::kernel_summary(
+            &SyzkallerSummary {
+                edges: 4821,
+                execs: Some(12.5),
+                execs_total: 930,
+                crashes: 2,
+                exit_code: Some(124),
+                termination: Some(CommandTermination::Completed),
+                run_id: Some(run_id),
+                project_root: PathBuf::from("/p"),
+                target: "Image".to_owned(),
+            },
+            1800,
+        );
+        assert!(
+            text.starts_with(&format!(
+                "Kernel campaign {run_id} on Image ran for up to 1800s: syz-manager exited (exit code 124)."
+            )),
+            "{text}"
+        );
+        assert!(
+            text.contains("Programs executed: 930  (12.5 per second at peak)"),
+            "{text}"
+        );
+        assert!(text.contains("Coverage: 4821 edges  Crashes: 2"), "{text}");
+        assert!(
+            text.ends_with("Triage it with: oxfuzz triage /p --target Image"),
+            "{text}"
+        );
+    }
+
+    /// A campaign whose guest never completed a program is still recorded,
+    /// and its zero is easy to read as "nothing found".
+    #[test]
+    fn a_campaign_without_coverage_says_what_that_means() {
+        let summary = SyzkallerSummary {
+            edges: 0,
+            execs: Some(0.0),
+            execs_total: 647,
+            crashes: 0,
+            exit_code: Some(124),
+            termination: Some(CommandTermination::Completed),
+            run_id: Some(uuid::Uuid::from_u128(9)),
+            project_root: PathBuf::from("/p"),
+            target: "Image".to_owned(),
+        };
+        let text = super::kernel_summary(&summary, 1200);
+        assert!(text.contains("Coverage: 0 edges"), "{text}");
+        assert!(
+            text.contains(
+                "No coverage was recorded, so this campaign tested nothing: the guest did not \
+                 finish a fuzzing program."
+            ),
+            "{text}"
+        );
+        assert!(text.contains("/dev/kvm"), "{text}");
+        assert!(text.contains("--duration"), "{text}");
+        let covered = super::kernel_summary(
+            &SyzkallerSummary {
+                edges: 12,
+                ..summary
+            },
+            1200,
+        );
+        assert!(!covered.contains("No coverage was recorded"), "{covered}");
+    }
+
+    #[test]
+    fn a_call_that_only_printed_guidance_is_not_reported_as_a_campaign() {
+        let text = super::kernel_summary(&SyzkallerSummary::default(), 60);
+        assert_eq!(
+            text,
+            "No kernel campaign was launched; see the guidance above."
+        );
+    }
+}
+
+#[cfg(all(test, feature = "binary-only-fuzzing"))]
+mod binary_summary_tests {
+    use std::path::PathBuf;
+
+    use hf_service::{BinaryFinding, BinaryFuzzOutcome, MinimizedInput};
+
+    #[test]
+    fn the_summary_groups_findings_and_names_the_minimized_input() {
+        let finding = |sha256: &str, duplicate_of: Option<&str>| BinaryFinding {
+            input: PathBuf::from(format!("/w/findings/crash-{sha256}")),
+            sha256: sha256.to_owned(),
+            size: 34,
+            fuzzer_signal: Some(11),
+            replay_signal: Some(11),
+            replayed: true,
+            confirmed: true,
+            kind: None,
+            signature: "sig".to_owned(),
+            summary: "SEGV (signal 11) at (/work/target+0x89c)".to_owned(),
+            frames: Vec::new(),
+            duplicate_of: duplicate_of.map(str::to_owned),
+            minimized: duplicate_of.is_none().then(|| MinimizedInput {
+                input: PathBuf::from("/w/minimized/crash"),
+                sha256: "d4".to_owned(),
+                size: 4,
+            }),
+        };
+        let unsigned = BinaryFinding {
+            signature: String::new(),
+            summary: String::new(),
+            minimized: None,
+            ..finding("0528e25a6f55564a8927", None)
+        };
+        let outcome: BinaryFuzzOutcome = serde_json::from_value(serde_json::json!({
+            "session": "00000000-0000-0000-0000-000000000000",
+            "workspace": "/w",
+            "binary_name": "decoder",
+            "binary_sha256": "ab".repeat(32),
+            "machine": "aarch64",
+            "input": "file",
+            "duration_secs": 60,
+            "execs_done": 1000,
+            "execs_per_sec": 10.0,
+            "edges_found": 5,
+            "corpus_count": 3,
+            "saved_hangs": 0,
+            "findings": [
+                finding("e87a3081cfe02e7f0a06", None),
+                finding("d4ecd6ef93448e5ae208", Some("e87a3081cfe02e7f0a06")),
+                unsigned
+            ],
+            "distinct_findings": 2,
+            "findings_omitted": 0
+        }))
+        .unwrap();
+        let text = super::binary_summary(&outcome);
+        // The report path is joined on the host, so its separator is the
+        // host's.
+        let report_hint = format!(
+            "oxfuzz binary-issue <project> --report {} --finding <id> --draft",
+            PathBuf::from("/w").join("report.json").display()
+        );
+        for expected in [
+            "Crashing inputs: 3 (2 distinct by stack signature)",
+            "  e87a3081cfe0  SEGV (signal 11) at (/work/target+0x89c)",
+            "      minimized to 4 bytes  /w/minimized/crash",
+            "      same stack signature as e87a3081cfe0",
+            "  0528e25a6f55  SIGSEGV (11), no replay report",
+            report_hint.as_str(),
+        ] {
+            assert!(text.contains(expected), "{expected}\n{text}");
+        }
     }
 }

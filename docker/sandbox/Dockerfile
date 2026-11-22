@@ -308,3 +308,141 @@ RUN cmake -S /tmp/oxfuzz-clang-analysis -B /tmp/oxfuzz-clang-build \
 RUN apt-get update && apt-get install -y --no-install-recommends openssh-client \
     && rm -rf /var/lib/apt/lists/* \
     && command -v ssh && command -v scp
+
+# --- Image 0.2.3 additions (managed-language engines, binary-only targets,
+# C++ MemorySanitizer). Appended so the pinned toolchains above keep their
+# build cache.
+
+# Python targets: Atheris (coverage-guided, libFuzzer-based). PyPI ships no wheel for
+# CPython 3.12 on linux/arm64, so the pinned sdist is built here.
+ARG ATHERIS_VERSION=3.0.0
+ARG ATHERIS_SHA256=1f0929c7bc3040f3fe4102e557718734190cf2d7718bbb8e3ce6d3eb56ef5bb3
+RUN apt-get update && apt-get install -y --no-install-recommends python3-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && printf 'atheris==%s --hash=sha256:%s\n' "$ATHERIS_VERSION" "$ATHERIS_SHA256" > /tmp/atheris.txt \
+    && python3 -m pip install --no-cache-dir --break-system-packages --no-binary atheris \
+       --require-hashes -r /tmp/atheris.txt \
+    && rm /tmp/atheris.txt \
+    && python3 -I -c 'import atheris'
+
+# JVM targets: the Jazzer standalone launcher and a headless JDK. The release
+# archive is verified against the digest of its architecture.
+ARG JAZZER_VERSION=0.30.0
+ARG JAZZER_SHA256_ARM64=16636a4d3e98f1d3a7fcf59d4ab37f5be1d1ad6df9d94d5c3ca8de644838e369
+ARG JAZZER_SHA256_AMD64=6eeaf0026d75599b07527d93b576593ce847cfca8b337a579971a5a9cdf792d0
+RUN apt-get update && apt-get install -y --no-install-recommends openjdk-21-jdk-headless \
+    && rm -rf /var/lib/apt/lists/* \
+    && arch="$(dpkg --print-architecture)" \
+    && case "$arch" in \
+         arm64) asset=jazzer-linux-arm64.tar.gz; sum="$JAZZER_SHA256_ARM64" ;; \
+         amd64) asset=jazzer-linux-x86-64.tar.gz; sum="$JAZZER_SHA256_AMD64" ;; \
+         *) echo "unsupported architecture $arch" >&2; exit 1 ;; \
+       esac \
+    && wget -q -O /tmp/jazzer.tar.gz "https://github.com/CodeIntelligenceTesting/jazzer/releases/download/v${JAZZER_VERSION}/${asset}" \
+    && echo "${sum}  /tmp/jazzer.tar.gz" | sha256sum -c - \
+    && mkdir -p /opt/jazzer && tar -xzf /tmp/jazzer.tar.gz -C /opt/jazzer \
+    && rm /tmp/jazzer.tar.gz && test -x /opt/jazzer/jazzer && java -version && javac -version
+ENV PATH="/opt/jazzer:${PATH}"
+
+# Binary-only targets: AFL++ QEMU mode (afl-qemu-trace) for the image's own
+# AFL++ release, built for the image architecture.
+ARG AFLPP_COMMIT=108fb0b29ad1586e668ba23e23a0eb1a13c45c49
+RUN apt-get update && apt-get install -y --no-install-recommends \
+       libtool-bin bison flex libglib2.0-dev libpixman-1-dev python3-setuptools pkg-config \
+    && rm -rf /var/lib/apt/lists/* \
+    && git init -q /tmp/aflpp && cd /tmp/aflpp \
+    && git remote add origin https://github.com/AFLplusplus/AFLplusplus \
+    && git fetch -q --depth 1 origin "$AFLPP_COMMIT" && git checkout -q FETCH_HEAD \
+    && ln -s "$(command -v afl-showmap)" afl-showmap \
+    && cd qemu_mode \
+    && case "$(dpkg --print-architecture)" in arm64) cpu=aarch64 ;; amd64) cpu=x86_64 ;; esac \
+    && CPU_TARGET="$cpu" ./build_qemu_support.sh \
+    && install -m 0755 ../afl-qemu-trace /usr/bin/afl-qemu-trace \
+    && cd / && rm -rf /tmp/aflpp \
+    && afl-qemu-trace -version | head -1
+
+# MemorySanitizer for C++: an MSan-instrumented libc++ and a libFuzzer
+# runtime built against it, from the LLVM release the image's clang is.
+ARG LLVM_TAG=llvmorg-18.1.3
+ARG LLVM_COMMIT=c13b7485b87909fcf739f62cfa382b55407433c0
+RUN git init -q /tmp/llvm && cd /tmp/llvm \
+    && git remote add origin https://github.com/llvm/llvm-project \
+    && git config core.sparseCheckout true \
+    && printf '%s\n' /runtimes/ /libcxx/ /libcxxabi/ /libc/ /cmake/ /llvm/cmake/ /llvm/utils/llvm-lit/ /compiler-rt/lib/fuzzer/ /third-party/ > .git/info/sparse-checkout \
+    && git fetch -q --depth 1 --filter=blob:none origin "$LLVM_COMMIT" && git checkout -q FETCH_HEAD \
+    && test "$(git rev-parse HEAD)" = "$LLVM_COMMIT" \
+    && cmake -G Ninja -S runtimes -B /tmp/llvm-build \
+         -DCMAKE_BUILD_TYPE=Release \
+         -DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi" \
+         -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+         -DLLVM_USE_SANITIZER=MemoryWithOrigins \
+         -DLIBCXXABI_USE_LLVM_UNWINDER=OFF \
+         -DLIBCXX_INCLUDE_BENCHMARKS=OFF -DLIBCXX_INCLUDE_TESTS=OFF -DLIBCXXABI_INCLUDE_TESTS=OFF \
+         -DCMAKE_INSTALL_PREFIX=/opt/oxfuzz/msan-libcxx \
+    && ninja -C /tmp/llvm-build cxx cxxabi \
+    && ninja -C /tmp/llvm-build install-cxx install-cxxabi \
+    && mkdir /tmp/fuzzer-msan && cd /tmp/fuzzer-msan \
+    && clang++ -c -O2 -g -std=c++17 -fPIC -fsanitize=memory -fsanitize-memory-track-origins \
+         -fno-omit-frame-pointer -stdlib=libc++ -nostdinc++ \
+         -isystem /opt/oxfuzz/msan-libcxx/include/c++/v1 \
+         /tmp/llvm/compiler-rt/lib/fuzzer/*.cpp \
+    && ar rcs /opt/oxfuzz/msan-libcxx/lib/libFuzzer-msan.a *.o \
+    && cd / && rm -rf /tmp/llvm /tmp/llvm-build /tmp/fuzzer-msan \
+    && test -f /opt/oxfuzz/msan-libcxx/lib/libc++.so.1 \
+    && test -f /opt/oxfuzz/msan-libcxx/lib/libFuzzer-msan.a
+
+# JavaScript targets: Node.js and Jazzer.js. The Node.js release archive is
+# verified against the digest of its architecture. The Jazzer.js tree is
+# installed from the committed lockfile, which pins every package by its
+# integrity hash, and no package's install script is run (none declares
+# one; the fuzzer's native module ships prebuilt for both architectures).
+# `jazzer-js` is the launcher a JavaScript harness artifact starts.
+ARG NODE_VERSION=24.22.3
+ARG NODE_SHA256_ARM64=6e51a2ada00f0011cc266f65d98922b403d7ad88f809ca2aa615a5fe1ce6e86c
+ARG NODE_SHA256_AMD64=4f2b175a6d53a5c617a80dba2676238a0688cef28c6da4eba35c7d844e66fcfb
+COPY docker/sandbox/jazzerjs/package.json docker/sandbox/jazzerjs/package-lock.json /opt/jazzerjs/
+RUN arch="$(dpkg --print-architecture)" \
+    && case "$arch" in \
+         arm64) node_arch=arm64; sum="$NODE_SHA256_ARM64" ;; \
+         amd64) node_arch=x64; sum="$NODE_SHA256_AMD64" ;; \
+         *) echo "unsupported architecture $arch" >&2; exit 1 ;; \
+       esac \
+    && wget -q -O /tmp/node.tar.xz "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.xz" \
+    && echo "${sum}  /tmp/node.tar.xz" | sha256sum -c - \
+    && mkdir -p /opt/node && tar -xJf /tmp/node.tar.xz -C /opt/node --strip-components=1 \
+    && rm /tmp/node.tar.xz \
+    && cd /opt/jazzerjs \
+    && PATH="/opt/node/bin:$PATH" npm ci --ignore-scripts --no-audit --no-fund \
+    && rm -rf /root/.npm \
+    && test -f "/opt/jazzerjs/node_modules/@jazzer.js/fuzzer/prebuilds/fuzzer-linux-${node_arch}.node" \
+    && printf '#!/bin/sh\nexec /opt/node/bin/node /opt/jazzerjs/node_modules/@jazzer.js/core/dist/cli.js "$@"\n' > /usr/local/bin/jazzer-js \
+    && chmod 0755 /usr/local/bin/jazzer-js \
+    && /opt/node/bin/node --version \
+    && jazzer-js --version
+
+# Bazel projects: two pinned Bazel releases, each verified against the
+# digest of its architecture, the launcher that picks one from a workspace's
+# .bazelversion, and the tool a Bazel build profile runs. That tool queries
+# compile commands offline from the vendor directory a project carries; the
+# image never fetches a Bazel dependency.
+ARG BAZEL8_VERSION=8.9.0
+ARG BAZEL8_SHA256_ARM64=db09df9fffd29e739ec45f2ce1b6e9db8c763e86e0ca95f625863c5c1846194f
+ARG BAZEL8_SHA256_AMD64=bc4b5efbaf8b1d85913fb0e6873e40e4d9b33244d30cbbbbcd1b7835d940f8fa
+ARG BAZEL9_VERSION=9.3.3
+ARG BAZEL9_SHA256_ARM64=41349440c343005f0531ad128df3d3da58e39d5b50bda3eb495e186c2e0bd23b
+ARG BAZEL9_SHA256_AMD64=24f30faa845410547a4fdeaa8d083e2eb9e95438b996ca76a0102ff8ef171334
+COPY docker/sandbox/bazel/bazel docker/sandbox/bazel/oxfuzz-bazel-compdb /usr/local/bin/
+RUN arch="$(dpkg --print-architecture)" \
+    && case "$arch" in \
+         arm64) bazel_arch=arm64; sum8="$BAZEL8_SHA256_ARM64"; sum9="$BAZEL9_SHA256_ARM64" ;; \
+         amd64) bazel_arch=x86_64; sum8="$BAZEL8_SHA256_AMD64"; sum9="$BAZEL9_SHA256_AMD64" ;; \
+         *) echo "unsupported architecture $arch" >&2; exit 1 ;; \
+       esac \
+    && mkdir -p /opt/bazel \
+    && wget -q -O /opt/bazel/bazel-8 "https://github.com/bazelbuild/bazel/releases/download/${BAZEL8_VERSION}/bazel-${BAZEL8_VERSION}-linux-${bazel_arch}" \
+    && echo "${sum8}  /opt/bazel/bazel-8" | sha256sum -c - \
+    && wget -q -O /opt/bazel/bazel-9 "https://github.com/bazelbuild/bazel/releases/download/${BAZEL9_VERSION}/bazel-${BAZEL9_VERSION}-linux-${bazel_arch}" \
+    && echo "${sum9}  /opt/bazel/bazel-9" | sha256sum -c - \
+    && chmod 0755 /opt/bazel/bazel-8 /opt/bazel/bazel-9 /usr/local/bin/bazel /usr/local/bin/oxfuzz-bazel-compdb \
+    && python3 -m py_compile /usr/local/bin/oxfuzz-bazel-compdb \
+    && rm -rf /usr/local/bin/__pycache__

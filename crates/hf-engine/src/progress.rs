@@ -272,6 +272,8 @@ fn is_finding_signal(lower: &str) -> bool {
         || lower.contains("sigabrt")
         || lower.contains("out-of-memory")
         || lower.contains("leaksanitizer")
+        || lower.contains("memorysanitizer")
+        || lower.contains("threadsanitizer")
         || lower.contains("detected memory leak")
         || lower.contains("deadly signal")
         || lower.contains("test unit written")
@@ -555,6 +557,10 @@ mod tests {
         assert!(finding("SUMMARY: AddressSanitizer: heap-buffer-overflow"));
         assert!(finding("==1== SUMMARY: libFuzzer: out-of-memory"));
         assert!(finding("SUMMARY: AddressSanitizer: detected memory leaks"));
+        assert!(finding(
+            "==14==WARNING: MemorySanitizer: use-of-uninitialized-value"
+        ));
+        assert!(finding("WARNING: ThreadSanitizer: data race (pid=45)"));
         assert!(finding("Test unit written to /work/out/oom-da39a3ee"));
         assert!(finding(
             "artifact_prefix='/work/out/'; Test unit written to /work/out/crash-abc"

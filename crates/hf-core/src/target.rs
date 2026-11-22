@@ -14,6 +14,8 @@ pub enum TargetLanguage {
     Rust,
     Go,
     Python,
+    Java,
+    JavaScript,
 }
 
 impl TargetLanguage {
@@ -28,6 +30,8 @@ impl TargetLanguage {
             Self::Rust => "rust",
             Self::Go => "go",
             Self::Python => "python",
+            Self::Java => "java",
+            Self::JavaScript => "javascript",
         }
     }
 
@@ -42,6 +46,8 @@ impl TargetLanguage {
             Self::Rust => &["rs"],
             Self::Go => &["go"],
             Self::Python => &["py"],
+            Self::Java => &["java"],
+            Self::JavaScript => &["js", "mjs", "cjs"],
         }
     }
 
@@ -52,8 +58,13 @@ impl TargetLanguage {
             Self::C => "harness.c",
             Self::Cpp => "harness.cc",
             Self::Rust => "harness.rs",
-            Self::Go => "harness.go",
+            // A `_test.go` file is compiled only by `go test`; the harness is
+            // one fuzz test placed beside the package it exercises.
+            Self::Go => "oxfuzz_fuzz_test.go",
             Self::Python => "harness.py",
+            // The file is named after the public class it declares.
+            Self::Java => "OxfuzzFuzzTarget.java",
+            Self::JavaScript => "harness.mjs",
         }
     }
 
@@ -68,27 +79,65 @@ impl TargetLanguage {
     /// presentation order. Membership must agree with [`Self::harnessable`];
     /// the pair exists so the predicate stays `const` while the set is
     /// iterable for user-facing messages.
-    pub const HARNESSABLE: &[Self] = &[Self::C, Self::Cpp, Self::Rust];
+    pub const HARNESSABLE: &[Self] = &[
+        Self::C,
+        Self::Cpp,
+        Self::Rust,
+        Self::Go,
+        Self::Python,
+        Self::Java,
+        Self::JavaScript,
+    ];
 
     /// Whether the harness pipeline can draft, build, and qualify a harness
     /// for this language today.
     ///
     /// This is the single source of truth for the discovery-vs-harnessing
-    /// distinction (Engineering Protocol 2.18): discovery scans every variant,
-    /// but Go stays `false` until the go-native build path ships (its run
-    /// adapter exists; the fixed `go test -c` compile argv is not implemented
-    /// -- docs/design/go-native-fuzzing-design.md), and Python until the
-    /// Atheris design lands (docs/design/python-atheris-fuzzing-design.md).
+    /// distinction (Engineering Protocol 2.18). Every variant is harnessable
+    /// today, but not under every engine: Go runs through the go-native
+    /// engine only, Python through the atheris engine only, Java through the
+    /// jazzer engine only, and JavaScript through the jazzer-js engine only.
+    /// Those engines are outside the default engine set, so such a harness
+    /// is still refused until the operator enables its engine
+    /// (docs/design/go-native-fuzzing-design.md,
+    /// docs/design/python-atheris-fuzzing-design.md,
+    /// docs/design/jvm-jazzer-fuzzing-design.md,
+    /// docs/design/javascript-jazzerjs-fuzzing-design.md).
     /// Harness authoring operations enforce this predicate directly, so a
     /// discovered-but-unsupported target fails with its language and the
     /// supported set rather than at a late build step.
     ///
-    /// Distinct from [`Self::libfuzzer_compatible`]: the two coincide today
-    /// because every harnessable language builds a libFuzzer binary, but a
-    /// future non-libFuzzer harness path (go-native) flips only this one.
+    /// Distinct from [`Self::libfuzzer_compatible`]: Go is harnessable but
+    /// builds a `go test` binary, not a libFuzzer one.
     #[must_use]
     pub const fn harnessable(self) -> bool {
-        matches!(self, Self::C | Self::Cpp | Self::Rust)
+        matches!(
+            self,
+            Self::C
+                | Self::Cpp
+                | Self::Rust
+                | Self::Go
+                | Self::Python
+                | Self::Java
+                | Self::JavaScript
+        )
+    }
+
+    /// The engine a harness in this language runs under when nothing else
+    /// is chosen: libFuzzer for the languages that compile to a libFuzzer
+    /// binary, Go's native fuzzer for Go, Atheris for Python, Jazzer for
+    /// Java, Jazzer.js for JavaScript. `None` for a discovery-only language.
+    /// User-facing next-step commands name this engine, so a Go target is
+    /// never pointed at an engine that refuses it.
+    #[must_use]
+    pub const fn default_engine(self) -> Option<crate::engine::EngineKind> {
+        match self {
+            Self::C | Self::Cpp | Self::Rust => Some(crate::engine::EngineKind::LibFuzzer),
+            Self::Go => Some(crate::engine::EngineKind::GoNative),
+            Self::Python => Some(crate::engine::EngineKind::Atheris),
+            Self::Java => Some(crate::engine::EngineKind::Jazzer),
+            Self::JavaScript => Some(crate::engine::EngineKind::JazzerJs),
+        }
     }
 
     /// The canonical ids of the harnessable languages, rendered for
@@ -156,9 +205,11 @@ impl std::str::FromStr for TargetLanguage {
             "rust" | "rs" => Ok(Self::Rust),
             "go" | "golang" => Ok(Self::Go),
             "python" | "py" => Ok(Self::Python),
+            "java" => Ok(Self::Java),
+            "javascript" | "js" | "node" => Ok(Self::JavaScript),
             other => Err(format!(
                 "unknown target language '{other}' (expected one of: \
-                 c, cpp, rust, go, python)"
+                 c, cpp, rust, go, python, java, javascript)"
             )),
         }
     }
@@ -394,26 +445,72 @@ mod tests {
     }
 
     #[test]
-    fn harnessable_marks_only_languages_with_a_working_harness_build() {
+    fn every_language_is_harnessable_under_the_engine_that_runs_it() {
         for (lang, expected) in [
             (TargetLanguage::C, true),
             (TargetLanguage::Cpp, true),
             (TargetLanguage::Rust, true),
-            (TargetLanguage::Go, false),
-            (TargetLanguage::Python, false),
+            (TargetLanguage::Go, true),
+            (TargetLanguage::Python, true),
+            (TargetLanguage::Java, true),
+            (TargetLanguage::JavaScript, true),
         ] {
             assert_eq!(lang.harnessable(), expected, "{lang:?}");
         }
+        assert!(!TargetLanguage::Go.libfuzzer_compatible());
+        assert!(TargetLanguage::Go.harness_filename().ends_with("_test.go"));
         // The rendered supported set is derived from the same predicate, so a
         // language that becomes harnessable joins every user-facing message at
         // once.
-        assert_eq!(TargetLanguage::harnessable_ids(), "c, cpp, rust");
+        assert_eq!(
+            TargetLanguage::harnessable_ids(),
+            "c, cpp, rust, go, python, java, javascript"
+        );
+        assert_eq!("js".parse(), Ok(TargetLanguage::JavaScript));
+        assert_eq!(
+            TargetLanguage::JavaScript.as_str().parse(),
+            Ok(TargetLanguage::JavaScript)
+        );
+        assert_eq!(TargetLanguage::JavaScript.harness_filename(), "harness.mjs");
+        assert_eq!(
+            TargetLanguage::JavaScript.extensions(),
+            ["js", "mjs", "cjs"]
+        );
+        assert!(!TargetLanguage::JavaScript.libfuzzer_compatible());
+        assert_eq!(
+            TargetLanguage::JavaScript.default_engine(),
+            Some(crate::engine::EngineKind::JazzerJs)
+        );
+        assert!(!TargetLanguage::Java.libfuzzer_compatible());
+        assert_eq!(
+            TargetLanguage::Java.default_engine(),
+            Some(crate::engine::EngineKind::Jazzer)
+        );
+        assert!(!TargetLanguage::Python.libfuzzer_compatible());
+        // Every harnessable language names the engine that runs it, and that
+        // engine accepts the language.
+        for language in TargetLanguage::HARNESSABLE {
+            let engine = language
+                .default_engine()
+                .expect("a harnessable language runs");
+            assert!(engine.supports_language(*language), "{language:?}");
+        }
+        assert_eq!(
+            TargetLanguage::Go.default_engine(),
+            Some(crate::engine::EngineKind::GoNative)
+        );
+        assert_eq!(
+            TargetLanguage::Python.default_engine(),
+            Some(crate::engine::EngineKind::Atheris)
+        );
         for lang in [
             TargetLanguage::C,
             TargetLanguage::Cpp,
             TargetLanguage::Rust,
             TargetLanguage::Go,
             TargetLanguage::Python,
+            TargetLanguage::Java,
+            TargetLanguage::JavaScript,
         ] {
             assert_eq!(
                 TargetLanguage::HARNESSABLE.contains(&lang),

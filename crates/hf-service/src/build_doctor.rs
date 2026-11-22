@@ -78,6 +78,30 @@ const MAX_SNAPSHOT_BYTES: u64 = 512 * 1024 * 1024;
 const SNAPSHOT_SKIP_NAMES: [&str; 5] =
     [".git", OXFUZZ_BUILD_DIR, "build", "node_modules", "target"];
 
+/// The link Bazel keeps inside a vendor directory, pointing into the output
+/// base of the machine that vendored.
+const BAZEL_VENDOR_LINK: &str = "bazel-external";
+/// Prefix of the convenience links (`bazel-bin`, `bazel-out`, ...) Bazel
+/// writes into a workspace root.
+const BAZEL_CONVENIENCE_LINK_PREFIX: &str = "bazel-";
+const BAZEL_WORKSPACE_FILES: [&str; 3] = ["MODULE.bazel", "WORKSPACE", "WORKSPACE.bazel"];
+
+/// Whether a symbolic link is one Bazel itself maintains: the vendor
+/// directory's link anywhere, or a convenience link in a workspace root.
+/// Such a link points into an output base outside the project, so the
+/// snapshot leaves it out instead of refusing the project; it is never
+/// followed, and Bazel recreates what it needs in the sandbox.
+fn is_bazel_own_link(name: &std::ffi::OsStr, directory: &Path) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    name == BAZEL_VENDOR_LINK
+        || (name.starts_with(BAZEL_CONVENIENCE_LINK_PREFIX)
+            && BAZEL_WORKSPACE_FILES
+                .iter()
+                .any(|marker| is_root_file(directory, marker)))
+}
+
 struct BuildStagingGuard {
     path: PathBuf,
 }
@@ -143,6 +167,9 @@ fn stage_project_snapshot(
                     source.display()
                 ))
             })?;
+            if kind.is_symlink() && is_bazel_own_link(&name, &source_dir) {
+                continue;
+            }
             if kind.is_symlink() {
                 return Err(ClassifiedError::Validation(format!(
                     "Build Doctor snapshot refuses symbolic link {}",
@@ -377,5 +404,73 @@ pub const fn build_system_id(build_system: BuildSystem) -> &'static str {
         BuildSystem::Bazel => "bazel",
         BuildSystem::Cargo => "cargo",
         BuildSystem::Unknown => "unknown",
+    }
+}
+
+#[cfg(all(test, unix))]
+mod snapshot_tests {
+    use super::stage_project_snapshot;
+
+    fn staged(project: &std::path::Path) -> Result<tempfile::TempDir, String> {
+        let staging = tempfile::tempdir().unwrap();
+        stage_project_snapshot(project, staging.path())
+            .map(|()| staging)
+            .map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn the_links_bazel_maintains_are_left_out_and_never_followed() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.h"), "outside").unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let vendor = project.path().join("third_party/bazel");
+        std::fs::create_dir_all(vendor.join("rules_cc+")).unwrap();
+        std::fs::write(
+            project.path().join("MODULE.bazel"),
+            "module(name = \"demo\")\n",
+        )
+        .unwrap();
+        std::fs::write(vendor.join("rules_cc+/defs.bzl"), "").unwrap();
+        std::os::unix::fs::symlink(outside.path(), vendor.join("bazel-external")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), project.path().join("bazel-bin")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), project.path().join("bazel-out")).unwrap();
+
+        let staging = staged(project.path()).unwrap();
+
+        assert!(staging.path().join("MODULE.bazel").is_file());
+        assert!(staging
+            .path()
+            .join("third_party/bazel/rules_cc+/defs.bzl")
+            .is_file());
+        for link in ["third_party/bazel/bazel-external", "bazel-bin", "bazel-out"] {
+            assert!(
+                staging.path().join(link).symlink_metadata().is_err(),
+                "{link} is not staged"
+            );
+        }
+    }
+
+    #[test]
+    fn any_other_link_still_refuses_the_project() {
+        let outside = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir(project.path().join("src")).unwrap();
+        std::fs::write(project.path().join("MODULE.bazel"), "").unwrap();
+        // A convenience-style name below the workspace root is not Bazel's.
+        std::os::unix::fs::symlink(outside.path(), project.path().join("src/bazel-bin")).unwrap();
+        let error = staged(project.path()).unwrap_err();
+        assert!(error.contains("refuses symbolic link"), "{error}");
+
+        let plain = tempfile::tempdir().unwrap();
+        // Without a Bazel workspace file the same name at the root is refused.
+        std::os::unix::fs::symlink(outside.path(), plain.path().join("bazel-bin")).unwrap();
+        let error = staged(plain.path()).unwrap_err();
+        assert!(error.contains("refuses symbolic link"), "{error}");
+
+        let linked = tempfile::tempdir().unwrap();
+        std::fs::write(linked.path().join("MODULE.bazel"), "").unwrap();
+        std::os::unix::fs::symlink(outside.path(), linked.path().join("include")).unwrap();
+        let error = staged(linked.path()).unwrap_err();
+        assert!(error.contains("refuses symbolic link"), "{error}");
     }
 }

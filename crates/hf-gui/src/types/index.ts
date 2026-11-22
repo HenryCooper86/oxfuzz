@@ -313,6 +313,9 @@ export interface SystemStatus {
   honggfuzz: boolean;
   syzkaller: boolean;
   /** The engine probe failed, so the flags above are unknown, not absent. */
+  atheris?: boolean;
+  jazzer?: boolean;
+  jazzer_js?: boolean;
   engine_probe_failed?: boolean;
   /** The configured DefectDojo is answering (false also when unconfigured). */
   defectdojo: boolean;
@@ -1050,7 +1053,7 @@ export interface IssueExport {
   title: string;
   description: string;
   labels: string[];
-  /** "github" | "gitlab" -- which forge the URLs/API target. */
+  /** "github" | "gitlab" | "jira" -- which tracker the URLs/API target. */
   provider: string;
   project_web_url: string | null;
   issue_url: string | null;

@@ -49,6 +49,11 @@ auto_revert_notify_only = false
 # proof-carrying feature; enabling it in a build without that feature fails
 # configuration load. Changing it requires requalification.
 collect_function_coverage = true
+# Add "go-native" to fuzz Go targets with Go's native fuzzer
+# (`--engine go-native`), "atheris" to fuzz Python targets with Atheris
+# (`--engine atheris`), "jazzer" to fuzz Java targets with Jazzer
+# (`--engine jazzer`), and "jazzer-js" to fuzz JavaScript targets with
+# Jazzer.js (`--engine jazzer-js`); none of the four is in the default set.
 enabled_engines = ["libfuzzer", "afl++", "honggfuzz", "syzkaller"]
 default_engine = "libfuzzer"
 default_duration_secs = 60
@@ -83,9 +88,12 @@ default_resume = false
 # which already-built harness may run. Override per build with
 # `oxfuzz harness --sanitizer undefined` (or `fuzz --sanitizer`); assert a
 # promoted harness's sanitizer per run with `run --sanitizer` /
-# `campaign --sanitizer`. "memory", "thread", and "none" are rejected: the
-# sandbox cannot honor them (see docs/standards/ENGINE_ADAPTER_STANDARD.md
-# 3.5), and Rust targets build AddressSanitizer-only regardless.
+# `campaign --sanitizer`. "thread" (ThreadSanitizer) builds for C and C++ on
+# libFuzzer and honggfuzz; "memory" (MemorySanitizer) builds for C targets
+# on every userspace engine and for C++ targets on libFuzzer and honggfuzz.
+# Any other engine or language fails at the build with the
+# reason (see docs/standards/ENGINE_ADAPTER_STANDARD.md 3.5). "none" is
+# rejected, and Rust targets build AddressSanitizer-only regardless.
 default_sanitizer = "address"
 
 # Resource limits for harness-based fuzzing campaigns. The service rejects a
@@ -221,7 +229,7 @@ timeout_secs = 30
 # memory_mb = 2048
 # cpus = 1
 # max_context_bytes = 16384
-# image = "oxfuzz/fuzz-sandbox:0.2.2"
+# image = "oxfuzz/fuzz-sandbox:0.2.3"
 # scope_file = "oxfuzz-clang-scope.json"
 # Opt into actual bounded LLVM Static Analyzer exploration and CFG evidence.
 # Omit this nested table for graph-only analysis.

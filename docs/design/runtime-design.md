@@ -14,7 +14,7 @@ backend selector. Test doubles implement `RuntimeAdapter` explicitly, but there
 is no production native-host fallback for generated or untrusted execution.
 
 The production image uses the release-version tag
-`oxfuzz/fuzz-sandbox:0.2.2`; floating `latest` references are forbidden. Its
+`oxfuzz/fuzz-sandbox:0.2.3`; floating `latest` references are forbidden. Its
 Dockerfile pins the base-image digest, source revisions, language toolchains,
 and top-level installed tool versions. The canonical build script rejects a
 floating tag and runs a network-disabled, read-only toolchain smoke check after
@@ -225,7 +225,9 @@ working-directory mechanism is needed.
 Phase 6 adds Bear beside existing CMake, Make, Ninja, and pkg-config in the
 pinned image. Image verification must include `bear --version`,
 `cmake --version`, `make --version`, and `pkg-config --version`. Autotools,
-Meson, and Bazel plans remain outside supported Phase 6 execution.
+Meson, and Bazel plans were outside Phase 6 execution; Meson and Autotools
+joined at image 0.2.0 and Bazel at 0.2.3, under the same network-disabled
+limits (`docs/design/build-doctor-design.md`).
 
 Save/diagnosis resolves the configured tag to an immutable ID. Executing build,
 probe, and compile steps passes that captured ID, never merely records it while

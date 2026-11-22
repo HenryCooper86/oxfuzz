@@ -175,4 +175,6 @@ pub fn propose_action(
     }
 }
 mod function_coverage;
+mod line_report;
 pub use function_coverage::{parse_llvm_function_coverage, FunctionCoverage};
+pub use line_report::{parse_llvm_cov_lines, FileCoverage, FunctionHit, LineReport};

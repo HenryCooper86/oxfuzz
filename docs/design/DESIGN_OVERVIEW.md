@@ -39,6 +39,7 @@ all under human-in-the-loop supervision.
 | Engine integration | hf-engine | `EngineAdapter`, `FuzzRunConfig`, `FuzzProgress` | engine-integration-design.md |
 | Planned Go native fuzzing | hf-service + hf-harness + hf-engine + hf-runtime | generated Go fuzz test, offline module inputs, separate engine evidence | go-native-fuzzing-design.md |
 | Planned Python Atheris fuzzing | hf-service + hf-harness + hf-engine + hf-runtime | generated Atheris script, offline wheels, separate engine evidence | python-atheris-fuzzing-design.md |
+| JavaScript Jazzer.js fuzzing | hf-service + hf-harness + hf-engine + hf-runtime | generated ES module harness, staged package tree, separate engine evidence | javascript-jazzerjs-fuzzing-design.md |
 | Automotive protocol contracts | hf-automotive | versioned DTO + `Validate` contract | automotive-protocol-fuzzing-design.md |
 | Crash triage | hf-crash | `Crash`, `CrashReport`, `CrashOrigin` | crash-triage-design.md |
 | Finding proof view | hf-service | `FindingProofCard`, `CrashReviewItem` | finding-proof-card-design.md |

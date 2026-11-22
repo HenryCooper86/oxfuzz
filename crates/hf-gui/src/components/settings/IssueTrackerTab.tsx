@@ -30,11 +30,17 @@ export function IssueTrackerTab({ value, onChange }: { value: IssueTrackerDraft;
         : value.repo.current ?? ""
   ).trim();
   const host = value.host.trim();
-  const configured = (provider === "github" || provider === "gitlab") && repo.length > 0;
+  const jira = provider === "jira";
+  // Jira has no public default host, so it is configured only with one.
+  const configured =
+    ((provider === "github" || provider === "gitlab") && repo.length > 0) ||
+    (jira && repo.length > 0 && host.length > 0);
 
-  const providerLabel = provider === "github" ? "GitHub" : provider === "gitlab" ? "GitLab" : t("settings.issuetracker.theTracker");
-  const defaultHost = provider === "github" ? "https://github.com" : "https://gitlab.com";
-  const repoUrl = configured ? `${(host || defaultHost).replace(/\/$/, "")}/${repo.replace(/^\/|\/$/g, "")}` : "";
+  const providerLabel =
+    provider === "github" ? "GitHub" : provider === "gitlab" ? "GitLab" : jira ? "Jira" : t("settings.issuetracker.theTracker");
+  const defaultHost = provider === "github" ? "https://github.com" : jira ? "https://example.atlassian.net" : "https://gitlab.com";
+  const base = (host || defaultHost).replace(/\/$/, "");
+  const repoUrl = !configured ? "" : jira ? `${base}/browse/${repo}` : `${base}/${repo.replace(/^\/|\/$/g, "")}`;
 
   async function testConnection() {
     setTesting(true);
@@ -76,6 +82,7 @@ export function IssueTrackerTab({ value, onChange }: { value: IssueTrackerDraft;
               { value: "none", label: t("settings.issuetracker.disabled") },
               { value: "github", label: "GitHub" },
               { value: "gitlab", label: "GitLab" },
+              { value: "jira", label: "Jira" },
             ]}
           />
         </SettingsItem>
@@ -86,7 +93,7 @@ export function IssueTrackerTab({ value, onChange }: { value: IssueTrackerDraft;
           <ProtectedValueEditor
             value={value.repo}
             onChange={(repoDraft) => onChange({ ...value, repo: repoDraft })}
-            placeholder="owner/repository"
+            placeholder={jira ? "FUZZ" : "owner/repository"}
           />
         </SettingsItem>
         <SettingsItem title={t("settings.issuetracker.username")} description={t("settings.issuetracker.usernameDesc")}>
@@ -118,7 +125,7 @@ export function IssueTrackerTab({ value, onChange }: { value: IssueTrackerDraft;
           <ProtectedValueEditor
             value={value.api_token_env}
             onChange={(apiTokenEnv) => onChange({ ...value, api_token_env: apiTokenEnv })}
-            placeholder={provider === "github" ? "GITHUB_TOKEN" : "GITLAB_TOKEN"}
+            placeholder={provider === "github" ? "GITHUB_TOKEN" : jira ? "JIRA_TOKEN" : "GITLAB_TOKEN"}
           />
         </SettingsItem>
         <SettingsItem title={t("settings.issuetracker.verifyTls")}>

@@ -5,9 +5,13 @@
 
 pub mod cargo_fuzz;
 pub mod generator;
+pub mod go_native;
+pub mod js_jazzer;
+pub mod jvm_jazzer;
 pub mod lint;
 pub mod persistent;
 pub mod project_sources;
+pub mod python_atheris;
 
 pub use lint::{
     harness_rules, has_blocking_finding, lint_harness_source, render_findings, HarnessRuleSummary,
@@ -25,4 +29,5 @@ pub use generator::{
 };
 
 /// Native mutator source composition and sandbox build helpers.
+pub mod grammar_mutator;
 pub mod managed_mutator;

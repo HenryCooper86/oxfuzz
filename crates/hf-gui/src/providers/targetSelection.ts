@@ -4,7 +4,7 @@ import { isRetiredEngineValue, retiredEngineDiagnostic } from "../lib/retiredEng
 import { DEFAULT_TARGET_STATE, type TargetSelectionIssue, type TargetState } from "./target";
 
 const ACTIVE_ENGINE_IDS = new Set<string>(FUZZING_ENGINE_OPTIONS.map((option) => option.value));
-const TARGET_LANGUAGES = new Set(["c", "cpp", "rust", "go", "python"]);
+const TARGET_LANGUAGES = new Set(["c", "cpp", "rust", "go", "python", "java", "javascript"]);
 
 export interface TargetSelectionEntry {
   state: TargetState;

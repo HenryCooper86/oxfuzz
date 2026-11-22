@@ -21,7 +21,14 @@ use hf_core::engine::EngineKind;
 /// A section must not be added here until service bootstrap or a service-owned
 /// integration loads and applies its typed configuration. This prevents the
 /// settings APIs from accepting files that have no runtime effect.
-pub const CONFIG_SECTIONS: &[&str] = &["oxfuzz", "providers", "defectdojo", "issue_tracker"];
+pub const CONFIG_SECTIONS: &[&str] = &[
+    "oxfuzz",
+    "providers",
+    "defectdojo",
+    "issue_tracker",
+    #[cfg(feature = "crash-alerts")]
+    "notifications",
+];
 
 /// Knowledge settings that the production project index currently consumes.
 ///
@@ -191,12 +198,13 @@ pub struct FuzzingSettings {
     pub default_resume: bool,
     /// Sanitizer for newly built C/C++ harnesses, as a canonical
     /// `Sanitizer` id: `address` (default, the long-standing build) or
-    /// `undefined` (`UndefinedBehaviorSanitizer`, halt-on-error). Applies at
-    /// harness BUILD time only: the sanitizer is baked into the harness
-    /// binary, so campaigns record the harness's own sanitizer and this
-    /// default never constrains which already-built harness may run. The
-    /// `memory`, `thread`, and `none` choices are rejected (the sandbox
-    /// cannot honor them; see `resolve_build_sanitizer`).
+    /// `undefined` (`UndefinedBehaviorSanitizer`, halt-on-error), `memory`,
+    /// or `thread`. Applies at harness BUILD time only: the sanitizer is
+    /// baked into the harness binary, so campaigns record the harness's own
+    /// sanitizer and this default never constrains which already-built
+    /// harness may run. `memory` and `thread` build only for the engine and
+    /// language pairs the build constructor admits; `none` is rejected (see
+    /// `resolve_build_sanitizer`).
     pub default_sanitizer: String,
     /// Sandboxed resource limits for harness-based campaigns.
     pub sandbox: FuzzingSandboxSettings,
@@ -762,32 +770,23 @@ fn validate_timeout_ms(value: u64) -> Result<(), String> {
     Ok(())
 }
 
-/// The sanitizer choices a fuzz build or run may select today. `Address` and
-/// `Undefined` build and run in the pinned sandbox image; the remaining
-/// `Sanitizer` variants parse (they are valid ids) but cannot be honored, so
-/// selecting one is a misconfiguration the operator must hear about rather
-/// than a build that silently differs from what was asked.
+/// The sanitizer choices a fuzz build or run may select. Every sanitizer the
+/// sandbox toolchain can build is selectable here; which engine and language
+/// can honor `Memory` or `Thread` is decided by the build constructor
+/// (`hf_harness::build_command_for_source`), the operation that makes the
+/// build. `None` parses (it is a valid id) but cannot be honored, so selecting
+/// it is a misconfiguration the operator must hear about.
 fn require_selectable_sanitizer(
     sanitizer: hf_core::target::Sanitizer,
 ) -> Result<hf_core::target::Sanitizer, String> {
     use hf_core::target::Sanitizer;
     match sanitizer {
-        Sanitizer::Address | Sanitizer::Undefined => Ok(sanitizer),
+        Sanitizer::Address | Sanitizer::Undefined | Sanitizer::Memory | Sanitizer::Thread => {
+            Ok(sanitizer)
+        }
         Sanitizer::None => Err(
             "sanitizer 'none' is not selectable: the pipeline's crash evidence \
              (classification, dedup, triage) comes from sanitizer reports"
-                .to_owned(),
-        ),
-        Sanitizer::Memory => Err(
-            "sanitizer 'memory' is not selectable: MemorySanitizer requires a fully \
-             instrumented libc and userspace, and the sandbox image's Ubuntu 24.04 \
-             runtime is not MSan-instrumented, so its findings would be false positives"
-                .to_owned(),
-        ),
-        Sanitizer::Thread => Err(
-            "sanitizer 'thread' is not selectable: ThreadSanitizer data-race reports \
-             do not map onto the crash-triage pipeline, and TSan cannot combine with \
-             the address/undefined harness builds"
                 .to_owned(),
         ),
     }
@@ -2815,6 +2814,8 @@ fn bundled_example(section: &str) -> &'static str {
         "providers" => include_str!("../../../config/providers.example.toml"),
         "defectdojo" => include_str!("../../../config/defectdojo.example.toml"),
         "issue_tracker" => include_str!("../../../config/issue_tracker.example.toml"),
+        #[cfg(feature = "crash-alerts")]
+        "notifications" => include_str!("../../../config/notifications.example.toml"),
         _ => "",
     }
 }
@@ -4997,16 +4998,21 @@ default_duration_secs = 22
             hf_core::target::Sanitizer::Address
         );
 
+        // Memory and thread are selectable; which engine and language can
+        // build them is decided by the build constructor (hf-harness).
+        for sanitizer in [
+            hf_core::target::Sanitizer::Memory,
+            hf_core::target::Sanitizer::Thread,
+        ] {
+            assert_eq!(
+                settings
+                    .resolve_build_sanitizer(Some(sanitizer))
+                    .expect("selectable sanitizer resolves"),
+                sanitizer
+            );
+        }
+
         // A value the pipeline cannot build fails at resolution, not silently.
-        let error = parsed
-            .fuzzing
-            .resolve_build_sanitizer(Some(hf_core::target::Sanitizer::Memory))
-            .unwrap_err();
-        assert!(error.contains("memory"), "{error}");
-        let error = settings
-            .resolve_build_sanitizer(Some(hf_core::target::Sanitizer::Thread))
-            .unwrap_err();
-        assert!(error.contains("thread"), "{error}");
         let error = settings
             .resolve_build_sanitizer(Some(hf_core::target::Sanitizer::None))
             .unwrap_err();
@@ -5018,11 +5024,15 @@ default_duration_secs = 22
         // A sanitizer the pipeline cannot build fails at load: the value is
         // self-contained misconfiguration (Engineering Protocol 2.16).
         let error =
-            parse_oxfuzz_runtime_config("[fuzzing]\ndefault_sanitizer = \"memory\"\n").unwrap_err();
+            parse_oxfuzz_runtime_config("[fuzzing]\ndefault_sanitizer = \"none\"\n").unwrap_err();
         assert!(
-            error.contains("default_sanitizer") && error.contains("memory"),
+            error.contains("default_sanitizer") && error.contains("none"),
             "{error}"
         );
+        for id in ["memory", "thread"] {
+            parse_oxfuzz_runtime_config(&format!("[fuzzing]\ndefault_sanitizer = \"{id}\"\n"))
+                .expect("memory and thread are selectable defaults");
+        }
 
         // A non-canonical spelling fails at load rather than resolving to a
         // different sanitizer.
@@ -5070,12 +5080,12 @@ default_duration_secs = 22
                 None,
                 None,
                 None,
-                Some(hf_core::target::Sanitizer::Memory),
+                Some(hf_core::target::Sanitizer::None),
                 None,
                 None,
             )
             .unwrap_err();
-        assert!(error.contains("memory"), "{error}");
+        assert!(error.contains("none"), "{error}");
     }
 
     #[test]
@@ -5204,7 +5214,14 @@ default_duration_secs = 22
     fn editable_sections_only_include_runtime_consumed_configuration() {
         assert_eq!(
             CONFIG_SECTIONS,
-            ["oxfuzz", "providers", "defectdojo", "issue_tracker"]
+            [
+                "oxfuzz",
+                "providers",
+                "defectdojo",
+                "issue_tracker",
+                #[cfg(feature = "crash-alerts")]
+                "notifications",
+            ]
         );
 
         for retired in [

@@ -13,14 +13,15 @@ driven by `syz-manager`, which needs three artifacts you provide:
 
 > Scope note: a useful bug-finding run needs the artifacts below plus an
 > accelerated VM. Under Docker on macOS there is no `/dev/kvm`, so qemu runs in
-> TCG emulation (correct but slow). Treat local runs as functional validation;
-> run real campaigns on a Linux host with KVM for throughput.
+> TCG emulation (correct but slow). Treat local runs as functional validation
+> (section 4.3 says what one looks like); run real campaigns on a Linux host
+> with KVM for throughput.
 
 ## 1. Prerequisites
 
 ### 1.1 Sandbox image with the syzkaller toolchain
 
-The shared sandbox image (`oxfuzz/fuzz-sandbox:0.2.2`) must contain the
+The shared sandbox image (`oxfuzz/fuzz-sandbox:0.2.3`) must contain the
 syzkaller toolchain (Go 1.26, qemu, and the `syz-*` binaries). The Docker layer
 that installs it lives in `docker/sandbox/Dockerfile`.
 
@@ -30,12 +31,12 @@ Build it one of two ways:
   image for your host architecture and then verifies `syz-manager` is present.
 - Or, in the app: open Settings > General > Sandbox and switch the Architecture
   (this forces a rebuild). To force a same-arch rebuild instead, remove the
-  image first: `docker image rm oxfuzz/fuzz-sandbox:0.2.2`.
+  image first: `docker image rm oxfuzz/fuzz-sandbox:0.2.3`.
 
 Confirm the toolchain is present:
 
 ```bash
-docker run --rm oxfuzz/fuzz-sandbox:0.2.2 bash -lc 'which syz-manager && syz-manager --help | head -1'
+docker run --rm oxfuzz/fuzz-sandbox:0.2.3 bash -lc 'which syz-manager && syz-manager --help | head -1'
 ```
 
 ### 1.2 Architecture matching
@@ -73,6 +74,7 @@ make kvm_guest.config
   -e CONFIG_CONFIGFS_FS \
   -e CONFIG_SECURITYFS \
   -e CONFIG_DEBUG_FS \
+  -e CONFIG_BINFMT_MISC \
   -e CONFIG_NET_9P \
   -e CONFIG_NET_9P_VIRTIO \
   -e CONFIG_CMDLINE_BOOL
@@ -80,6 +82,14 @@ make kvm_guest.config
 make olddefconfig
 make -j"$(nproc)"
 ```
+
+`CONFIG_BINFMT_MISC` is built in by the x86 default configuration but not by
+the arm64 one. The rootfs below mounts `binfmt_misc` at boot; without the
+option that mount fails, the guest stops in emergency mode before `sshd`
+starts, and the campaign reports that it cannot connect to the VM.
+
+On arm64 the kernel command line option is a string, not `CONFIG_CMDLINE_BOOL`:
+use `./scripts/config --set-str CONFIG_CMDLINE "console=ttyAMA0"`.
 
 The kernel image to hand to oxfuzz:
 
@@ -104,7 +114,28 @@ This produces (names vary by distro/arch):
 
 ## 4. Run from oxfuzz
 
+A campaign starts from the desktop app or from the command line. Both call
+the same service operation, ask for the same approval, and record the same
+run.
+
+From the command line:
+
+```bash
+oxfuzz kernel <project> --kernel-image arch/arm64/boot/Image \
+  --rootfs bullseye.img --ssh-key bullseye.id_rsa --vms 1 --duration 1h
+```
+
+`<project>` is the directory the run is recorded against. Progress lines
+from `syz-manager` print as they arrive; the command ends with the programs
+executed, the coverage reached, the crash count, and the `oxfuzz triage`
+command for the run. `--manager-cfg` takes an existing configuration as in
+section 4.2, `--arch` selects `amd64` or `arm64`, and `--json` prints the
+result as JSON with progress on standard error. The REST API does not start
+kernel campaigns.
+
 ### 4.1 Synthesized config (recommended)
+
+In the desktop app:
 
 1. Open the **Run** view and set **Engine** to `syzkaller (kernel)`.
 2. Fill in the **Kernel campaign artifacts** card:
@@ -150,7 +181,8 @@ The synthesized config looks like this (arm64 example):
     "kernel": "/syzbench/inputs/kernel",
     "cpu": 2,
     "mem": 2048,
-    "qemu_args": "-machine virt,accel=tcg -cpu max"
+    "qemu_args": "-machine virt,accel=tcg -cpu max",
+    "cmdline": "net.ifnames=0"
   }
 }
 ```
@@ -181,6 +213,40 @@ the managed container locations shown above. Any other absolute or
 parent-traversing path in the supplied JSON is rejected so the config cannot
 expose undeclared host content.
 
+### 4.3 Running without KVM
+
+On a host without `/dev/kvm` (Docker on macOS, most containers) the guest
+runs under qemu's TCG emulation. oxfuzz selects it by itself: the
+synthesized config uses `accel=tcg` and `-cpu max`, a supplied config has
+`accel=kvm` and `-cpu host` rewritten, and the campaign log says so. The
+campaign is the same; it is far slower.
+
+Give the sandbox more than its default budget. The default (`max_cpus = 1`,
+`max_mem_mb = 2048`) leaves the one guest a single virtual CPU and 1,536 MiB,
+which is too little for an emulated kernel with KASAN:
+
+```toml
+[fuzzing.sandbox]
+max_cpus = 2
+max_mem_mb = 6144
+```
+
+Use a duration of 30 minutes or more. Recorded on an Apple Silicon Mac
+(Linux 6.12 arm64 with KCOV and KASAN, one guest with two virtual CPUs and
+5,632 MiB): the guest answered SSH after about five minutes, syzkaller's
+machine check finished after about ten, and the first coverage was reported
+after about eighteen. Until then the counters show programs executed and no
+coverage; a campaign that ends in that window is recorded with zero coverage
+and `oxfuzz kernel` says that it tested nothing. The
+[acceptance record](../acceptance/kernel-emulated-2026-11-22.md) has the
+numbers.
+
+syzkaller lengthens its timeouts for an emulated guest when the `vm` section
+contains the text `-accel tcg`. oxfuzz does not write that spelling: in the
+recorded comparison it produced no coverage in a 30-minute campaign. If you
+supply your own config and want syzkaller's behavior, write `-accel tcg` in
+its `qemu_args` yourself; oxfuzz leaves it alone.
+
 ## 5. Watch progress
 
 `syz-manager` still creates its HTTP dashboard inside the container, but the
@@ -200,8 +266,17 @@ production campaigns.
 - **`boot error` / `<empty boot output>`** — the kernel did not boot. Check that
   the kernel arch matches the sandbox Architecture, that KCOV options are
   enabled, and that the rootfs + SSH key correspond to that kernel.
-- **Extremely slow / no executions** — expected under TCG emulation on
-  Docker-on-macOS (no `/dev/kvm`). Use a Linux host with KVM for real throughput.
+- **`failed to connect to the VM` after the guest prints `Emergency Mode`** —
+  a mount listed in the rootfs `/etc/fstab` failed, most often `binfmt_misc`
+  on an arm64 kernel built without `CONFIG_BINFMT_MISC` (section 2).
+- **`can't ssh into the instance` although the guest reaches a login prompt** —
+  the guest has no network address. A rootfs from `create-image.sh` configures
+  `eth0`, and without `net.ifnames=0` on the kernel command line udev renames
+  the interface. The synthesized config passes that option; a config of your
+  own needs `"cmdline": "net.ifnames=0"` in its `vm` section on arm64.
+- **Extremely slow** — expected under TCG emulation on Docker-on-macOS (no
+  `/dev/kvm`): see "Running without KVM" in section 4. Use a Linux host with
+  KVM for real throughput.
 
 ## 7. References
 

@@ -44,7 +44,12 @@ pub(crate) fn read(engine: EngineKind, output: &Path) -> Option<EngineFigures> {
                     saved_crashes: Some(snapshot.saved_crashes),
                 })
         }
-        EngineKind::LibFuzzer | EngineKind::Syzkaller | EngineKind::GoNative => None,
+        EngineKind::LibFuzzer
+        | EngineKind::Syzkaller
+        | EngineKind::GoNative
+        | EngineKind::Atheris
+        | EngineKind::Jazzer
+        | EngineKind::JazzerJs => None,
     }
 }
 

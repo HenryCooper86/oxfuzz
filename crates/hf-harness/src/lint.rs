@@ -303,8 +303,9 @@ pub(crate) fn is_comment_line(line: &str, language: TargetLanguage) -> bool {
 /// Check generated harness source against the harness rules.
 ///
 /// Rules are scoped per language: C, C++, Rust (cargo-fuzz/libFuzzer targets),
-/// and Python (Atheris) have rule sets; a language without one (Go) returns an
-/// empty vec, which means unchecked rather than clean.
+/// and Python (Atheris) share the lexical rule table; Go has its own checks
+/// in [`crate::go_native::lint_source`], because a Go harness is a test file
+/// whose structure the build depends on.
 ///
 /// At most one finding per rule per line, ordered by line then rule, so the
 /// output is stable enough to assert on and to put in a prompt.
@@ -337,6 +338,18 @@ pub fn lint_harness_source(source: &str, language: TargetLanguage) -> Vec<LintFi
     }
     if matches!(language, TargetLanguage::C | TargetLanguage::Cpp) {
         lint_persistent_structure(source, &mut findings);
+    }
+    if language == TargetLanguage::Go {
+        findings.extend(crate::go_native::lint_source(source));
+    }
+    if language == TargetLanguage::Python {
+        findings.extend(crate::python_atheris::lint(source, ""));
+    }
+    if language == TargetLanguage::Java {
+        findings.extend(crate::jvm_jazzer::lint(source, ""));
+    }
+    if language == TargetLanguage::JavaScript {
+        findings.extend(crate::js_jazzer::lint(source, ""));
     }
     findings.sort_by(|a, b| a.line.cmp(&b.line).then_with(|| a.rule.cmp(&b.rule)));
     findings
@@ -680,15 +693,27 @@ mod tests {
     fn python_comment_lines_are_skipped() {
         let source = "# sys.exit(1) must never run\n# subprocess.run([]) neither\n\
                       def TestOneInput(data): return 0\n";
-        assert!(lint_harness_source(source, TargetLanguage::Python).is_empty());
+        // The source is not the generated script, which the template rules
+        // report; none of the lexical rules fires on a commented-out call.
+        let findings = lint_harness_source(source, TargetLanguage::Python);
+        assert!(
+            findings.iter().all(|f| f.rule.starts_with("python-")),
+            "{findings:?}"
+        );
     }
 
     #[test]
-    fn go_harnesses_are_not_linted_yet() {
-        // Go has no rule set yet: unchecked rather than clean.
-        assert!(
-            lint_harness_source("func Fuzz(f *testing.F) { os.Exit(1) }", TargetLanguage::Go)
-                .is_empty()
+    fn go_harnesses_are_checked_by_the_go_rules() {
+        let rules: Vec<String> = lint_harness_source(
+            "package p\nimport \"testing\"\nfunc FuzzParse(f *testing.F) {\n\tos.Exit(1)\n}\n",
+            TargetLanguage::Go,
+        )
+        .into_iter()
+        .map(|finding| finding.rule)
+        .collect();
+        assert_eq!(
+            rules,
+            ["go-package-dir", "go-target-not-called", "no-process-exit"]
         );
     }
 

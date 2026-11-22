@@ -703,6 +703,8 @@ export function HarnessView({
                   { value: "rust", label: "Rust" },
                   { value: "go", label: "Go" },
                   { value: "python", label: "Python" },
+                  { value: "java", label: "Java" },
+                  { value: "javascript", label: "JavaScript" },
                 ]}
               />
             </div>

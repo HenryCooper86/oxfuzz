@@ -1,0 +1,232 @@
+name: Windows host qualification
+
+# Runs the Docker steps of docs/guides/WINDOWS_QUALIFICATION.md on a hosted
+# Windows runner: build the sandbox image from a Windows checkout, then the
+# sandbox isolation tests and the provider-free engine tests, with oxfuzz
+# running on Windows and its containers in a Linux engine.
+#
+# What this is and is not:
+# - The host is Windows Server 2025. Docker Desktop does not support Windows
+#   Server, so the engine is Rancher Desktop (a Docker engine inside WSL 2 that
+#   accepts Windows paths as bind sources). A probe on 2026-11-22 showed that
+#   WSL 2 works on the runner, that a plain dockerd inside WSL rejects a
+#   Windows bind source, and that Rancher Desktop and a Podman machine both
+#   translate it.
+# - The image is built here and stays on the runner. Nothing is published.
+# - Runbook step 1 (check and test without Docker) is the Windows job of
+#   ci.yml on the same commit. Steps 4 and 5 need a review provider and a
+#   human who has approved the sample sources; they are not run here.
+#
+# Manual. GitHub only dispatches a workflow that exists on the default branch,
+# so on any other branch a change to this file also starts it.
+
+on:
+  workflow_dispatch:
+  push:
+    branches-ignore:
+      - main
+    paths:
+      - .github/workflows/windows-qualification.yml
+
+concurrency:
+  group: windows-qualification-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  RANCHER_DESKTOP_VERSION: 1.25.0
+
+jobs:
+  qualify:
+    name: Docker steps on Windows
+    runs-on: windows-2025
+    timeout-minutes: 330
+    steps:
+      # The runner's git rewrites line endings on checkout, as a default Git
+      # for Windows install does. .gitattributes must keep the image build's
+      # inputs intact under that setting, so it is left alone on purpose.
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      - name: Host identity
+        shell: pwsh
+        run: |
+          cmd /c ver
+          Write-Output "ImageOS=$env:ImageOS ImageVersion=$env:ImageVersion"
+          git config --show-origin --get core.autocrlf
+          git rev-parse HEAD
+          git status --short
+          $env:WSL_UTF8 = '1'
+          wsl --version
+          Get-CimInstance Win32_ComputerSystem | Format-List NumberOfLogicalProcessors, TotalPhysicalMemory
+          Get-PSDrive -PSProvider FileSystem | Format-Table Name, Used, Free
+          exit 0
+
+      # The runner ships a Windows-container Docker service on the pipe the
+      # Linux engine needs. The engine's data goes to the larger drive.
+      - name: Install the container engine
+        shell: pwsh
+        run: |
+          Stop-Service docker -Force
+          New-Item -ItemType Directory -Path D:\rancher-desktop | Out-Null
+          New-Item -ItemType Junction -Path "$env:LOCALAPPDATA\rancher-desktop" -Target D:\rancher-desktop | Out-Null
+          choco install rancher-desktop --version $env:RANCHER_DESKTOP_VERSION -y --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "installation failed with $LASTEXITCODE" }
+          $bin = "$env:ProgramFiles\Rancher Desktop\resources\resources\win32\bin"
+          if (-not (Test-Path "$bin\rdctl.exe")) { throw "rdctl.exe not found in $bin" }
+          $bin | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - name: Start the container engine
+        shell: pwsh
+        run: |
+          rdctl start --container-engine.name=moby --kubernetes.enabled=false --application.start-in-background=true
+          $ready = $false
+          foreach ($attempt in 1..90) {
+            $os = docker info --format '{{.OSType}}' 2>$null
+            if ($LASTEXITCODE -eq 0 -and $os -eq 'linux') { $ready = $true; break }
+            Start-Sleep -Seconds 10
+          }
+          if (-not $ready) { throw "the engine did not become ready in 15 minutes" }
+          docker version
+          docker info
+
+      # The console shows the build steps; the uploaded log has every line.
+      - name: Build and verify the sandbox image
+        shell: bash
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          ./scripts/build-sandbox.sh 2>&1 | tee "$RUNNER_TEMP/image-build.log" | { grep -vE '^#[0-9]+ [0-9.]+ ' || true; }
+          test "${PIPESTATUS[0]}" -eq 0
+
+      - name: Image identity
+        shell: pwsh
+        run: |
+          docker image inspect --format 'image {{.Id}} {{.Architecture}} {{.Size}}' oxfuzz/fuzz-sandbox:0.2.3
+          if ($LASTEXITCODE -ne 0) { throw "the sandbox image is not present" }
+          docker system df
+          Get-PSDrive -PSProvider FileSystem | Format-Table Name, Used, Free
+
+      - name: Provision the pinned toolchain
+        shell: bash
+        run: rustup show active-toolchain
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # Test workspaces go under the runner's temp directory on D:, a plain
+      # long path. The default temp path on this runner is an 8.3 short name.
+      - name: Build the live tests
+        shell: bash
+        env:
+          TMP: ${{ runner.temp }}
+          TEMP: ${{ runner.temp }}
+        run: |
+          cargo test -p hf-runtime --test live_isolation --no-run
+          cargo test --workspace --lib --no-run
+
+      - name: Runbook step 2 - sandbox isolation
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          TMP: ${{ runner.temp }}
+          TEMP: ${{ runner.temp }}
+        run: |
+          cargo test -p hf-runtime --test live_isolation -- --ignored --test-threads=1 2>&1 | tee "$RUNNER_TEMP/step2-isolation.log"
+          test "${PIPESTATUS[0]}" -eq 0
+
+      - name: Runbook step 3 - source engines
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          TMP: ${{ runner.temp }}
+          TEMP: ${{ runner.temp }}
+        run: |
+          cargo test --workspace --lib -- --ignored --test-threads=1 \
+            live_go_native live_bisection live_cpp_memory_sanitizer \
+            live_atheris live_jazzer live_cargo_fuzz 2>&1 | tee "$RUNNER_TEMP/step3-source-engines.log"
+          test "${PIPESTATUS[0]}" -eq 0
+
+      - name: Runbook step 3 - campaign, Stop and resume
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          TMP: ${{ runner.temp }}
+          TEMP: ${{ runner.temp }}
+        run: |
+          cargo test --workspace --lib -- --ignored --test-threads=1 --nocapture \
+            live_stop_and_resume 2>&1 | tee "$RUNNER_TEMP/step3-stop-resume.log"
+          test "${PIPESTATUS[0]}" -eq 0
+
+      - name: Runbook step 3 - binary-only sessions
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          TMP: ${{ runner.temp }}
+          TEMP: ${{ runner.temp }}
+        run: |
+          cargo test --workspace --lib -- --ignored --test-threads=1 \
+            live_qemu_session live_socket_session 2>&1 | tee "$RUNNER_TEMP/step3-binary-only.log"
+          test "${PIPESTATUS[0]}" -eq 0
+
+      # The engines run on the engine VM's kernel and cannot change it. These
+      # are the settings they are known to depend on, and what a minimal
+      # MemorySanitizer program does under them.
+      - name: Kernel settings the engines depend on
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          MSYS_NO_PATHCONV: "1"
+          MSYS2_ARG_CONV_EXCL: "*"
+        run: |
+          docker run --rm --network none --tmpfs /tmp:rw,exec,size=64m oxfuzz/fuzz-sandbox:0.2.3 sh -c '
+            echo "kernel=$(uname -r)"
+            echo "core_pattern=$(cat /proc/sys/kernel/core_pattern)"
+            echo "mmap_rnd_bits=$(cat /proc/sys/vm/mmap_rnd_bits)"
+            echo "randomize_va_space=$(cat /proc/sys/kernel/randomize_va_space)"
+            clang --version | head -n 1
+            printf "int main(void) { return 0; }\n" > /tmp/probe.c
+            clang -fsanitize=memory /tmp/probe.c -o /tmp/probe
+            /tmp/probe
+            echo "memory-sanitizer probe exit=$?"
+          ' 2>&1 | tee "$RUNNER_TEMP/kernel-settings.log" || true
+
+      # Diagnostic, not part of the runbook: the same MemorySanitizer test with
+      # the engine VM's address-space randomization lowered, which is a host
+      # setting an operator would have to make.
+      - name: MemorySanitizer with mmap_rnd_bits lowered
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          TMP: ${{ runner.temp }}
+          TEMP: ${{ runner.temp }}
+        run: |
+          wsl -d rancher-desktop sysctl -w vm.mmap_rnd_bits=28
+          cargo test --workspace --lib -- --ignored --test-threads=1 --nocapture \
+            live_cpp_memory_sanitizer 2>&1 | tee "$RUNNER_TEMP/msan-lowered-randomization.log"
+          test "${PIPESTATUS[0]}" -eq 0
+
+      - name: Containers left behind
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          docker ps --all --format '{{.ID}} {{.Image}} {{.Status}} {{.Names}}'
+          exit 0
+
+      - name: Upload the logs
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-qualification-logs
+          path: |
+            ${{ runner.temp }}/image-build.log
+            ${{ runner.temp }}/step2-isolation.log
+            ${{ runner.temp }}/step3-source-engines.log
+            ${{ runner.temp }}/step3-stop-resume.log
+            ${{ runner.temp }}/step3-binary-only.log
+            ${{ runner.temp }}/kernel-settings.log
+            ${{ runner.temp }}/msan-lowered-randomization.log
+          if-no-files-found: warn
+          retention-days: 30

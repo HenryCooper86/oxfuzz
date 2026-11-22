@@ -511,7 +511,7 @@ async fn fuzz_auto_pick_excludes_a_higher_scoring_not_yet_harnessable_target() {
 }
 
 #[tokio::test]
-async fn fuzz_on_a_go_only_project_fails_at_discovery_naming_the_harnessable_set() {
+async fn fuzz_on_a_go_only_project_fails_at_discovery_naming_the_engine_that_runs_go() {
     let dir = tempfile::tempdir().unwrap();
     let _workspace_root = common::install_managed_workspace("oxfuzz_fuzz_pipeline_it");
     let project = go_only_project(&dir);
@@ -546,7 +546,7 @@ async fn fuzz_on_a_go_only_project_fails_at_discovery_naming_the_harnessable_set
             &noop_progress(),
         )
         .await
-        .expect_err("a project with only discovery-only targets cannot be fuzzed");
+        .expect_err("libFuzzer cannot drive a Go-only project");
 
     let message = error.to_string();
     assert!(
@@ -558,12 +558,11 @@ async fn fuzz_on_a_go_only_project_fails_at_discovery_naming_the_harnessable_set
         "the discovery result is reported, not hidden: {message}"
     );
     assert!(
-        message.contains("not yet available for their language(s) (go)"),
-        "the capability gap is named: {message}"
-    );
-    assert!(
-        message.contains("harnessable languages: c, cpp, rust"),
-        "the supported set is named: {message}"
+        message.contains(
+            "engine 'libfuzzer' cannot drive any of their languages (go targets run under \
+             --engine go-native)"
+        ),
+        "the engine that does drive Go is named: {message}"
     );
     assert_eq!(
         log.stages(),

@@ -228,9 +228,13 @@ fn run_guidance(project: &Path, language: TargetLanguage, symbol: &str) -> Strin
             TargetLanguage::harnessable_ids(),
         );
     }
+    let engine = language
+        .default_engine()
+        .unwrap_or(hf_service::EngineKind::LibFuzzer);
     format!(
-        "Run an already promoted harness with: oxfuzz run {} --target {symbol} --engine libfuzzer",
-        project.display()
+        "Run an already promoted harness with: oxfuzz run {} --target {symbol} --engine {}",
+        project.display(),
+        engine.as_str()
     )
 }
 
@@ -266,21 +270,36 @@ mod tests {
     }
 
     #[test]
-    fn target_browser_guidance_never_runs_a_not_yet_harnessable_language() {
-        for language in [TargetLanguage::Go, TargetLanguage::Python] {
-            let guidance = run_guidance(Path::new("/tmp/project"), language, "ParsePacket");
-            assert!(
-                !guidance.contains("oxfuzz run"),
-                "no run command exists for {language:?} yet: {guidance}"
-            );
-            assert!(
-                guidance.contains(language.as_str()),
-                "the language is named: {guidance}"
-            );
-            assert!(
-                guidance.contains("c, cpp, rust"),
-                "the supported set is named: {guidance}"
-            );
-        }
+    fn target_browser_guidance_names_the_engine_that_runs_the_language() {
+        let go = run_guidance(Path::new("/tmp/project"), TargetLanguage::Go, "ParsePacket");
+        assert!(
+            go.contains("oxfuzz run /tmp/project --target ParsePacket --engine go-native"),
+            "{go}"
+        );
+        let c = run_guidance(Path::new("/tmp/project"), TargetLanguage::C, "parse");
+        assert!(c.contains("--engine libfuzzer"), "{c}");
+        let python = run_guidance(Path::new("/tmp/project"), TargetLanguage::Python, "parse");
+        assert!(
+            python.contains("--target parse --engine atheris"),
+            "{python}"
+        );
+        let java = run_guidance(
+            Path::new("/tmp/project"),
+            TargetLanguage::Java,
+            "Frames.parse",
+        );
+        assert!(
+            java.contains("--target Frames.parse --engine jazzer"),
+            "{java}"
+        );
+        let javascript = run_guidance(
+            Path::new("/tmp/project"),
+            TargetLanguage::JavaScript,
+            "parse",
+        );
+        assert!(
+            javascript.contains("--target parse --engine jazzer-js"),
+            "{javascript}"
+        );
     }
 }

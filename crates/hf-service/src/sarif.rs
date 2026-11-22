@@ -168,7 +168,13 @@ pub fn security_severity(crash: &Crash) -> f64 {
         // A kernel fault is reached from unprivileged syscalls, so it is at
         // least as serious as the userspace memory-safety classes.
         CrashKind::Asan | CrashKind::Segv | CrashKind::KernelBug => 6.0,
-        CrashKind::Ubsan | CrashKind::Other | CrashKind::Panic => 5.0,
+        // An uninitialized read can disclose memory and a race can corrupt
+        // it, but neither report shows an attacker-steered write.
+        CrashKind::Ubsan
+        | CrashKind::Msan
+        | CrashKind::Tsan
+        | CrashKind::Other
+        | CrashKind::Panic => 5.0,
         CrashKind::Abort => 4.0,
         // A leak costs availability, not integrity: it is not a memory-safety
         // violation an attacker can steer, so it scores below the classes that

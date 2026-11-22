@@ -42,6 +42,9 @@ pub struct SaveBuildProfileRequest {
 }
 
 const MAX_MARKER_BYTES: u64 = 64 * 1024 * 1024;
+/// The Bzlmod module file: the marker of a Bazel profile, and what makes a
+/// detected Bazel project buildable offline from a vendor directory.
+pub(crate) const BAZEL_MODULE_FILE: &str = "MODULE.bazel";
 /// Recognized systems in specificity order; Make markers follow GNU selection order.
 pub(crate) const BUILD_SYSTEM_MARKERS: [(hf_storage::DetectedBuildSystem, &[&str]); 6] = [
     (hf_storage::DetectedBuildSystem::CMake, &["CMakeLists.txt"]),
@@ -135,11 +138,14 @@ fn validate_options(
     settings.validate().map_err(ClassifiedError::Validation)?;
     if matches!(
         system,
-        ProfileBuildSystem::Make | ProfileBuildSystem::Meson | ProfileBuildSystem::Autotools
+        ProfileBuildSystem::Make
+            | ProfileBuildSystem::Meson
+            | ProfileBuildSystem::Autotools
+            | ProfileBuildSystem::Bazel
     ) && !definitions.is_empty()
     {
         return Err(invalid(
-            "only CMake profiles can contain definitions; Make, Meson, and Autotools profiles cannot",
+            "only CMake profiles can contain definitions; Make, Meson, Autotools, and Bazel profiles cannot",
         ));
     }
     for (name, value) in definitions {
@@ -253,11 +259,26 @@ fn select_marker(
     component: &str,
     system: ProfileBuildSystem,
 ) -> Result<String, ClassifiedError> {
+    if system == ProfileBuildSystem::Bazel {
+        // The offline query reads the dependencies the project carries in a
+        // Bazel vendor directory, which only a Bzlmod project has; the module
+        // file is also what a change of dependencies edits, so it is the
+        // marker whose digest dates the profile.
+        let relative = component_path(component, BAZEL_MODULE_FILE);
+        if marker_present(project, &relative)? {
+            return Ok(relative);
+        }
+        return Err(invalid(
+            "a Bazel profile needs MODULE.bazel in the component root: the sandbox build is \
+             offline and reads dependencies from a Bazel vendor directory, which requires Bzlmod",
+        ));
+    }
     let selected = match system {
         ProfileBuildSystem::CMake => hf_storage::DetectedBuildSystem::CMake,
         ProfileBuildSystem::Make => hf_storage::DetectedBuildSystem::Make,
         ProfileBuildSystem::Meson => hf_storage::DetectedBuildSystem::Meson,
         ProfileBuildSystem::Autotools => hf_storage::DetectedBuildSystem::Autotools,
+        ProfileBuildSystem::Bazel => hf_storage::DetectedBuildSystem::Bazel,
     };
     for (detected, markers) in BUILD_SYSTEM_MARKERS {
         for marker in markers {

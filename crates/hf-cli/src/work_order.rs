@@ -592,6 +592,7 @@ mod tests {
                         seed: _,
                         replay,
                         ai: _,
+                        dict: _,
                     }),
                 ) => {
                     assert_eq!(project, PathBuf::from("/tmp/project"));
@@ -611,7 +612,9 @@ mod tests {
                 }
                 (
                     WorkOrderStep::Coverage,
-                    Commands::Coverage(crate::args::CoverageArgs { project, target }),
+                    Commands::Coverage(crate::args::CoverageArgs {
+                        project, target, ..
+                    }),
                 ) => {
                     assert_eq!(project, PathBuf::from("/tmp/project"));
                     assert_eq!(target, "src/parser.cpp::ns::parse_packet");

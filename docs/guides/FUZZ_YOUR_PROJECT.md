@@ -44,8 +44,10 @@ in `crates/hf-core/src/target.rs`:
 | `rust` | Lexical scan for `pub fn` with parameters | Yes, through cargo-fuzz | `libfuzzer` only |
 | `go`, `python` | Lexical scan | No. Candidates are marked `"harnessable": false` and harness commands refuse them | None |
 
-Sanitizers: C and C++ build with `address` (default) or `undefined`; Rust is
-AddressSanitizer only. Syzkaller is a separate kernel workflow and does not
+Sanitizers: C and C++ build with `address` (default) or `undefined` on every
+userspace engine. `thread` (data races) builds for C and C++ on libFuzzer and
+honggfuzz. `memory` (uninitialized reads) builds for C on every userspace
+engine. Rust is AddressSanitizer only. Syzkaller is a separate kernel workflow and does not
 apply to the userspace flow in this guide.
 
 `--lang` matters: `discover` and `harness` scan or build only the language you
@@ -151,11 +153,11 @@ oxfuzz build history <project>                 # retained output of each run
 oxfuzz build profile clear <project>           # back to the four-location search
 ```
 
-Accepted `--build-system` values are `cmake`, `make`, `meson`, and
-`autotools`. Detection reads marker files only (`CMakeLists.txt`,
-`meson.build`, `configure.ac`/`configure.in`/`Makefile.am`,
-`GNUmakefile`/`makefile`/`Makefile`). The reviewed plan runs, in the
-sandbox with networking disabled:
+Accepted `--build-system` values are `cmake`, `make`, `meson`,
+`autotools`, and `bazel`. Detection reads marker files only
+(`CMakeLists.txt`, `meson.build`, `configure.ac`/`configure.in`/`Makefile.am`,
+`GNUmakefile`/`makefile`/`Makefile`, `MODULE.bazel`). The reviewed plan runs,
+in the sandbox with networking disabled:
 
 | System | Steps |
 | --- | --- |
@@ -163,6 +165,7 @@ sandbox with networking disabled:
 | Make | `mkdir -p -- <db dir>`, then `bear --output <db> -- make -B` |
 | Meson | `meson setup <db dir>` (configure only) |
 | Autotools | `autoreconf -i`, `./configure`, then `bear --output <db> -- make -B` |
+| Bazel | `oxfuzz-bazel-compdb <db>` (one offline `bazel aquery`; nothing is compiled) |
 
 Notes:
 
@@ -178,8 +181,43 @@ Notes:
 - While a profile is `NeedsBuild`, `Stale`, or `Invalid`, harness generation
   stops before any model call. A saved profile never falls back to the
   four-location search.
-- Bazel is detected but unsupported. Custom Make targets, arbitrary
-  environment variables, and dependency installation are unsupported.
+- Custom Make targets, arbitrary environment variables, and dependency
+  installation are unsupported.
+
+**Bazel projects.** A Bazel build downloads its rules and dependencies, and
+the sandbox has no network, so the project has to carry them. Bazel does this
+itself; run it once on your machine, in the workspace:
+
+```bash
+bazel vendor --vendor_dir=third_party/bazel //...
+```
+
+Keep `third_party/bazel` with the project (it is the directory holding
+`VENDOR.bazel`; any name works, and a `common --vendor_dir=<dir>` line in
+`.bazelrc` selects one when there are several). Then save a profile with
+`--build-system bazel` and run it like any other. What to expect:
+
+- The workspace needs `MODULE.bazel` (Bzlmod). A project that has only a
+  `WORKSPACE` file cannot be vendored and is reported as unsupported.
+- The image carries Bazel 8.9.0 and 9.3.3. `.bazelversion` selects the major
+  version (absent: 9); another version is refused. Vendor with the same
+  major version you select.
+- The vendor directory does not have to be written on the same kind of
+  machine as the sandbox: oxfuzz tells Bazel to use each vendored repository
+  as it is. This was checked between Linux on arm64 and on amd64. A
+  directory written by Bazel on macOS or Windows has not been tried yet.
+- The step reads, from Bazel's analysis, the compile command of every
+  `cc_library`, `cc_binary` and `cc_test` under `//...` and of the C and C++
+  libraries they depend on, whose sources are in the vendor directory.
+  Nothing is compiled, so headers a build would generate are not available
+  to the harness.
+- The `bazel-external` link inside the vendor directory and the `bazel-bin`,
+  `bazel-out`, `bazel-testlogs` and `bazel-<name>` links Bazel keeps in the
+  workspace are left out of the staged copy. You do not need to delete them.
+- The vendor directory counts against the staging limits (20,000 files,
+  512 MiB). A small C project with `rules_cc` vendors about 100 MiB in 7,000
+  files; a project with many external repositories can exceed the limit, and
+  the run then stops with that reason before anything executes.
 
 The full specification is [build-doctor-design.md](../design/build-doctor-design.md).
 
@@ -191,8 +229,19 @@ libraries. A target that needs a third-party library to compile or link will
 fail unless that code is inside the project directory. Practical options:
 vendor the dependency's sources into the tree you point oxfuzz at, choose a
 target below the dependency boundary, or stub the dependency for fuzzing. A
-CMake `FetchContent`/`ExternalProject` step or a crates.io dependency will
-fail for lack of network.
+CMake `FetchContent`/`ExternalProject` step or an unvendored crates.io
+dependency will fail for lack of network.
+
+Each managed build has one place it reads carried dependencies from, prepared
+beforehand on a machine with network access:
+
+| Language | Where | How to fill it |
+|---|---|---|
+| Rust | `vendor/` | `cargo vendor` (crates.io dependencies; git dependencies do not build) |
+| Go | `vendor/` | `go mod vendor` |
+| Java | jars directly inside `lib/` or `libs/` | for example `mvn dependency:copy-dependencies -DoutputDirectory=lib` |
+| Python | `vendor/python/` | `pip install --target vendor/python --no-compile <package>` (pure-Python packages only) |
+| JavaScript | `node_modules/` beside the root `package.json` | `npm ci` (staged as it is when the manifest declares dependencies; no symlinked layouts, no native addons built for the host) |
 
 ## Monorepos and components
 

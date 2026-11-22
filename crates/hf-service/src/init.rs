@@ -357,6 +357,11 @@ const EMBEDDED_TEMPLATES: &[(&str, &str)] = &[
         "issue_tracker",
         include_str!("../../../config/issue_tracker.example.toml"),
     ),
+    #[cfg(feature = "crash-alerts")]
+    (
+        "notifications",
+        include_str!("../../../config/notifications.example.toml"),
+    ),
 ];
 
 /// Initialize a workspace: materialize any missing config files from their

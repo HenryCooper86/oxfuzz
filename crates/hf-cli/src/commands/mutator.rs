@@ -25,6 +25,29 @@ pub(crate) async fn run(args: MutatorArgs) -> anyhow::Result<()> {
                 .harness_promote(&args.project, &args.target, engine)
                 .await?,
         )?,
+        MutatorCommand::Grammar { grammar, emit } => {
+            // Bound file I/O; grammar validation is owned by the service.
+            let mut text = String::new();
+            std::fs::File::open(grammar)?
+                .take(65537)
+                .read_to_string(&mut text)?;
+            if let Some(path) = emit {
+                let source = hf_service::ServiceContainer::grammar_mutator_source(&text, engine)?;
+                std::fs::write(&path, source)?;
+                eprintln!("Generated mutator source written to {}", path.display());
+            }
+            serde_json::to_value(
+                service
+                    .attach_grammar_mutator(
+                        &args.project,
+                        &args.target,
+                        engine,
+                        current.harness_id,
+                        &text,
+                    )
+                    .await?,
+            )?
+        }
         MutatorCommand::Attach { source } => {
             // Bound file I/O; source/API validation remains owned by the service.
             let mut text = String::new();

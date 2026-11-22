@@ -56,6 +56,20 @@ run in parallel:
 | Coverage report | `coverage`, with the per-crate JSON reports uploaded as an artifact |
 | Clang semantic pipeline | builds the optional `clang-analysis` CLI feature and the LLVM 18 image, then runs `clang-analysis` |
 
+`windows-qualification.yml` is separate from the gates and started by hand.
+On a hosted Windows runner it installs a Linux container engine (Rancher
+Desktop, because Docker Desktop does not support Windows Server), builds the
+sandbox image from the Windows checkout, and runs the sandbox isolation tests
+and the provider-free live engine tests. It takes about an hour, publishes
+nothing, and uploads its logs as an artifact. GitHub only starts a workflow
+by hand once it exists on the default branch; on another branch it also runs
+when the workflow file itself changes.
+
+`scripts/check-windows-target.sh` type-checks the workspace and its tests for
+Windows from a Linux or macOS host, so code that does not compile there is
+found before the Windows job runs. It links and runs nothing; the Windows job
+remains the only place the tests execute on Windows.
+
 Going cross-platform surfaced real bugs on the first run of each new platform,
 so compile-and-test truth is gated everywhere the desktop app ships. Style
 gates stay Linux-only.

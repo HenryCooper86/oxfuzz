@@ -6,6 +6,7 @@ pub mod casr;
 pub mod classify;
 pub mod dedup;
 pub mod frames;
+pub mod go_corpus;
 pub mod ingest;
 pub mod kernel;
 pub mod minimize;
@@ -22,8 +23,8 @@ pub use frames::{
     StackFrame,
 };
 pub use ingest::{
-    ingest, ingest_for_engine, is_timeout_artifact, CrashIngestResult, MAX_AGGREGATE_REPORT_BYTES,
-    MAX_CRASH_ARTIFACTS, MAX_SANITIZER_REPORT_BYTES,
+    ingest, ingest_for_engine, is_timeout_artifact, CrashIngestResult, GO_FAILING_INPUT_DIR,
+    MAX_AGGREGATE_REPORT_BYTES, MAX_CRASH_ARTIFACTS, MAX_SANITIZER_REPORT_BYTES,
 };
 pub use minimize::{build_minimize_args, build_minimize_args_with_timeout};
 pub use report::bug_report_from_response;

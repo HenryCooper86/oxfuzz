@@ -10,6 +10,8 @@ export function canonicalHarnessLanguage(value: unknown): string {
     case "rust":
     case "go":
     case "python":
+    case "java":
+    case "javascript":
       return value.toLowerCase();
     default:
       return "";

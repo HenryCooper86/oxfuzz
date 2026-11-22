@@ -213,10 +213,16 @@ export function enabledEngineOptions(
     if (language !== undefined) {
       if (option.value === "syzkaller") return false;
       if (language === "rust") return option.value === "libfuzzer";
-      if (language === "go" || language === "python") {
-        // Discovery scans Go/Python, but no engine adapter builds those
-        // harness languages yet (EngineKind::supports_language in hf-core);
-        // returning no options keeps the harness action disabled.
+      if (
+        language === "go" ||
+        language === "python" ||
+        language === "java" ||
+        language === "javascript"
+      ) {
+        // Go, Python, Java, and JavaScript harnesses run under the
+        // go-native, atheris, jazzer, and jazzer-js engines, which the
+        // desktop app does not drive: they are fuzzed from the CLI.
+        // Returning no options keeps the harness action disabled here.
         return false;
       }
     }

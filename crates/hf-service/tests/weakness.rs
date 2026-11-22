@@ -114,3 +114,16 @@ fn out_of_bounds_read_guidance_names_the_bounds_check() {
     assert!(joined.contains("length"), "{joined}");
     assert!(joined.contains("before"), "{joined}");
 }
+
+#[test]
+fn msan_and_tsan_findings_map_to_their_own_weaknesses() {
+    let mut msan = crash(CrashKind::Msan, CrashSeverity::Undefined, "");
+    msan.casr = None;
+    assert_eq!(classify(&msan).cwe().0, "CWE-457");
+    let mut tsan = crash(CrashKind::Tsan, CrashSeverity::Undefined, "");
+    tsan.casr = None;
+    assert_eq!(classify(&tsan).cwe().0, "CWE-362");
+    // Both can corrupt or disclose memory: not the availability-only band.
+    assert!(security_severity(&msan) >= 4.0);
+    assert!(security_severity(&tsan) >= 4.0);
+}

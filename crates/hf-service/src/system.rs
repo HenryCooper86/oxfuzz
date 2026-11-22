@@ -44,6 +44,12 @@ pub struct SystemStatus {
     pub honggfuzz: StatusFlag,
     /// syzkaller tooling is present in the sandbox image.
     pub syzkaller: StatusFlag,
+    /// The sandbox image's interpreter imports Atheris (Python targets).
+    pub atheris: StatusFlag,
+    /// The sandbox image carries the Jazzer launcher (JVM targets).
+    pub jazzer: StatusFlag,
+    /// The sandbox image carries the Jazzer.js launcher (JavaScript targets).
+    pub jazzer_js: StatusFlag,
     /// The engine probe itself failed, so the four engine flags above are
     /// unknown rather than measured-absent. Its own flag, so a panel can say
     /// "unknown" instead of reading a failed probe as "the image bundles no
@@ -117,6 +123,13 @@ pub async fn system_status() -> SystemStatus {
         aflplusplus,
         honggfuzz,
         syzkaller,
+        atheris: engines
+            .supports(hf_core::engine::EngineKind::Atheris)
+            .into(),
+        jazzer: engines.supports(hf_core::engine::EngineKind::Jazzer).into(),
+        jazzer_js: engines
+            .supports(hf_core::engine::EngineKind::JazzerJs)
+            .into(),
         engine_probe_failed,
         defectdojo: crate::defectdojo_lifecycle::reachable().await.into(),
         sandbox_image_remedy: image_build_remedy_applies(docker, sandbox_image)
@@ -317,6 +330,9 @@ fn assess_fuzzing_preflight(
         EngineKind::Honggfuzz => status.honggfuzz,
         EngineKind::LibFuzzer => status.libfuzzer,
         EngineKind::Syzkaller | EngineKind::GoNative => status.syzkaller,
+        EngineKind::Atheris => status.atheris,
+        EngineKind::Jazzer => status.jazzer,
+        EngineKind::JazzerJs => status.jazzer_js,
     };
     if !engine_ready.is_ready() {
         problems.push(format!(
@@ -354,6 +370,9 @@ mod tests {
             aflplusplus: StatusFlag(false),
             honggfuzz: StatusFlag(false),
             syzkaller: StatusFlag(false),
+            atheris: StatusFlag(false),
+            jazzer: StatusFlag(false),
+            jazzer_js: StatusFlag(false),
             engine_probe_failed: StatusFlag(false),
             defectdojo: StatusFlag(false),
             sandbox_image_remedy: None,
@@ -446,7 +465,7 @@ mod tests {
 
         assert!(
             remedy.contains(
-                "docker build --platform linux/arm64 -t oxfuzz/fuzz-sandbox:0.2.2 -f docker/sandbox/Dockerfile ."
+                "docker build --platform linux/arm64 -t oxfuzz/fuzz-sandbox:0.2.3 -f docker/sandbox/Dockerfile ."
             ),
             "{remedy}"
         );
@@ -481,7 +500,7 @@ mod tests {
             remedy.contains("docker build --platform linux/amd64"),
             "{remedy}"
         );
-        assert!(remedy.contains("oxfuzz/fuzz-sandbox:0.2.2"), "{remedy}");
+        assert!(remedy.contains("oxfuzz/fuzz-sandbox:0.2.3"), "{remedy}");
         assert!(remedy.contains("docker/sandbox/Dockerfile"), "{remedy}");
         // Without a source checkout the CLI build has nothing to run.
         assert!(!remedy.contains("doctor --build-image"), "{remedy}");

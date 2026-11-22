@@ -108,9 +108,26 @@ pub fn sanitize_target_name(name: &str) -> String {
     out
 }
 
+/// The project directory holding the crates the project carries with it: the
+/// tree `cargo vendor` writes.
+pub const VENDOR_DIR: &str = "vendor";
+
+/// The image's own vendored crates: `libfuzzer-sys` and what it depends on.
+const IMAGE_VENDOR_DIR: &str = "/opt/rust/vendor";
+
+/// Where the build joins the image's crates and the project's crates into
+/// the one directory source cargo resolves from.
+const MERGED_VENDOR_DIR: &str = "/tmp/oxfuzz-vendor";
+
 /// The bash script that builds a cargo-fuzz `target_name` and copies the produced
 /// libFuzzer binary to `<container_ws>/<output_name>` (the path the run step
 /// expects). Runs from `container_ws`, the crate root where `fuzz/` lives.
+///
+/// When the staged project has a [`VENDOR_DIR`], its crates and the image's
+/// are linked into one directory and the image's `vendored-sources` source is
+/// pointed at it from a config file in the workspace, so the project's
+/// crates.io dependencies resolve without a network. Offline mode, set in
+/// the image's cargo config, is not touched.
 ///
 /// `target_name` must already be [`sanitize_target_name`]d and `container_ws` is
 /// a value we control (`/work`), so no shell quoting is required. Sanitizer
@@ -118,7 +135,15 @@ pub fn sanitize_target_name(name: &str) -> String {
 #[must_use]
 pub fn build_script(target_name: &str, output_name: &str, container_ws: &str) -> String {
     format!(
-        "cd {container_ws} && cargo fuzz build {target_name} \
+        "cd {container_ws} && if [ -d {container_ws}/{VENDOR_DIR} ]; then \
+         mkdir -p {MERGED_VENDOR_DIR} {container_ws}/.cargo \
+         && for crate in {IMAGE_VENDOR_DIR}/*/; do \
+         ln -s \"${{crate%/}}\" \"{MERGED_VENDOR_DIR}/image-$(basename \"$crate\")\"; done \
+         && for crate in {container_ws}/{VENDOR_DIR}/*/; do \
+         ln -s \"${{crate%/}}\" \"{MERGED_VENDOR_DIR}/project-$(basename \"$crate\")\"; done \
+         && printf '[source.vendored-sources]\\ndirectory = \"{MERGED_VENDOR_DIR}\"\\n' \
+         > {container_ws}/.cargo/config.toml; fi \
+         && cargo fuzz build {target_name} \
          && cp {container_ws}/fuzz/target/*/release/{target_name} {container_ws}/{output_name} \
          && chmod +x {container_ws}/{output_name}",
     )
@@ -176,5 +201,28 @@ mod tests {
         assert!(s.contains("cargo fuzz build fuzz_parse"));
         assert!(s.contains("/work/fuzz/target/*/release/fuzz_parse"));
         assert!(s.contains("/work/fuzz_parse"));
+    }
+
+    #[test]
+    fn a_vendored_tree_is_joined_with_the_images_crates_before_the_build() {
+        let script = build_script("fuzz_parse", "fuzz_parse", "/work");
+        // Only a project that carries a vendor tree changes the source.
+        let guard = script.find("if [ -d /work/vendor ]; then").unwrap();
+        let build = script.find("cargo fuzz build").unwrap();
+        assert!(guard < build);
+        assert!(script.contains(
+            "for crate in /opt/rust/vendor/*/; do \
+             ln -s \"${crate%/}\" \"/tmp/oxfuzz-vendor/image-$(basename \"$crate\")\"; done"
+        ));
+        assert!(script.contains(
+            "for crate in /work/vendor/*/; do \
+             ln -s \"${crate%/}\" \"/tmp/oxfuzz-vendor/project-$(basename \"$crate\")\"; done"
+        ));
+        assert!(script.contains(
+            "printf '[source.vendored-sources]\\ndirectory = \"/tmp/oxfuzz-vendor\"\\n' \
+             > /work/.cargo/config.toml; fi && cargo fuzz build fuzz_parse"
+        ));
+        // Nothing in the script turns the network on.
+        assert!(!script.contains("offline"));
     }
 }

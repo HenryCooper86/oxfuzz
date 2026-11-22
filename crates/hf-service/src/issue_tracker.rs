@@ -1,5 +1,6 @@
 //! Issue-tracker integration -- file triaged crashes as **GitHub** or **GitLab**
-//! issues in the *fuzzed project's* repository.
+//! issues in the *fuzzed project's* repository, or as **Jira** issues in the
+//! project that tracks it.
 //!
 //! The older `workbench::gitlab_issue_export` guessed the repo from the fuzzed
 //! folder's git remote, which resolves to the enclosing `oxfuzz` checkout
@@ -12,6 +13,13 @@
 //! never logged. There is deliberately no password field -- GitHub removed
 //! password auth for its API in 2021 and GitLab's API is token-based; a
 //! `username` is kept for attribution/display only, never for authentication.
+//!
+//! Jira is the one exception on `username`: Jira Cloud authenticates its REST
+//! API with the account email plus an API token (HTTP Basic), so a configured
+//! `username` is sent with the token. With no `username` the token is sent as
+//! a Bearer Personal Access Token, which is what Jira Data Center expects.
+//! Jira has no public default host, so `host` is required, and `repo` holds
+//! the project key (for example `FUZZ`).
 
 use std::fmt::Write as _;
 
@@ -23,6 +31,7 @@ use serde::{Deserialize, Serialize};
 pub enum Provider {
     GitHub,
     GitLab,
+    Jira,
 }
 
 impl std::str::FromStr for Provider {
@@ -32,8 +41,9 @@ impl std::str::FromStr for Provider {
         match s.trim().to_ascii_lowercase().as_str() {
             "github" | "gh" => Ok(Self::GitHub),
             "gitlab" | "gl" => Ok(Self::GitLab),
+            "jira" => Ok(Self::Jira),
             other => Err(format!(
-                "unknown issue-tracker provider '{other}' (expected github or gitlab)"
+                "unknown issue-tracker provider '{other}' (expected github, gitlab, or jira)"
             )),
         }
     }
@@ -46,15 +56,18 @@ impl Provider {
         match self {
             Self::GitHub => "github",
             Self::GitLab => "gitlab",
+            Self::Jira => "jira",
         }
     }
 
-    /// The public host when none is configured.
+    /// The public host when none is configured. Jira has none: every site
+    /// has its own address, so the empty default leaves it unresolved.
     #[must_use]
     pub const fn default_host(self) -> &'static str {
         match self {
             Self::GitHub => "https://github.com",
             Self::GitLab => "https://gitlab.com",
+            Self::Jira => "",
         }
     }
 
@@ -64,6 +77,7 @@ impl Provider {
         match self {
             Self::GitHub => "GitHub",
             Self::GitLab => "GitLab",
+            Self::Jira => "Jira",
         }
     }
 }
@@ -71,15 +85,16 @@ impl Provider {
 /// Issue-tracker connection + defaults, loaded from `config/issue_tracker.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IssueTrackerConfig {
-    /// `github` | `gitlab` | `none` (or blank -> disabled).
+    /// `github` | `gitlab` | `jira` | `none` (or blank -> disabled).
     #[serde(default)]
     pub provider: String,
     /// Base web URL. Blank uses the provider default (github.com / gitlab.com);
-    /// set it for GitHub Enterprise or a self-hosted GitLab.
+    /// set it for GitHub Enterprise or a self-hosted GitLab. Required for Jira
+    /// (for example `https://acme.atlassian.net`).
     #[serde(default)]
     pub host: Option<String>,
     /// Target repository of the fuzzed software: GitHub `owner/repo`; GitLab
-    /// `group/project` (or a numeric project id, API-only).
+    /// `group/project` (or a numeric project id, API-only); Jira project key.
     #[serde(default)]
     pub repo: String,
     /// Personal Access Token stored directly (desktop). Prefer `api_token_env`
@@ -89,7 +104,9 @@ pub struct IssueTrackerConfig {
     /// Name of the environment variable holding the token, when not stored directly.
     #[serde(default)]
     pub api_token_env: String,
-    /// Optional username, for attribution/display only -- never authentication.
+    /// Optional username, for attribution/display only -- never authentication,
+    /// except on Jira, where a set username (the account email) selects HTTP
+    /// Basic authentication with the token, as Jira Cloud requires.
     #[serde(default)]
     pub username: Option<String>,
     /// Labels applied to every filed issue.
@@ -129,14 +146,16 @@ impl IssueTrackerConfig {
             .map(str::trim)
             .filter(|h| !h.is_empty())
             .unwrap_or_else(|| provider.default_host());
-        Some(host.trim_end_matches('/').to_owned())
+        let host = host.trim_end_matches('/');
+        (!host.is_empty()).then(|| host.to_owned())
     }
 
-    /// True when a provider and a target repo are set -- enough to open a
-    /// prefilled new-issue page. Filing via the API additionally needs a token.
+    /// True when a provider, a resolvable host, and a target repo are set --
+    /// enough to open a new-issue page. Filing via the API additionally needs
+    /// a token.
     #[must_use]
     pub fn is_ready(&self) -> bool {
-        self.resolved_provider().is_some() && !self.repo.trim().is_empty()
+        self.web_base().is_some() && !self.repo.trim().is_empty()
     }
 }
 
@@ -168,7 +187,7 @@ pub fn load_config() -> Result<IssueTrackerConfig, ClassifiedError> {
     let cfg = resolve_config(&raw)?;
     if !cfg.is_ready() {
         return Err(ClassifiedError::Validation(
-            "issue tracker is not configured: set `provider` (github/gitlab) and `repo` in Settings > Issue Tracker".to_owned(),
+            "issue tracker is not configured: set `provider` (github/gitlab/jira) and `repo` in Settings > Issue Tracker; Jira also needs `host`".to_owned(),
         ));
     }
     Ok(cfg)
@@ -208,7 +227,24 @@ pub fn repo_web_url(web_base: &str, repo: &str) -> String {
     )
 }
 
-/// A prefilled "new issue" URL for the target repo, for opening in a browser.
+/// The web URL of the place issues are filed in: the repository for GitHub
+/// and GitLab, the project for Jira.
+#[must_use]
+pub fn tracker_web_url(provider: Provider, web_base: &str, repo: &str) -> String {
+    match provider {
+        Provider::GitHub | Provider::GitLab => repo_web_url(web_base, repo),
+        Provider::Jira => format!(
+            "{}/browse/{}",
+            web_base.trim_end_matches('/'),
+            percent_encode(repo.trim())
+        ),
+    }
+}
+
+/// A "new issue" URL for the target repo, for opening in a browser: prefilled
+/// on GitHub and GitLab. Jira's create form takes numeric project and
+/// issue-type ids that a project key does not supply, so its URL opens the
+/// empty create form.
 #[must_use]
 pub fn new_issue_url(
     provider: Provider,
@@ -244,6 +280,10 @@ pub fn new_issue_url(
             }
             url
         }
+        Provider::Jira => format!(
+            "{}/secure/CreateIssue!default.jspa",
+            web_base.trim_end_matches('/')
+        ),
     }
 }
 
@@ -262,7 +302,30 @@ pub fn api_create_endpoint(provider: Provider, web_base: &str, repo: &str) -> St
             web_base.trim_end_matches('/'),
             percent_encode(repo.trim_matches('/'))
         ),
+        Provider::Jira => format!("{}/rest/api/2/issue", web_base.trim_end_matches('/')),
     }
+}
+
+/// Whether a Jira site is Jira Cloud. Cloud removed the classic issue search
+/// endpoint in favour of `/search/jql`; Data Center has only the classic one.
+fn is_jira_cloud(web_base: &str) -> bool {
+    reqwest::Url::parse(web_base).is_ok_and(|url| {
+        url.host_str()
+            .is_some_and(|host| host.ends_with(".atlassian.net"))
+    })
+}
+
+/// A Jira issue key (`FUZZ-12`): the only form accepted from a response
+/// before it is placed in a browse URL.
+fn jira_issue_number(key: &str) -> Option<u64> {
+    let (project, number) = key.rsplit_once('-')?;
+    let mut characters = project.chars();
+    let valid_project = characters.next().is_some_and(|c| c.is_ascii_uppercase())
+        && characters.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+    if !valid_project || number.is_empty() || !number.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    number.parse().ok()
 }
 
 /// GitHub's API host: `api.github.com` for the public site, `{host}/api/v3` for
@@ -281,6 +344,7 @@ fn api_user_endpoint(provider: Provider, web_base: &str) -> String {
     match provider {
         Provider::GitHub => format!("{}/user", github_api_base(web_base)),
         Provider::GitLab => format!("{}/api/v4/user", web_base.trim_end_matches('/')),
+        Provider::Jira => format!("{}/rest/api/2/myself", web_base.trim_end_matches('/')),
     }
 }
 
@@ -312,6 +376,25 @@ fn api_search_endpoint(provider: Provider, web_base: &str, repo: &str, marker: &
             percent_encode(repo.trim_matches('/')),
             percent_encode(marker)
         ),
+        // Jira text search is tokenized, so the phrase match is a candidate
+        // list; `parse_search_match` confirms the marker in each description.
+        Provider::Jira => {
+            let jql = format!(
+                "project = \"{}\" AND statusCategory != Done AND description ~ \"\\\"{}\\\"\"",
+                repo.trim().replace(['"', '\\'], ""),
+                marker.replace(['"', '\\'], "")
+            );
+            let path = if is_jira_cloud(web_base) {
+                "rest/api/2/search/jql"
+            } else {
+                "rest/api/2/search"
+            };
+            format!(
+                "{}/{path}?jql={}&fields=description&maxResults=50",
+                web_base.trim_end_matches('/'),
+                percent_encode(&jql)
+            )
+        }
     }
 }
 
@@ -319,6 +402,7 @@ fn api_search_endpoint(provider: Provider, web_base: &str, repo: &str, marker: &
 /// actually contains `marker` (search ranking is fuzzy, so confirm the match).
 fn parse_search_match(
     provider: Provider,
+    web_base: &str,
     json: &serde_json::Value,
     marker: &str,
 ) -> Result<Option<CreatedIssue>, ClassifiedError> {
@@ -338,12 +422,22 @@ fn parse_search_match(
             "body",
         ),
         Provider::GitLab => (json.as_array(), "description"),
+        Provider::Jira => (
+            json.get("issues").and_then(serde_json::Value::as_array),
+            "description",
+        ),
     };
     let items = items.ok_or_else(|| {
         ClassifiedError::Provider("issue tracker search response lacks its issue list".to_owned())
     })?;
     for item in items {
-        let body = match item.get(body_key) {
+        // Jira nests an issue's fields one level down.
+        let holder = if provider == Provider::Jira {
+            item.get("fields").unwrap_or(&serde_json::Value::Null)
+        } else {
+            item
+        };
+        let body = match holder.get(body_key) {
             Some(serde_json::Value::String(body)) => body.as_str(),
             Some(serde_json::Value::Null) => "",
             _ => {
@@ -353,7 +447,24 @@ fn parse_search_match(
             }
         };
         if body.contains(marker) {
-            return parse_created(provider, item).map(Some);
+            return parse_created(provider, web_base, item).map(Some);
+        }
+    }
+    if provider == Provider::Jira {
+        // Data Center reports `total`; Cloud's enhanced search reports
+        // `isLast` and a `nextPageToken` when more results exist.
+        let more_by_total = json
+            .get("total")
+            .and_then(serde_json::Value::as_u64)
+            .is_some_and(|total| total > items.len() as u64);
+        let more_by_page = json.get("isLast").and_then(serde_json::Value::as_bool) == Some(false)
+            || json
+                .get("nextPageToken")
+                .is_some_and(|token| !token.is_null());
+        if more_by_total || more_by_page {
+            return Err(ClassifiedError::Provider(
+                "issue tracker search has unexamined results".to_owned(),
+            ));
         }
     }
     if provider == Provider::GitHub {
@@ -376,6 +487,7 @@ fn parse_search_match(
 #[must_use]
 pub fn create_body(
     provider: Provider,
+    repo: &str,
     title: &str,
     body: &str,
     labels: &[String],
@@ -385,6 +497,23 @@ pub fn create_body(
         // GitLab takes a comma-separated label string and `description`.
         Provider::GitLab => {
             serde_json::json!({ "title": title, "description": body, "labels": labels.join(",") })
+        }
+        // Jira labels cannot contain whitespace. The body is sent as the
+        // plain-text description of API v2, which both Cloud and Data Center
+        // accept.
+        Provider::Jira => {
+            let labels: Vec<String> = labels
+                .iter()
+                .map(|label| label.split_whitespace().collect::<Vec<_>>().join("-"))
+                .filter(|label| !label.is_empty())
+                .collect();
+            serde_json::json!({ "fields": {
+                "project": { "key": repo.trim() },
+                "summary": title,
+                "description": body,
+                "issuetype": { "name": "Bug" },
+                "labels": labels,
+            } })
         }
     }
 }
@@ -410,7 +539,8 @@ fn percent_encode(value: &str) -> String {
 pub struct CreatedIssue {
     /// Browser URL of the created issue.
     pub url: String,
-    /// The issue number (GitHub) or iid (GitLab), when returned.
+    /// The issue number (GitHub), iid (GitLab), or the numeric part of the
+    /// key (Jira), when returned.
     pub number: Option<u64>,
 }
 
@@ -420,6 +550,8 @@ pub struct IssueTrackerClient {
     web_base: String,
     repo: String,
     token: String,
+    /// The Jira account email for HTTP Basic authentication; unused elsewhere.
+    username: Option<String>,
     http: reqwest::Client,
 }
 
@@ -452,6 +584,12 @@ impl IssueTrackerClient {
             web_base,
             repo,
             token: token.to_owned(),
+            username: cfg
+                .username
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned),
             http,
         })
     }
@@ -465,6 +603,12 @@ impl IssueTrackerClient {
                 )
                 .header(reqwest::header::ACCEPT, "application/vnd.github+json"),
             Provider::GitLab => req.header("PRIVATE-TOKEN", self.token.as_str()),
+            // Jira Cloud: account email + API token (Basic). Data Center: a
+            // Personal Access Token (Bearer).
+            Provider::Jira => match &self.username {
+                Some(username) => req.basic_auth(username, Some(self.token.as_str())),
+                None => req.bearer_auth(self.token.as_str()),
+            },
         }
     }
 
@@ -480,7 +624,7 @@ impl IssueTrackerClient {
         labels: &[String],
     ) -> Result<CreatedIssue, ClassifiedError> {
         let endpoint = api_create_endpoint(self.provider, &self.web_base, &self.repo);
-        let payload = create_body(self.provider, title, body, labels);
+        let payload = create_body(self.provider, &self.repo, title, body, labels);
         let resp = self
             .auth(self.http.post(&endpoint))
             .json(&payload)
@@ -495,7 +639,7 @@ impl IssueTrackerClient {
             .json()
             .await
             .map_err(|e| ClassifiedError::Provider(format!("issue tracker bad response: {e}")))?;
-        parse_created(self.provider, &json)
+        parse_created(self.provider, &self.web_base, &json)
     }
 
     /// Search for an already-filed issue for this crash, keyed on
@@ -554,7 +698,7 @@ impl IssueTrackerClient {
         let json: serde_json::Value = resp.json().await.map_err(|error| {
             ClassifiedError::Provider(format!("issue tracker bad search response: {error}"))
         })?;
-        let found = parse_search_match(self.provider, &json, &marker)?;
+        let found = parse_search_match(self.provider, &self.web_base, &json, &marker)?;
         if found.is_none() && has_more_pages {
             return Err(ClassifiedError::Provider(
                 "issue tracker search has unexamined pages".to_owned(),
@@ -584,13 +728,30 @@ impl IssueTrackerClient {
 }
 
 /// Read the created issue's URL + number from the provider's response JSON.
+/// Jira returns only the issue key, so its browser URL is built on `web_base`.
 fn parse_created(
     provider: Provider,
+    web_base: &str,
     json: &serde_json::Value,
 ) -> Result<CreatedIssue, ClassifiedError> {
     let (url_key, num_key) = match provider {
         Provider::GitHub => ("html_url", "number"),
         Provider::GitLab => ("web_url", "iid"),
+        Provider::Jira => {
+            let key = json
+                .get("key")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let number = jira_issue_number(key).ok_or_else(|| {
+                ClassifiedError::Provider(
+                    "issue tracker response lacks a valid issue key".to_owned(),
+                )
+            })?;
+            return Ok(CreatedIssue {
+                url: format!("{}/browse/{key}", web_base.trim_end_matches('/')),
+                number: Some(number),
+            });
+        }
     };
     let url = json
         .get(url_key)
@@ -644,6 +805,7 @@ mod tests {
             web_base: format!("http://{address}"),
             repo: "owner/repo".to_owned(),
             token: "test-token".to_owned(),
+            username: None,
             http: reqwest::Client::builder().no_proxy().build().unwrap(),
         };
         let result = client.find_existing_issue("signature").await;
@@ -711,7 +873,7 @@ mod tests {
             serde_json::json!({"html_url":""}),
             serde_json::json!({"html_url":"javascript:alert(1)"}),
         ] {
-            let result = parse_created(Provider::GitHub, &json);
+            let result = parse_created(Provider::GitHub, "https://github.com", &json);
             assert!(result.is_err(), "{result:?}");
         }
     }
@@ -830,37 +992,49 @@ mod tests {
                   "body": format!("crash\n<!-- {marker} -->") }
             ]
         });
-        let found = parse_search_match(Provider::GitHub, &github_json, &marker)
-            .unwrap()
-            .unwrap();
+        let found = parse_search_match(
+            Provider::GitHub,
+            "https://github.com",
+            &github_json,
+            &marker,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(found.number, Some(7));
 
         // No body actually containing the marker => no false-positive match.
         let none = serde_json::json!({ "total_count":1, "items": [ { "html_url": "x", "number": 1, "body": "nope" } ] });
-        assert!(parse_search_match(Provider::GitHub, &none, &marker)
-            .unwrap()
-            .is_none());
+        assert!(
+            parse_search_match(Provider::GitHub, "https://github.com", &none, &marker)
+                .unwrap()
+                .is_none()
+        );
 
         // GitLab returns a bare array with `description`/`web_url`/`iid`.
         let gitlab_json = serde_json::json!([
             { "web_url": "https://gitlab.com/g/p/-/issues/3", "iid": 3,
               "description": format!("d <!-- {marker} -->") }
         ]);
-        let gl = parse_search_match(Provider::GitLab, &gitlab_json, &marker)
-            .unwrap()
-            .unwrap();
+        let gl = parse_search_match(
+            Provider::GitLab,
+            "https://gitlab.com",
+            &gitlab_json,
+            &marker,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(gl.number, Some(3));
     }
 
     #[test]
     fn create_body_matches_each_provider_shape() {
         let labels = vec!["a".to_owned(), "b".to_owned()];
-        let gh = create_body(Provider::GitHub, "t", "b", &labels);
+        let gh = create_body(Provider::GitHub, "o/r", "t", "b", &labels);
         assert_eq!(gh["title"], "t");
         assert_eq!(gh["body"], "b");
         assert_eq!(gh["labels"], serde_json::json!(["a", "b"]));
 
-        let gl = create_body(Provider::GitLab, "t", "b", &labels);
+        let gl = create_body(Provider::GitLab, "g/p", "t", "b", &labels);
         assert_eq!(gl["title"], "t");
         assert_eq!(gl["description"], "b");
         assert_eq!(gl["labels"], "a,b"); // GitLab wants a CSV string
@@ -870,6 +1044,7 @@ mod tests {
     fn parse_created_reads_the_right_keys() {
         let gh = parse_created(
             Provider::GitHub,
+            "https://github.com",
             &serde_json::json!({ "html_url": "https://github.com/a/b/issues/7", "number": 7 }),
         )
         .unwrap();
@@ -877,11 +1052,138 @@ mod tests {
         assert_eq!(gh.number, Some(7));
         let gl = parse_created(
             Provider::GitLab,
+            "https://gitlab.com",
             &serde_json::json!({ "web_url": "https://gitlab.com/g/p/-/issues/3", "iid": 3 }),
         )
         .unwrap();
         assert_eq!(gl.url, "https://gitlab.com/g/p/-/issues/3");
         assert_eq!(gl.number, Some(3));
+    }
+
+    #[test]
+    fn jira_needs_a_host_and_files_into_a_project_key() {
+        assert_eq!("Jira".parse(), Ok(Provider::Jira));
+        // No public default host: a blank host is not ready.
+        assert!(cfg("jira", "", "FUZZ").web_base().is_none());
+        assert!(!cfg("jira", "", "FUZZ").is_ready());
+        let ready = cfg("jira", "https://acme.atlassian.net/", "FUZZ");
+        assert!(ready.is_ready());
+        let base = ready.web_base().unwrap();
+        assert_eq!(base, "https://acme.atlassian.net");
+        assert_eq!(
+            api_create_endpoint(Provider::Jira, &base, "FUZZ"),
+            "https://acme.atlassian.net/rest/api/2/issue"
+        );
+        assert_eq!(
+            api_user_endpoint(Provider::Jira, &base),
+            "https://acme.atlassian.net/rest/api/2/myself"
+        );
+        assert_eq!(
+            tracker_web_url(Provider::Jira, &base, "FUZZ"),
+            "https://acme.atlassian.net/browse/FUZZ"
+        );
+        assert_eq!(
+            tracker_web_url(Provider::GitHub, "https://github.com", "o/r"),
+            "https://github.com/o/r"
+        );
+        assert_eq!(
+            new_issue_url(Provider::Jira, &base, "FUZZ", "t", "b", &[]),
+            "https://acme.atlassian.net/secure/CreateIssue!default.jspa"
+        );
+
+        let labels = vec!["oxfuzz".to_owned(), "heap overflow".to_owned()];
+        let body = create_body(Provider::Jira, " FUZZ ", "title", "text", &labels);
+        assert_eq!(body["fields"]["project"]["key"], "FUZZ");
+        assert_eq!(body["fields"]["summary"], "title");
+        assert_eq!(body["fields"]["description"], "text");
+        assert_eq!(body["fields"]["issuetype"]["name"], "Bug");
+        assert_eq!(
+            body["fields"]["labels"],
+            serde_json::json!(["oxfuzz", "heap-overflow"])
+        );
+    }
+
+    #[test]
+    fn jira_search_uses_the_endpoint_its_deployment_has() {
+        let marker = dedup_marker("abc123");
+        let cloud = api_search_endpoint(
+            Provider::Jira,
+            "https://acme.atlassian.net",
+            "FUZZ",
+            &marker,
+        );
+        assert!(
+            cloud.starts_with("https://acme.atlassian.net/rest/api/2/search/jql?jql="),
+            "{cloud}"
+        );
+        let server = api_search_endpoint(Provider::Jira, "https://jira.corp.io", "FUZZ", &marker);
+        assert!(
+            server.starts_with("https://jira.corp.io/rest/api/2/search?jql="),
+            "{server}"
+        );
+        for endpoint in [&cloud, &server] {
+            assert!(endpoint.ends_with("&fields=description&maxResults=50"));
+            assert!(endpoint.contains("oxfuzz-signature%3Aabc123"), "{endpoint}");
+            assert!(
+                endpoint.contains("project%20%3D%20%22FUZZ%22"),
+                "{endpoint}"
+            );
+        }
+        // A quote in the key cannot close the JQL string.
+        let hostile =
+            api_search_endpoint(Provider::Jira, "https://jira.corp.io", "F\" OR 1", &marker);
+        assert!(!hostile.contains("%22F%22%20OR"), "{hostile}");
+    }
+
+    #[test]
+    fn jira_issues_are_read_by_key_and_confirmed_by_description() {
+        let base = "https://jira.corp.io";
+        let created = parse_created(
+            Provider::Jira,
+            base,
+            &serde_json::json!({"id":"10000","key":"FUZZ-12"}),
+        )
+        .unwrap();
+        assert_eq!(created.url, "https://jira.corp.io/browse/FUZZ-12");
+        assert_eq!(created.number, Some(12));
+        for key in ["", "fuzz-1", "FUZZ-", "FUZZ-1/../x", "FUZZ-1?x", "-3"] {
+            assert!(
+                parse_created(Provider::Jira, base, &serde_json::json!({ "key": key })).is_err(),
+                "{key}"
+            );
+        }
+
+        let marker = dedup_marker("abc123");
+        let found = parse_search_match(
+            Provider::Jira,
+            base,
+            &serde_json::json!({ "total": 2, "issues": [
+                { "key": "FUZZ-3", "fields": { "description": "abc123 mentioned in passing" } },
+                { "key": "FUZZ-7", "fields": { "description": format!("crash\n{marker}") } }
+            ] }),
+            &marker,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(found.url, "https://jira.corp.io/browse/FUZZ-7");
+        // A null description is an issue without the marker, not an error.
+        let none = parse_search_match(
+            Provider::Jira,
+            base,
+            &serde_json::json!({ "issues": [ { "key": "FUZZ-3", "fields": { "description": null } } ], "isLast": true }),
+            &marker,
+        )
+        .unwrap();
+        assert!(none.is_none());
+        // More results than were examined cannot be read as "not filed".
+        for partial in [
+            serde_json::json!({ "total": 90, "issues": [] }),
+            serde_json::json!({ "issues": [], "isLast": false }),
+            serde_json::json!({ "issues": [], "nextPageToken": "t" }),
+        ] {
+            assert!(parse_search_match(Provider::Jira, base, &partial, &marker).is_err());
+        }
+        assert!(parse_search_match(Provider::Jira, base, &serde_json::json!({}), &marker).is_err());
     }
 
     #[test]

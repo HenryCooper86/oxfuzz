@@ -180,7 +180,7 @@ const EXAMPLE_DOMAINS: [&str; 3] = ["example.com", "example.net", "example.org"]
 /// Matches the [`EXAMPLE_DOMAINS`] on a host-label boundary rather than by bare
 /// substring, so a real instance such as `https://dojo.example.com.corp.internal`
 /// is NOT misread as the placeholder.
-fn is_placeholder_url(url: &str) -> bool {
+pub(crate) fn is_placeholder_url(url: &str) -> bool {
     let trimmed = url.trim();
     if trimmed.is_empty() {
         return true;

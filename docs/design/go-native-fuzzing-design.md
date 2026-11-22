@@ -1,14 +1,59 @@
 # Go Native Fuzzing Design
 
-Status: **implementation started**. The engine foundation is implemented and
-tested (`EngineKind::GoNative` admission-gated outside the default engine
-set, the direct-test-binary run adapter, and Go status/failure parsing);
-the service workflow -- harness generation, Go staging and build, smoke,
-campaigns, artifact ingestion, and live qualification -- is not implemented.
+Status: **implemented, acceptance open** (2026-11-21). Implemented and tested:
+`EngineKind::GoNative` admission (outside the default engine set; the operator
+enables it under `[fuzzing] enabled_engines`), the template harness for the
+first target class, Go module staging, the sandboxed `go test -c` build, the
+direct-test-binary run adapter, smoke, the corpus bridge, failing-input
+ingestion, replay by name, and panic classification. One live cycle of those
+building blocks passed in the pinned image on macOS arm64 (see "Implemented
+behaviour" below). Not done: a full live `oxfuzz harness` / `oxfuzz run` cycle
+through review, promotion, Stop and historical replay; the two-module
+five-trial acceptance; Go coverage attribution of the selected function.
 Owners: `hf-service` for admission and
 workflow, `hf-harness` for generated test source, `hf-engine` for Go progress
-and artifact parsing, and `hf-runtime` for every process. This design does not
-change Go's discovery-only entry in the support matrix.
+and artifact parsing, and `hf-runtime` for every process.
+
+## Implemented behaviour
+
+Evidence is from Go 1.26.5 in `oxfuzz/fuzz-sandbox:0.2.2` (linux/arm64),
+network disabled.
+
+- **Harness.** A Go harness is always the fixed template
+  (`hf_harness::go_native::template`): one `FuzzXxx` that passes the input to
+  the selected function. A function of one `[]byte` or `string` receives the
+  input as it is. Any other parameter list made of `[]byte`, `string`,
+  `bool`, integer and float types is decoded from one `[]byte` input by a
+  small reader the template carries (fixed-width little-endian numbers, a
+  length-prefixed slice or string for every parameter but the last, which
+  takes the rest), so the fuzz callback, and with it the corpus format, is
+  always one `[]byte` or `string`. A provider is never asked for Go source; requiring
+  AI for a Go draft is refused. The template registers no `f.Add` seeds and
+  lint rejects them (`go-inline-seed`): Go reports a failing seed-corpus entry
+  (`failure while testing seed corpus entry`) without saving a failing input,
+  so a target that fails on the empty input would leave nothing to triage.
+  With an empty corpus Go starts from the zero value and saves every failing
+  input.
+- **Build.** The staged module (no project `_test.go` files) is compiled with
+  `go test -c -fuzz=^FuzzXxx$` under `GOPROXY=off`, `GOSUMDB=off`,
+  `GOTOOLCHAIN=local`; build cache and module path live under `/tmp` in the
+  container, never in the workspace. No sanitizer selection applies.
+- **Run.** `-test.fuzzcachedir` is `<run output>/go-fuzz-cache`, the working
+  directory is the run output directory, minimization time is 0, and the
+  per-file write limit is 128 MiB: the fuzz coordinator backs each worker's
+  shared memory with a 100 MiB temporary file and fails before the first
+  input under the 64 MiB default (`truncate /tmp/fuzz-...: file too large`).
+- **Corpus.** The run corpus stays a flat directory of raw inputs. Before a
+  campaign the service encodes it into the fuzz cache in Go's corpus format;
+  after the run it decodes what Go kept back into the run corpus, which then
+  merges into the retained corpus like any other engine's. Smoke starts from
+  the empty corpus.
+- **Findings.** A run that exits non-zero is a finding only when Go printed
+  `Failing input written to`; any other failure is a failed run whose output
+  is reported. Failing inputs are collected from
+  `testdata/fuzz/<FuzzXxx>/` under the run output, shown and deduplicated as
+  decoded bytes, replayed with `-test.run=^FuzzXxx$/^<name>$`, and classified
+  as a panic signed by the frames of the code under test.
 
 ## Goal and admission
 
@@ -21,11 +66,12 @@ the feature, language, allowed-engine policy, saved project input, image, and
 budget before provider access or `hf-runtime` dispatch. Direct executor calls
 must reject unsupported combinations before side effects.
 
-The first qualified target class is a package-level exported function that
-accepts one `[]byte` or `string` input and can be called from an adjacent test
-file. Methods, generic type instantiation, unsafe packages, cgo, functions
-requiring external services, and multi-parameter targets need separate typed
-recipes and evidence. Lexical discovery remains only a suggestion; package
+The qualified target class is a package-level exported function whose
+parameters are each `[]byte`, `string`, `bool`, an integer type or a float
+type, and which can be called from an adjacent test file. Methods, generic
+type instantiation, unsafe packages, cgo, functions requiring external
+services, and parameters of struct, interface or other types need separate
+typed recipes and evidence. Lexical discovery remains only a suggestion; package
 resolution and compilability decide whether a target can enter this workflow.
 
 ## Toolchain and exact inputs
@@ -52,8 +98,8 @@ run-owned writable cache, corpus, and output directories.
 ## Harness and lifecycle
 
 `hf-harness` emits an adjacent `_test.go` file with one uniquely named
-`FuzzXxx(f *testing.F)`. It registers bounded deterministic seeds with `f.Add`
-and passes each fuzz input to the selected function. Deterministic target
+`FuzzXxx(f *testing.F)`. It passes each fuzz input to the selected function
+and registers no `f.Add` seeds (see "Implemented behaviour" for why). Deterministic target
 errors have a reviewed failure predicate; a returned error is not
 automatically a bug. Lint rejects package/init side effects, subprocesses,
 network and filesystem writes, unsafe imports, unbounded allocation, input

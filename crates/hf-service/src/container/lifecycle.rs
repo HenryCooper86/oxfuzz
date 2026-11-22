@@ -304,6 +304,12 @@ impl ServiceContainer {
             }
             _ => {}
         }
+        #[cfg(feature = "crash-alerts")]
+        if name == "notifications" {
+            // A webhook that fails validation would otherwise be discovered
+            // only when an unattended campaign tries to alert through it.
+            crate::notifications::resolve_config(content).map_err(|error| error.to_string())?;
+        }
         if name != "oxfuzz" {
             return crate::config::write_config(name, content);
         }
@@ -670,6 +676,19 @@ mod save_config_tests {
                 .unwrap_err();
             assert_eq!(error, expected, "a raw write to {name} must be refused");
         }
+    }
+
+    #[cfg(feature = "crash-alerts")]
+    #[test]
+    fn an_invalid_notifications_config_is_refused_before_it_is_written() {
+        let container = ServiceContainer::stubbed();
+        let error = container
+            .save_config(
+                "notifications",
+                "webhook_url = \"http://hooks.corp.internal/a\"\n",
+            )
+            .unwrap_err();
+        assert!(error.contains("https"), "{error}");
     }
 }
 

@@ -32,6 +32,9 @@ pub(super) const fn engine_name(engine: EngineKind) -> &'static str {
         EngineKind::Honggfuzz => "honggfuzz",
         EngineKind::Syzkaller => "syzkaller",
         EngineKind::GoNative => "Go native fuzzing",
+        EngineKind::Atheris => "Atheris",
+        EngineKind::Jazzer => "Jazzer",
+        EngineKind::JazzerJs => "Jazzer.js",
     }
 }
 

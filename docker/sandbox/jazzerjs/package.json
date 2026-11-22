@@ -1,0 +1,10 @@
+{
+  "name": "oxfuzz-jazzerjs",
+  "version": "1.0.0",
+  "private": true,
+  "description": "The pinned Jazzer.js tree of the oxfuzz sandbox image",
+  "license": "MIT",
+  "dependencies": {
+    "@jazzer.js/core": "4.0.0"
+  }
+}

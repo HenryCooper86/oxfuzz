@@ -809,6 +809,74 @@ impl ServiceContainer {
         crate::workbench::file_issue(self.store.as_deref(), crash_id).await
     }
 
+    /// Whether a usable crash-alert webhook is configured.
+    #[cfg(feature = "crash-alerts")]
+    #[must_use]
+    pub fn notifications_configured(&self) -> bool {
+        crate::notifications::is_configured()
+    }
+
+    /// Post a connection test to the configured webhook. The body carries no
+    /// project data.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if alerts are unconfigured, the bearer token
+    /// is missing, or the webhook rejects the request.
+    #[cfg(feature = "crash-alerts")]
+    pub async fn notifications_test(&self) -> Result<(), ClassifiedError> {
+        notification_client()?.send_test().await
+    }
+
+    /// Alert the configured webhook that `target` of `project` has `crashes`
+    /// crashes. The alert carries the project directory name, the target, the
+    /// count, and the schedule id; nothing else leaves the host.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if the publish is not authorized, alerts are
+    /// unconfigured, the bearer token is missing, or the webhook rejects the
+    /// request.
+    #[cfg(feature = "crash-alerts")]
+    pub async fn notify_crashes(
+        &self,
+        project: &Path,
+        target: &str,
+        crashes: usize,
+        schedule_id: Option<&str>,
+    ) -> Result<(), ClassifiedError> {
+        self.authorize_recorded(
+            Action::PublishFindings {
+                destination: "webhook".to_owned(),
+            },
+            "notify_crashes",
+            Some(project),
+        )
+        .await?;
+        let alert = crate::notifications::CrashAlert::new(project, target, crashes, schedule_id);
+        notification_client()?.send(&alert).await
+    }
+
+    /// Alert on the latest run of `target`, when it has crashes. Returns the
+    /// number of distinct crashes the alert reported; `0` means the run was
+    /// clean and nothing was sent.
+    ///
+    /// # Errors
+    /// As [`Self::notify_crashes`], plus a storage failure reading the run.
+    #[cfg(feature = "crash-alerts")]
+    pub async fn notify_latest_run(
+        &self,
+        project: &Path,
+        target: &str,
+    ) -> Result<usize, ClassifiedError> {
+        let crashes = self
+            .crashes_for_latest_run_matching(project, Some(target), None)
+            .await?
+            .len();
+        if crashes > 0 {
+            self.notify_crashes(project, target, crashes, None).await?;
+        }
+        Ok(crashes)
+    }
+
     /// Whether a usable `DefectDojo` config is present (for the settings UI to show
     /// a configured / not-configured state without attempting a push).
     #[must_use]
@@ -925,4 +993,11 @@ fn ensure_expected_latest_run(
         }
     }
     Ok(())
+}
+
+#[cfg(feature = "crash-alerts")]
+fn notification_client() -> Result<crate::notifications::WebhookClient, ClassifiedError> {
+    let cfg = crate::notifications::load_config()?;
+    let token = crate::notifications::resolve_token(&cfg)?;
+    crate::notifications::WebhookClient::from_config(&cfg, token)
 }

@@ -481,7 +481,25 @@ pub(crate) async fn issue_export(
     let target = targets.iter().find(|t| t.id == crash.target_id);
     let title = issue_title(&crash, target);
     let description = issue_description(&crash, target);
+    Ok(tracker_export(
+        project,
+        crash.id.to_string(),
+        title,
+        description,
+    ))
+}
 
+/// Address a drafted issue to the configured tracker: provider, labels, the
+/// repository's web URL, and a prefilled new-issue URL.
+///
+/// Without a tracker configuration this falls back to a GitLab-style URL
+/// derived from the project's git remote, which is best-effort only.
+pub(crate) fn tracker_export(
+    project: &Path,
+    crash_id: String,
+    title: String,
+    description: String,
+) -> IssueExport {
     let (provider, project_web_url, new_issue_url, labels, can_file) =
         if let Ok(cfg) = crate::issue_tracker::load_config() {
             // Configured: file into the explicit target repo of the fuzzed software.
@@ -492,7 +510,7 @@ pub(crate) async fn issue_export(
             let (web, issue_url) = if let Some(base) = cfg.web_base() {
                 let repo = cfg.repo.trim();
                 (
-                    Some(crate::issue_tracker::repo_web_url(&base, repo)),
+                    Some(crate::issue_tracker::tracker_web_url(provider, &base, repo)),
                     Some(crate::issue_tracker::new_issue_url(
                         provider,
                         &base,
@@ -527,8 +545,8 @@ pub(crate) async fn issue_export(
             ("gitlab".to_owned(), web, issue_url, labels, false)
         };
 
-    Ok(IssueExport {
-        crash_id: crash.id.to_string(),
+    IssueExport {
+        crash_id,
         title,
         description,
         labels,
@@ -536,7 +554,7 @@ pub(crate) async fn issue_export(
         project_web_url,
         issue_url: new_issue_url,
         can_file,
-    })
+    }
 }
 
 /// File a crash as an issue in the configured repository via the provider API,

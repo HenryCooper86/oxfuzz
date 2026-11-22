@@ -529,6 +529,26 @@ async fn try_compile_inner(
     if harness.language == TargetLanguage::Rust {
         return try_compile_cargo_fuzz(harness, rt, workspace, options).await;
     }
+    // Go fuzz tests take the `go test -c` path: the harness is a test file
+    // beside the staged package, compiled without running any test.
+    if harness.language == TargetLanguage::Go {
+        return try_compile_go_test(harness, rt, workspace, options).await;
+    }
+    // A Python harness is not compiled: it is parsed, together with the
+    // selected module, and installed as an executable script.
+    if harness.language == TargetLanguage::Python {
+        return try_check_python_script(harness, rt, workspace, options).await;
+    }
+    // A Java harness is one class compiled with the staged project sources
+    // into a self-starting jar.
+    if harness.language == TargetLanguage::Java {
+        return try_compile_java_class(harness, rt, workspace, options).await;
+    }
+    // A JavaScript harness is not compiled either: Node.js parses it and the
+    // selected module, and it is installed as an executable file.
+    if harness.language == TargetLanguage::JavaScript {
+        return try_check_javascript_module(harness, rt, workspace, options).await;
+    }
     // Write the harness source to the host workspace (the Docker mount
     // makes it visible inside the container at container_workspace). Use a
     // language-appropriate filename so the compiler treats it correctly
@@ -799,6 +819,271 @@ async fn try_compile_cargo_fuzz(
     Ok(CompileResult::Ok(Box::new(harness)))
 }
 
+/// Compile a Go harness in the sandbox: write the fuzz test beside the
+/// package it records, then run the fixed `go test -c -fuzz=...` argv from the
+/// staged module root with module downloads disabled. `-c` compiles the test
+/// binary and runs nothing, so no package test executes before the smoke
+/// approval.
+///
+/// The build command is derived again from the source being compiled, not
+/// taken from the record: the directory and test name a build uses are
+/// decided by the text that was reviewed.
+async fn try_compile_go_test(
+    mut harness: Harness,
+    rt: &dyn RuntimeAdapter,
+    workspace: &Path,
+    options: &hf_core::runtime::SandboxOptions,
+) -> Result<CompileResult, ClassifiedError> {
+    let recorded_output = harness
+        .build_cmd
+        .output
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let build = go_build_command(
+        harness.engine,
+        &recorded_output,
+        harness.sanitizer,
+        &harness.source,
+    )?;
+    if !workspace.join("go.mod").is_file() {
+        return Err(ClassifiedError::Validation(format!(
+            "a Go harness needs the module staged at {}, but it has no go.mod; the project \
+             root must be the Go module root",
+            workspace.display()
+        )));
+    }
+    let relative = crate::go_native::harness_path(&harness.source)?;
+    let package_directory = relative.parent().unwrap_or(Path::new(""));
+    if !workspace.join(package_directory).is_dir() {
+        return Err(ClassifiedError::Validation(format!(
+            "the Go harness records the package directory '{}', which is not in the staged \
+             module",
+            package_directory.display()
+        )));
+    }
+    rt.write_file(&workspace.join(&relative), &harness.source)
+        .await?;
+    let output_name = build
+        .output
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let cmd = vec![
+        "bash".to_owned(),
+        "-c".to_owned(),
+        crate::go_native::build_script(&build),
+    ];
+    let limits = hf_core::runtime::ResourceLimits {
+        max_mem_mb: 4096,
+        max_cpus: 2,
+        // The first build compiles the standard library with fuzz
+        // instrumentation into the run-owned cache.
+        max_duration_secs: 600,
+        env: crate::go_native::sandbox_env(),
+        ptrace: false,
+    };
+    let result = rt
+        .run_command_opts(&cmd, workspace, &limits, options)
+        .await?
+        .require_completed("Go harness compile")?;
+    if result.exit_code != 0 {
+        return Ok(CompileResult::Failed(CompileFailure {
+            exit_code: result.exit_code,
+            stdout: result.stdout,
+            stderr: result.stderr,
+        }));
+    }
+    harness.build_cmd = BuildCommand {
+        output: workspace.join(output_name),
+        ..build
+    };
+    harness.status = HarnessStatus::Compiled;
+    Ok(CompileResult::Ok(Box::new(harness)))
+}
+
+/// "Build" a Python harness: write the script at the workspace root, then run
+/// the fixed interpreter invocation that parses it and the selected module
+/// and installs it as the executable harness. Nothing is imported, so no
+/// project code runs before the smoke approval.
+///
+/// Like the Go path, the command is derived again from the source being
+/// built: the module a build checks is decided by the text that was reviewed.
+async fn try_check_python_script(
+    mut harness: Harness,
+    rt: &dyn RuntimeAdapter,
+    workspace: &Path,
+    options: &hf_core::runtime::SandboxOptions,
+) -> Result<CompileResult, ClassifiedError> {
+    let recorded_output = harness
+        .build_cmd
+        .output
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let build = python_build_command(
+        harness.engine,
+        &recorded_output,
+        harness.sanitizer,
+        &harness.source,
+    )?;
+    rt.write_file(
+        &workspace.join(crate::python_atheris::HARNESS_FILE),
+        &harness.source,
+    )
+    .await?;
+    let mut cmd = vec![build.compiler.clone()];
+    cmd.extend(build.args.iter().cloned());
+    let limits = hf_core::runtime::ResourceLimits {
+        max_mem_mb: 1024,
+        max_cpus: 1,
+        max_duration_secs: 60,
+        env: std::collections::HashMap::new(),
+        ptrace: false,
+    };
+    let result = rt
+        .run_command_opts(&cmd, workspace, &limits, options)
+        .await?
+        .require_completed("Python harness check")?;
+    if result.exit_code != 0 {
+        return Ok(CompileResult::Failed(CompileFailure {
+            exit_code: result.exit_code,
+            stdout: result.stdout,
+            stderr: result.stderr,
+        }));
+    }
+    harness.build_cmd = BuildCommand {
+        output: workspace.join(&recorded_output),
+        ..build
+    };
+    harness.status = HarnessStatus::Compiled;
+    Ok(CompileResult::Ok(Box::new(harness)))
+}
+
+/// "Build" a JavaScript harness: write the module at the workspace root, then
+/// run the fixed command that has Node.js parse it and the selected module
+/// and installs it as the executable harness. Nothing is loaded, so no
+/// project code runs before the smoke approval.
+///
+/// Like the other managed-language paths, the command is derived again from
+/// the source being built.
+async fn try_check_javascript_module(
+    mut harness: Harness,
+    rt: &dyn RuntimeAdapter,
+    workspace: &Path,
+    options: &hf_core::runtime::SandboxOptions,
+) -> Result<CompileResult, ClassifiedError> {
+    let recorded_output = harness
+        .build_cmd
+        .output
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let build = javascript_build_command(
+        harness.engine,
+        &recorded_output,
+        harness.sanitizer,
+        &harness.source,
+    )?;
+    rt.write_file(
+        &workspace.join(crate::js_jazzer::HARNESS_FILE),
+        &harness.source,
+    )
+    .await?;
+    let mut cmd = vec![build.compiler.clone()];
+    cmd.extend(build.args.iter().cloned());
+    let limits = hf_core::runtime::ResourceLimits {
+        max_mem_mb: 1024,
+        max_cpus: 1,
+        max_duration_secs: 60,
+        env: std::collections::HashMap::new(),
+        ptrace: false,
+    };
+    let result = rt
+        .run_command_opts(&cmd, workspace, &limits, options)
+        .await?
+        .require_completed("JavaScript harness check")?;
+    if result.exit_code != 0 {
+        return Ok(CompileResult::Failed(CompileFailure {
+            exit_code: result.exit_code,
+            stdout: result.stdout,
+            stderr: result.stderr,
+        }));
+    }
+    harness.build_cmd = BuildCommand {
+        output: workspace.join(&recorded_output),
+        ..build
+    };
+    harness.status = HarnessStatus::Compiled;
+    Ok(CompileResult::Ok(Box::new(harness)))
+}
+
+/// Build a Java harness: write the class at the workspace root, then run the
+/// fixed script that compiles it with every staged project source and writes
+/// the self-starting jar. `javac` runs no project code, so nothing from the
+/// project executes before the smoke approval.
+///
+/// Like the Go and Python paths, the command is derived again from the
+/// source being built.
+async fn try_compile_java_class(
+    mut harness: Harness,
+    rt: &dyn RuntimeAdapter,
+    workspace: &Path,
+    options: &hf_core::runtime::SandboxOptions,
+) -> Result<CompileResult, ClassifiedError> {
+    let recorded_output = harness
+        .build_cmd
+        .output
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let build = java_build_command(
+        harness.engine,
+        &recorded_output,
+        harness.sanitizer,
+        &harness.source,
+    )?;
+    rt.write_file(
+        &workspace.join(crate::jvm_jazzer::HARNESS_FILE),
+        &harness.source,
+    )
+    .await?;
+    let cmd = vec![
+        "bash".to_owned(),
+        "-c".to_owned(),
+        crate::jvm_jazzer::build_script(&build)?,
+    ];
+    let limits = hf_core::runtime::ResourceLimits {
+        max_mem_mb: 4096,
+        max_cpus: 2,
+        max_duration_secs: 600,
+        env: std::collections::HashMap::new(),
+        ptrace: false,
+    };
+    let result = rt
+        .run_command_opts(&cmd, workspace, &limits, options)
+        .await?
+        .require_completed("Java harness compile")?;
+    if result.exit_code != 0 {
+        return Ok(CompileResult::Failed(CompileFailure {
+            exit_code: result.exit_code,
+            stdout: result.stdout,
+            stderr: result.stderr,
+        }));
+    }
+    harness.build_cmd = BuildCommand {
+        output: workspace.join(&recorded_output),
+        ..build
+    };
+    harness.status = HarnessStatus::Compiled;
+    Ok(CompileResult::Ok(Box::new(harness)))
+}
+
 fn ensure_regular_directory(
     workspace: &Path,
     relative: &Path,
@@ -1034,16 +1319,15 @@ pub async fn smoke_fuzz_in_paths_with_config_and_sandbox_image(
     };
     let honggfuzz = harness.engine == EngineKind::Honggfuzz;
     let sandbox = hf_core::runtime::SandboxOptions {
+        // Go writes failing inputs under its working directory; the output
+        // directory is the writable place the crash scan reads.
+        workdir: (harness.engine == EngineKind::GoNative).then(|| out_container.clone()),
         extra_mounts: vec![
             hf_core::runtime::SandboxMount::writable(corpus_dir, corpus_container),
             hf_core::runtime::SandboxMount::writable(out_dir.clone(), out_container.clone()),
         ],
         workspace_read_only: true,
-        max_file_size_bytes: Some(if honggfuzz {
-            hf_engine::honggfuzz::SHARED_MEMORY_BYTES
-        } else {
-            64 * 1024 * 1024
-        }),
+        max_file_size_bytes: Some(hf_engine::runner::run_file_size_limit_bytes(harness.engine)),
         shm_size_mb: honggfuzz.then_some(hf_engine::honggfuzz::SHARED_MEMORY_MB),
         image: sandbox_image,
         ..hf_core::runtime::SandboxOptions::default()
@@ -1073,6 +1357,53 @@ pub async fn smoke_fuzz_in_paths_with_config_and_sandbox_image(
     }
     // Fuzzers write progress/crashes to stderr (libFuzzer) or stdout; parse both.
     let combined = format!("{}\n{}", result.stdout, result.stderr);
+    if harness.engine == EngineKind::GoNative
+        && hf_engine::go_native::failed_without_finding(result.exit_code, &combined)
+    {
+        return Err(ClassifiedError::Harness(format!(
+            "smoke fuzz: the Go test binary exited {} without saving a failing input; \
+             output: {}",
+            result.exit_code,
+            smoke_failure_excerpt(&combined)
+        )));
+    }
+    if harness.engine == EngineKind::Atheris {
+        if hf_engine::atheris::exited_outside_fuzzing(result.exit_code) {
+            return Err(ClassifiedError::Harness(format!(
+                "smoke fuzz: the Python harness exited {} outside fuzzing (an import or \
+                 interpreter failure is not a finding); output: {}",
+                result.exit_code,
+                smoke_failure_excerpt(&combined)
+            )));
+        }
+        if hf_engine::atheris::reports_no_instrumentation(&combined) {
+            return Err(ClassifiedError::Harness(format!(
+                "smoke fuzz: Atheris found no coverage in the selected module, so the run \
+                 would be blind; output: {}",
+                smoke_failure_excerpt(&combined)
+            )));
+        }
+    }
+    if harness.engine == EngineKind::Jazzer
+        && hf_engine::jazzer::exited_outside_fuzzing(result.exit_code)
+    {
+        return Err(ClassifiedError::Harness(format!(
+            "smoke fuzz: the Java harness exited {} outside fuzzing (a class that fails to \
+             load is not a finding); output: {}",
+            result.exit_code,
+            smoke_failure_excerpt(&combined)
+        )));
+    }
+    if harness.engine == EngineKind::JazzerJs
+        && hf_engine::jazzerjs::exited_outside_fuzzing(result.exit_code)
+    {
+        return Err(ClassifiedError::Harness(format!(
+            "smoke fuzz: the JavaScript harness exited {} outside fuzzing (a module that \
+             fails to load is not a finding); output: {}",
+            result.exit_code,
+            smoke_failure_excerpt(&combined)
+        )));
+    }
     let mutator_exercised =
         crate::managed_mutator::observe_smoke(&mut harness, &combined, result.exit_code);
     let execs = smoke_execs_per_sec(harness.engine, &out_dir, &combined);
@@ -1090,7 +1421,10 @@ pub async fn smoke_fuzz_in_paths_with_config_and_sandbox_image(
     // may not capture, so keep the lenient throughput-marker check for them
     // rather than risk rejecting a genuinely-running smoke.
     let lower = combined.to_ascii_lowercase();
-    let ran = if matches!(harness.engine, EngineKind::LibFuzzer) {
+    let ran = if matches!(
+        harness.engine,
+        EngineKind::LibFuzzer | EngineKind::Atheris | EngineKind::Jazzer | EngineKind::JazzerJs
+    ) {
         execs > 0.0 || crashes > 0
     } else {
         execs > 0.0
@@ -1206,6 +1540,15 @@ fn smoke_command(
         )),
         EngineKind::GoNative => {
             hf_engine::go_native::build_run_args(&single_instance, binary, corpus, out)
+        }
+        EngineKind::Atheris => {
+            hf_engine::atheris::build_run_args(&single_instance, binary, corpus, out)
+        }
+        EngineKind::Jazzer => {
+            hf_engine::jazzer::build_run_args(&single_instance, binary, corpus, out)
+        }
+        EngineKind::JazzerJs => {
+            hf_engine::jazzerjs::build_run_args(&single_instance, binary, corpus, out)
         }
     }
 }
@@ -1330,6 +1673,172 @@ pub fn build_command(
     build_command_for_source(engine, lang, output_name, sanitizer, "")
 }
 
+/// The build command of a Go target. Go builds only under the go-native
+/// engine, takes no sanitizer selection (the Go runtime is the checker), and
+/// derives its exact `go test -c` argv from the harness source; without a
+/// source (an admission check before any draft exists) the command names the
+/// tool and the requested output only.
+fn go_build_command(
+    engine: EngineKind,
+    output_name: &str,
+    sanitizer: hf_core::target::Sanitizer,
+    source: &str,
+) -> Result<BuildCommand, ClassifiedError> {
+    if !cfg!(feature = "go-native-fuzzing") {
+        return Err(ClassifiedError::Harness(
+            "this build does not include Go native fuzzing (feature go-native-fuzzing)".to_owned(),
+        ));
+    }
+    if engine != EngineKind::GoNative {
+        return Err(ClassifiedError::Harness(format!(
+            "Go targets build only for the go-native engine, not '{}'; enable it under \
+             [fuzzing] enabled_engines and pass --engine go-native",
+            engine.as_str()
+        )));
+    }
+    if sanitizer != hf_core::target::Sanitizer::Address {
+        return Err(ClassifiedError::Harness(format!(
+            "sanitizer '{}' does not apply to Go targets: the Go runtime's own checks (bounds, \
+             nil dereference, concurrent map access) report as panics, and no sanitizer build \
+             is offered; leave the sanitizer at its default",
+            sanitizer.as_str()
+        )));
+    }
+    if source.is_empty() {
+        return Ok(BuildCommand {
+            compiler: "go".to_owned(),
+            args: vec!["test".to_owned(), "-c".to_owned()],
+            output: PathBuf::from(output_name),
+            extra_flags: Vec::new(),
+        });
+    }
+    crate::go_native::build_command(source, output_name)
+}
+
+/// The build command of a Python target. Python builds only under the
+/// atheris engine and takes no sanitizer selection (the interpreter is
+/// memory-safe; native extensions are outside the supported class). Without
+/// a source (an admission check before any draft exists) the command names
+/// the interpreter and the requested output only.
+fn python_build_command(
+    engine: EngineKind,
+    output_name: &str,
+    sanitizer: hf_core::target::Sanitizer,
+    source: &str,
+) -> Result<BuildCommand, ClassifiedError> {
+    if !cfg!(feature = "python-atheris") {
+        return Err(ClassifiedError::Harness(
+            "this build does not include Python fuzzing (feature python-atheris)".to_owned(),
+        ));
+    }
+    if engine != EngineKind::Atheris {
+        return Err(ClassifiedError::Harness(format!(
+            "Python targets build only for the atheris engine, not '{}'; enable it under \
+             [fuzzing] enabled_engines and pass --engine atheris",
+            engine.as_str()
+        )));
+    }
+    if sanitizer != hf_core::target::Sanitizer::Address {
+        return Err(ClassifiedError::Harness(format!(
+            "sanitizer '{}' does not apply to Python targets: an uncaught exception is the \
+             finding, and native extensions (the code a sanitizer would check) are outside \
+             the supported class; leave the sanitizer at its default",
+            sanitizer.as_str()
+        )));
+    }
+    if source.is_empty() {
+        return Ok(BuildCommand {
+            compiler: "python3".to_owned(),
+            args: vec!["-I".to_owned()],
+            output: PathBuf::from(output_name),
+            extra_flags: Vec::new(),
+        });
+    }
+    crate::python_atheris::build_command(source, output_name)
+}
+
+/// The build command of a Java target. Java builds only under the jazzer
+/// engine and takes no sanitizer selection (the JVM is memory-safe; Jazzer's
+/// own bug detectors are always on). Without a source the command names the
+/// compiler and the requested output only.
+fn java_build_command(
+    engine: EngineKind,
+    output_name: &str,
+    sanitizer: hf_core::target::Sanitizer,
+    source: &str,
+) -> Result<BuildCommand, ClassifiedError> {
+    if !cfg!(feature = "jvm-jazzer") {
+        return Err(ClassifiedError::Harness(
+            "this build does not include JVM fuzzing (feature jvm-jazzer)".to_owned(),
+        ));
+    }
+    if engine != EngineKind::Jazzer {
+        return Err(ClassifiedError::Harness(format!(
+            "Java targets build only for the jazzer engine, not '{}'; enable it under \
+             [fuzzing] enabled_engines and pass --engine jazzer",
+            engine.as_str()
+        )));
+    }
+    if sanitizer != hf_core::target::Sanitizer::Address {
+        return Err(ClassifiedError::Harness(format!(
+            "sanitizer '{}' does not apply to Java targets: an uncaught exception or a Jazzer \
+             bug-detector report is the finding; leave the sanitizer at its default",
+            sanitizer.as_str()
+        )));
+    }
+    if source.is_empty() {
+        return Ok(BuildCommand {
+            compiler: "javac".to_owned(),
+            args: Vec::new(),
+            output: PathBuf::from(output_name),
+            extra_flags: Vec::new(),
+        });
+    }
+    crate::jvm_jazzer::build_command(source, output_name)
+}
+
+/// The build command of a JavaScript target. JavaScript builds only under
+/// the jazzer-js engine and takes no sanitizer selection (the runtime is
+/// memory-safe; native addons are outside the supported class). Without a
+/// source the command names the shell and the requested output only.
+fn javascript_build_command(
+    engine: EngineKind,
+    output_name: &str,
+    sanitizer: hf_core::target::Sanitizer,
+    source: &str,
+) -> Result<BuildCommand, ClassifiedError> {
+    if !cfg!(feature = "js-jazzer") {
+        return Err(ClassifiedError::Harness(
+            "this build does not include JavaScript fuzzing (feature js-jazzer)".to_owned(),
+        ));
+    }
+    if engine != EngineKind::JazzerJs {
+        return Err(ClassifiedError::Harness(format!(
+            "JavaScript targets build only for the jazzer-js engine, not '{}'; enable it \
+             under [fuzzing] enabled_engines and pass --engine jazzer-js",
+            engine.as_str()
+        )));
+    }
+    if sanitizer != hf_core::target::Sanitizer::Address {
+        return Err(ClassifiedError::Harness(format!(
+            "sanitizer '{}' does not apply to JavaScript targets: an uncaught exception or a \
+             Jazzer.js bug-detector report is the finding, and native addons (the code a \
+             sanitizer would check) are outside the supported class; leave the sanitizer at \
+             its default",
+            sanitizer.as_str()
+        )));
+    }
+    if source.is_empty() {
+        return Ok(BuildCommand {
+            compiler: "sh".to_owned(),
+            args: Vec::new(),
+            output: PathBuf::from(output_name),
+            extra_flags: Vec::new(),
+        });
+    }
+    crate::js_jazzer::build_command(source, output_name)
+}
+
 /// The source-aware [`build_command`]. One harness property only the source
 /// can state is read here: an AFL++ persistent-mode harness
 /// ([`crate::persistent::is_persistent_source`]) owns `main` and the
@@ -1356,13 +1865,25 @@ pub fn build_command_for_source(
             TargetLanguage::harnessable_ids(),
         )));
     }
+    if lang == TargetLanguage::Go {
+        return go_build_command(engine, output_name, sanitizer, source);
+    }
+    if lang == TargetLanguage::Python {
+        return python_build_command(engine, output_name, sanitizer, source);
+    }
+    if lang == TargetLanguage::Java {
+        return java_build_command(engine, output_name, sanitizer, source);
+    }
+    if lang == TargetLanguage::JavaScript {
+        return javascript_build_command(engine, output_name, sanitizer, source);
+    }
     if lang == TargetLanguage::Rust {
         if sanitizer != hf_core::target::Sanitizer::Address {
             return Err(ClassifiedError::Harness(format!(
                 "sanitizer '{}' is not available for Rust fuzz targets: cargo-fuzz \
                  (libfuzzer-sys) builds them with AddressSanitizer only -- rustc has no \
                  UndefinedBehaviorSanitizer on this path, and the memory/thread/none \
-                 choices are not admitted by the harness pipeline",
+                 choices are not admitted for Rust by the harness pipeline",
                 sanitizer.as_str()
             )));
         }
@@ -1390,9 +1911,18 @@ pub fn build_command_for_source(
         EngineKind::GoNative => Err(ClassifiedError::Harness(
             "the go-native engine builds only Go targets".to_owned(),
         )),
+        EngineKind::Atheris => Err(ClassifiedError::Harness(
+            "the atheris engine builds only Python targets".to_owned(),
+        )),
+        EngineKind::Jazzer => Err(ClassifiedError::Harness(
+            "the jazzer engine builds only Java targets".to_owned(),
+        )),
+        EngineKind::JazzerJs => Err(ClassifiedError::Harness(
+            "the jazzer-js engine builds only JavaScript targets".to_owned(),
+        )),
         EngineKind::LibFuzzer => Ok(BuildCommand {
             compiler: if is_cpp { "clang++" } else { "clang" }.to_owned(),
-            args: c_sanitizer_args(sanitizer, true)?,
+            args: c_sanitizer_args(engine, is_cpp, sanitizer, true)?,
             output: PathBuf::from(output_name),
             extra_flags: Vec::new(),
         }),
@@ -1406,7 +1936,12 @@ pub fn build_command_for_source(
             // A persistent-mode source owns `main` and the forkserver loop:
             // it links the instrumentation runtime but not the libFuzzer
             // driver (their `__afl_sharedmem_fuzzing` definitions conflict).
-            args: c_sanitizer_args(sanitizer, !crate::persistent::is_persistent_source(source))?,
+            args: c_sanitizer_args(
+                engine,
+                is_cpp,
+                sanitizer,
+                !crate::persistent::is_persistent_source(source),
+            )?,
             output: PathBuf::from(output_name),
             extra_flags: Vec::new(),
         }),
@@ -1414,7 +1949,7 @@ pub fn build_command_for_source(
             // The pinned honggfuzz 2.6 install ships `hfuzz-clang++` as the C++
             // driver; no `hfuzz-c++` binary exists in the sandbox image.
             compiler: if is_cpp { "hfuzz-clang++" } else { "hfuzz-cc" }.to_owned(),
-            args: c_sanitizer_args(sanitizer, false)?,
+            args: c_sanitizer_args(engine, is_cpp, sanitizer, false)?,
             output: PathBuf::from(output_name),
             extra_flags: Vec::new(),
         }),
@@ -1439,21 +1974,43 @@ pub fn build_command_for_source(
     }
 }
 
+/// Where the sandbox image keeps the libc++ built with `MemorySanitizer` and
+/// the libFuzzer archive built against it (`docker/sandbox/Dockerfile`).
+const MSAN_LIBCXX_ROOT: &str = "/opt/oxfuzz/msan-libcxx";
+
 /// Sanitizer compile flags for a C/C++ harness build. `fuzzer_driver` adds
 /// `-fsanitize=fuzzer`, the libFuzzer-compatible driver the libFuzzer and AFL++
 /// harnesses link; honggfuzz instruments through `hfuzz-cc` instead.
 ///
+/// `memory` and `thread` are admitted only for the engine and language pairs
+/// that recorded a planted bug in the pinned sandbox image
+/// (`ENGINE_ADAPTER_STANDARD.md` section 3.5).
+///
 /// # Errors
 /// Returns `ClassifiedError::Harness` for a sanitizer the sandbox cannot honor
-/// (`None`, `Memory`, `Thread`), naming the reason.
+/// for this engine and language, naming the reason.
 fn c_sanitizer_args(
+    engine: EngineKind,
+    is_cpp: bool,
     sanitizer: hf_core::target::Sanitizer,
     fuzzer_driver: bool,
 ) -> Result<Vec<String>, ClassifiedError> {
     use hf_core::target::Sanitizer;
     let mut args = Vec::new();
+    // A C++ MemorySanitizer build cannot take the packaged libFuzzer driver:
+    // it links the uninstrumented libstdc++. The flag then only instruments,
+    // and the image's libFuzzer built against the instrumented libc++ is
+    // linked by path below.
+    let msan_cpp = is_cpp && sanitizer == Sanitizer::Memory;
     if fuzzer_driver {
-        args.push("-fsanitize=fuzzer".to_owned());
+        args.push(
+            if msan_cpp {
+                "-fsanitize=fuzzer-no-link"
+            } else {
+                "-fsanitize=fuzzer"
+            }
+            .to_owned(),
+        );
     }
     match sanitizer {
         Sanitizer::Address => args.push("-fsanitize=address".to_owned()),
@@ -1473,21 +2030,46 @@ fn c_sanitizer_args(
             ));
         }
         Sanitizer::Memory => {
-            return Err(ClassifiedError::Harness(
-                "sanitizer 'memory' is not admitted: MemorySanitizer requires a fully \
-                 instrumented libc and userspace, and the sandbox image's Ubuntu 24.04 \
-                 runtime is not MSan-instrumented, so its findings would be false \
-                 positives"
-                    .to_owned(),
-            ));
+            if is_cpp && engine == EngineKind::AflPlusPlus {
+                return Err(ClassifiedError::Harness(
+                    "sanitizer 'memory' is not admitted for C++ targets under AFL++: in the \
+                     pinned sandbox image an AFL++ binary built against the instrumented \
+                     libc++ does not start its forkserver. Use libFuzzer or honggfuzz"
+                        .to_owned(),
+                ));
+            }
+            args.push("-fsanitize=memory".to_owned());
+            // Origins name the allocation or stack slot the uninitialized value
+            // came from; without them a report gives only the use site.
+            args.push("-fsanitize-memory-track-origins".to_owned());
+            if is_cpp {
+                // MemorySanitizer reports a clean C++ target as buggy unless
+                // the standard library is instrumented too, so the build
+                // takes the image's MSan-built libc++ in place of libstdc++.
+                args.extend([
+                    "-stdlib=libc++".to_owned(),
+                    "-nostdinc++".to_owned(),
+                    "-isystem".to_owned(),
+                    format!("{MSAN_LIBCXX_ROOT}/include/c++/v1"),
+                    format!("-L{MSAN_LIBCXX_ROOT}/lib"),
+                    format!("-Wl,-rpath,{MSAN_LIBCXX_ROOT}/lib"),
+                ]);
+                if fuzzer_driver {
+                    args.push(format!("{MSAN_LIBCXX_ROOT}/lib/libFuzzer-msan.a"));
+                }
+            }
         }
         Sanitizer::Thread => {
-            return Err(ClassifiedError::Harness(
-                "sanitizer 'thread' is not admitted: ThreadSanitizer data-race reports \
-                 do not map onto the crash-triage pipeline, and TSan cannot combine \
-                 with the address/undefined harness builds"
-                    .to_owned(),
-            ));
+            if engine == EngineKind::AflPlusPlus {
+                return Err(ClassifiedError::Harness(
+                    "sanitizer 'thread' is not admitted for AFL++: in the pinned sandbox \
+                     image ThreadSanitizer reports a data race inside the AFL++ \
+                     forkserver runtime for an input that never reaches a race, so \
+                     every finding would be suspect. Use libFuzzer or honggfuzz"
+                        .to_owned(),
+                ));
+            }
+            args.push("-fsanitize=thread".to_owned());
         }
     }
     args.push("-g".to_owned());
@@ -2985,33 +3567,59 @@ fuzz: elapsed: 60s, execs: 246900 (4115/sec), new interesting: 7 (total: 10)
     }
 
     #[test]
-    fn build_command_rejects_languages_without_a_harness_path() {
+    fn a_managed_language_builds_only_under_the_engine_that_runs_it() {
         use hf_core::target::Sanitizer;
-        // Go and Python are discovery-only today: the constructor refuses them
-        // for every engine (Engineering Protocol 2.19), naming the language and
-        // the supported set. Before the gate, Python fell through to a C clang
-        // build command.
-        for engine in [
-            EngineKind::LibFuzzer,
-            EngineKind::AflPlusPlus,
-            EngineKind::Honggfuzz,
-            EngineKind::GoNative,
-            EngineKind::Syzkaller,
+        // Go, Python, Java, and JavaScript each build under one engine. Every other
+        // engine is refused by name rather than falling through to a C
+        // compiler command, and a build without the language's feature says
+        // so.
+        for (language, own, compiled, expected) in [
+            (
+                TargetLanguage::Go,
+                EngineKind::GoNative,
+                cfg!(feature = "go-native-fuzzing"),
+                "Go targets build only for the go-native engine",
+            ),
+            (
+                TargetLanguage::Python,
+                EngineKind::Atheris,
+                cfg!(feature = "python-atheris"),
+                "Python targets build only for the atheris engine",
+            ),
+            (
+                TargetLanguage::Java,
+                EngineKind::Jazzer,
+                cfg!(feature = "jvm-jazzer"),
+                "Java targets build only for the jazzer engine",
+            ),
+            (
+                TargetLanguage::JavaScript,
+                EngineKind::JazzerJs,
+                cfg!(feature = "js-jazzer"),
+                "JavaScript targets build only for the jazzer-js engine",
+            ),
         ] {
-            for lang in [TargetLanguage::Go, TargetLanguage::Python] {
-                let error = build_command(engine, lang, "fuzz_t", Sanitizer::Address).unwrap_err();
-                let message = error.to_string();
-                assert!(
-                    message.contains(&format!(
-                        "harness generation is not yet available for {} targets",
-                        lang.as_str()
-                    )),
-                    "{message}"
-                );
-                assert!(
-                    message.contains("harnessable languages: c, cpp, rust"),
-                    "{message}"
-                );
+            for engine in [
+                EngineKind::LibFuzzer,
+                EngineKind::AflPlusPlus,
+                EngineKind::Honggfuzz,
+                EngineKind::GoNative,
+                EngineKind::Atheris,
+                EngineKind::Jazzer,
+                EngineKind::JazzerJs,
+                EngineKind::Syzkaller,
+            ] {
+                if engine == own {
+                    continue;
+                }
+                let message = build_command(engine, language, "fuzz_t", Sanitizer::Address)
+                    .unwrap_err()
+                    .to_string();
+                if compiled {
+                    assert!(message.contains(expected), "{message}");
+                } else {
+                    assert!(message.contains("this build does not include"), "{message}");
+                }
             }
         }
         // The engine-mismatch guard is unchanged for a harnessable language.
@@ -3028,6 +3636,45 @@ fuzz: elapsed: 60s, execs: 246900 (4115/sec), new interesting: 7 (total: 10)
                 .contains("the go-native engine builds only Go targets"),
             "{error}"
         );
+    }
+
+    #[cfg(feature = "go-native-fuzzing")]
+    #[test]
+    fn a_go_build_is_go_test_compile_only_and_takes_no_sanitizer() {
+        use hf_core::target::Sanitizer;
+        let source = "// oxfuzz:package-dir pkg/wire\npackage wire\nimport \"testing\"\nfunc FuzzParse(f *testing.F) {}\n";
+        let build = build_command_for_source(
+            EngineKind::GoNative,
+            TargetLanguage::Go,
+            "ignored",
+            Sanitizer::Address,
+            source,
+        )
+        .unwrap();
+        assert_eq!(build.compiler, "go");
+        assert!(
+            build.args.contains(&"-c".to_owned()),
+            "compiles, runs nothing"
+        );
+        assert!(build.args.contains(&"-fuzz=^FuzzParse$".to_owned()));
+        assert_eq!(build.output, PathBuf::from("ignored"));
+        // Before a draft exists, admission checks need only the tool.
+        let bare = build_command(
+            EngineKind::GoNative,
+            TargetLanguage::Go,
+            "fuzz_Parse",
+            Sanitizer::Address,
+        )
+        .unwrap();
+        assert_eq!(bare.args, ["test", "-c"]);
+        for sanitizer in [Sanitizer::Undefined, Sanitizer::Memory, Sanitizer::Thread] {
+            let error = build_command(EngineKind::GoNative, TargetLanguage::Go, "f", sanitizer)
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("does not apply to Go targets"),
+                "{error}"
+            );
+        }
     }
 
     #[test]
@@ -3222,21 +3869,149 @@ fuzz: elapsed: 60s, execs: 246900 (4115/sec), new interesting: 7 (total: 10)
         assert_eq!(honggfuzz.compiler, "hfuzz-clang++");
     }
 
+    /// Admission and flags follow the 2026-11-21 probes of sandbox image 0.2.2:
+    /// every userspace engine recorded a planted uninitialized read in a C
+    /// target built with these flags.
     #[test]
-    fn build_command_rejects_unsupported_sanitizers_loudly() {
+    fn build_command_maps_memory_sanitizer_for_c_on_every_userspace_engine() {
+        use hf_core::target::Sanitizer;
+        for (engine, compiler, driver) in [
+            (EngineKind::LibFuzzer, "clang", true),
+            (EngineKind::AflPlusPlus, "afl-clang-fast", true),
+            (EngineKind::Honggfuzz, "hfuzz-cc", false),
+        ] {
+            let command =
+                build_command(engine, TargetLanguage::C, "fuzz_t", Sanitizer::Memory).unwrap();
+            assert_eq!(command.compiler, compiler);
+            let mut expected = vec!["-fsanitize=memory", "-fsanitize-memory-track-origins", "-g"];
+            if driver {
+                expected.insert(0, "-fsanitize=fuzzer");
+            }
+            assert_eq!(command.args, expected, "{engine:?}");
+        }
+    }
+
+    /// C++ under `MSan` needs an instrumented standard library. Image 0.2.3
+    /// carries an `MSan`-built libc++ and a libFuzzer built against it; with
+    /// these flags a planted uninitialized read was reported and a clean
+    /// control using `std::map`, `std::vector`, and string streams stayed
+    /// clean, on libFuzzer and on honggfuzz (2026-11-21).
+    #[test]
+    fn build_command_maps_memory_sanitizer_for_cpp_onto_the_instrumented_libcxx() {
+        use hf_core::target::Sanitizer;
+        let libcxx = [
+            "-fsanitize=memory",
+            "-fsanitize-memory-track-origins",
+            "-stdlib=libc++",
+            "-nostdinc++",
+            "-isystem",
+            "/opt/oxfuzz/msan-libcxx/include/c++/v1",
+            "-L/opt/oxfuzz/msan-libcxx/lib",
+            "-Wl,-rpath,/opt/oxfuzz/msan-libcxx/lib",
+        ];
+
+        let libfuzzer = build_command(
+            EngineKind::LibFuzzer,
+            TargetLanguage::Cpp,
+            "fuzz_t",
+            Sanitizer::Memory,
+        )
+        .unwrap();
+        assert_eq!(libfuzzer.compiler, "clang++");
+        // The packaged libFuzzer links libstdc++, so the driver flag only
+        // instruments and the image's own libFuzzer archive supplies `main`.
+        let mut expected = vec!["-fsanitize=fuzzer-no-link"];
+        expected.extend(libcxx);
+        expected.extend(["/opt/oxfuzz/msan-libcxx/lib/libFuzzer-msan.a", "-g"]);
+        assert_eq!(libfuzzer.args, expected);
+
+        let honggfuzz = build_command(
+            EngineKind::Honggfuzz,
+            TargetLanguage::Cpp,
+            "fuzz_t",
+            Sanitizer::Memory,
+        )
+        .unwrap();
+        assert_eq!(honggfuzz.compiler, "hfuzz-clang++");
+        let mut expected = libcxx.to_vec();
+        expected.push("-g");
+        assert_eq!(honggfuzz.args, expected);
+    }
+
+    /// An AFL++ C++ `MSan` binary did not start its forkserver in image 0.2.3.
+    #[test]
+    fn build_command_rejects_memory_sanitizer_for_cpp_under_afl() {
+        use hf_core::target::Sanitizer;
+        let error = build_command(
+            EngineKind::AflPlusPlus,
+            TargetLanguage::Cpp,
+            "fuzz_t",
+            Sanitizer::Memory,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("not admitted for C++ targets under AFL++"),
+            "{error}"
+        );
+        assert!(error.contains("libFuzzer or honggfuzz"), "{error}");
+    }
+
+    /// libFuzzer records a `TSan` report by exit code and honggfuzz by the abort
+    /// the runner requests. Under AFL++ a benign seed is reported as a race
+    /// inside the forkserver runtime, so that pair stays rejected.
+    #[test]
+    fn build_command_maps_thread_sanitizer_on_libfuzzer_and_honggfuzz() {
+        use hf_core::target::Sanitizer;
+        for (engine, lang, compiler, args) in [
+            (
+                EngineKind::LibFuzzer,
+                TargetLanguage::C,
+                "clang",
+                vec!["-fsanitize=fuzzer", "-fsanitize=thread", "-g"],
+            ),
+            (
+                EngineKind::LibFuzzer,
+                TargetLanguage::Cpp,
+                "clang++",
+                vec!["-fsanitize=fuzzer", "-fsanitize=thread", "-g"],
+            ),
+            (
+                EngineKind::Honggfuzz,
+                TargetLanguage::C,
+                "hfuzz-cc",
+                vec!["-fsanitize=thread", "-g"],
+            ),
+            (
+                EngineKind::Honggfuzz,
+                TargetLanguage::Cpp,
+                "hfuzz-clang++",
+                vec!["-fsanitize=thread", "-g"],
+            ),
+        ] {
+            let command = build_command(engine, lang, "fuzz_t", Sanitizer::Thread).unwrap();
+            assert_eq!(command.compiler, compiler);
+            assert_eq!(command.args, args, "{engine:?} {lang:?}");
+        }
+        let error = build_command(
+            EngineKind::AflPlusPlus,
+            TargetLanguage::C,
+            "fuzz_t",
+            Sanitizer::Thread,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("AFL++"), "{error}");
+        assert!(error.to_string().contains("forkserver"), "{error}");
+    }
+
+    #[test]
+    fn build_command_rejects_a_sanitizer_less_build() {
         use hf_core::target::Sanitizer;
         for engine in [
             EngineKind::LibFuzzer,
             EngineKind::AflPlusPlus,
             EngineKind::Honggfuzz,
         ] {
-            let memory =
-                build_command(engine, TargetLanguage::C, "fuzz_t", Sanitizer::Memory).unwrap_err();
-            assert!(memory.to_string().contains("memory"), "{memory}");
-            assert!(memory.to_string().contains("instrumented libc"), "{memory}");
-            let thread =
-                build_command(engine, TargetLanguage::C, "fuzz_t", Sanitizer::Thread).unwrap_err();
-            assert!(thread.to_string().contains("thread"), "{thread}");
             let none =
                 build_command(engine, TargetLanguage::C, "fuzz_t", Sanitizer::None).unwrap_err();
             assert!(none.to_string().contains("sanitizer"), "{none}");

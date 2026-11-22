@@ -59,6 +59,8 @@ pub mod init;
 pub mod issue_tracker;
 pub mod knowledge;
 pub mod model_budget;
+#[cfg(feature = "crash-alerts")]
+pub mod notifications;
 #[cfg(feature = "oracle-studio")]
 pub mod oracle_studio;
 pub mod recovery;
@@ -183,6 +185,11 @@ pub use concolic::{
 pub use container::AnalyzedInventory;
 #[cfg(feature = "harness-work-order")]
 pub use container::HarnessWorkOrderExportRequest;
+#[cfg(feature = "binary-only-fuzzing")]
+pub use container::{
+    binary_signal_name, BinaryFinding, BinaryFuzzOutcome, BinaryFuzzRequest, BinaryInput,
+    ElfMachine, MinimizedInput, BINARY_MESSAGE_SEPARATOR,
+};
 pub use container::{
     build_sandbox_image, copy_project_sources, generate_target_seeds, initialize_workspace_root,
     project_workspace_dir, provider_pool_from_config, provider_pool_from_env, repo_root,
@@ -198,7 +205,9 @@ pub use container::{
     SyzkallerRunOpts, SyzkallerSummary, FUZZ_PIPELINE_REPAIRS, LLM_SEED_COUNT,
     MAX_PREPARED_HARNESS_SOURCE_BYTES,
 };
-pub use container::{AiPolicy, ScanPhase, ScanProgress};
+pub use container::{AiPolicy, CoverageLineReport, ScanPhase, ScanProgress};
+#[cfg(feature = "crash-bisection")]
+pub use container::{BisectOutcome, BisectResult, BisectStep, BisectVerdict};
 #[cfg(feature = "run-closeout")]
 pub use container::{CoverageDiffReport, RunEdgeSetCapture};
 #[cfg(feature = "ai-target-ranking")]

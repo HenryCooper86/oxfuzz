@@ -44,7 +44,16 @@ pub fn classify(log: &str) -> (CrashKind, String, String) {
 /// usual sanitizer/`SUMMARY`/deadly-signal lines.
 #[must_use]
 pub fn looks_like_crash(log: &str) -> bool {
-    let l = log.to_ascii_lowercase();
+    // Atheris prints, on every start, that the libFuzzer it embeds found no
+    // sanitizer runtime hooks. Those lines name a sanitizer without one
+    // having reported anything.
+    let l = log
+        .lines()
+        .filter(|line| !line.starts_with(MISSING_SANITIZER_HOOK_WARNING))
+        .filter(|line| !is_jazzer_hook_note(line))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_ascii_lowercase();
     l.contains("sanitizer")
         || l.contains("runtime error")
         || l.contains("summary:")
@@ -59,7 +68,19 @@ pub fn looks_like_crash(log: &str) -> bool {
         || l.contains("panicked at")
         || l.contains("traceback (most recent call last)")
         || l.contains("uncaught python exception")
+        || l.contains("== java exception:")
+        || log.lines().any(|line| jazzer_js_report(line).is_some())
 }
+
+/// Jazzer's startup note for each bug-detector class it loads. The classes
+/// live in a package named `sanitizers`; the note reports nothing.
+fn is_jazzer_hook_note(line: &str) -> bool {
+    line.starts_with("INFO: Loaded ") && line.contains(" hooks from com.code_intelligence.jazzer.")
+}
+
+/// libFuzzer's startup note for a sanitizer interface function the process
+/// does not export.
+const MISSING_SANITIZER_HOOK_WARNING: &str = "WARNING: Failed to find function \"__sanitizer_";
 
 fn detect_kind(log: &str) -> CrashKind {
     let lower = log.to_ascii_lowercase();
@@ -92,6 +113,10 @@ fn detect_kind(log: &str) -> CrashKind {
         // `SUMMARY: AddressSanitizer:` line and allocates through
         // `asan_malloc_linux.cpp`.
         CrashKind::Leak
+    } else if lower.contains("memorysanitizer") {
+        CrashKind::Msan
+    } else if lower.contains("threadsanitizer") {
+        CrashKind::Tsan
     } else if lower.contains("addresssanitizer") {
         CrashKind::Asan
     } else if lower.contains("segv") || lower.contains("sigsegv") {
@@ -143,9 +168,53 @@ fn reports_panic(lower: &str) -> bool {
     lower.lines().any(|raw| {
         let line = raw.trim_start();
         line.starts_with("panic:")
+            || is_go_test_panic_line(line)
             || line.contains("panicked at")
             || line.contains("uncaught python exception")
             || line.starts_with("traceback (most recent call last)")
+            || line.starts_with(&JAVA_EXCEPTION_MARK.to_ascii_lowercase())
+            || jazzer_js_report(line).is_some()
+    })
+}
+
+/// What Jazzer.js prints after its process mark when a fuzz callback ended
+/// with an exception: `==<pid>== Uncaught Exception: <name>: <text>`.
+const JAZZER_JS_EXCEPTION_MARK: &str = "Uncaught Exception: ";
+
+/// The text of a Jazzer.js report line: `==<pid>== ` followed by an uncaught
+/// exception or by the title of a bug-detector finding. libFuzzer and the
+/// sanitizers use the same process mark for lines that begin with a label
+/// and a colon (`ERROR:`, `libFuzzer:`), which are theirs.
+fn jazzer_js_report(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("==")?;
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    if digits == 0 {
+        return None;
+    }
+    let text = rest[digits..].strip_prefix("== ")?;
+    let label = text.split_whitespace().next()?;
+    let own = text
+        .get(..JAZZER_JS_EXCEPTION_MARK.len())
+        .is_some_and(|start| start.eq_ignore_ascii_case(JAZZER_JS_EXCEPTION_MARK));
+    (own || !label.ends_with(':')).then_some(text)
+}
+
+/// The line Jazzer prints before the exception (or its own bug-detector
+/// report) a fuzz callback ended with: `== Java Exception: <class>: <text>`.
+const JAVA_EXCEPTION_MARK: &str = "== Java Exception: ";
+
+/// Whether a line is a panic as `go test` reports it from inside a test or
+/// fuzz function: prefixed with the `testing` source position that recovered
+/// it (`testing.go:1927: panic: runtime error: ...`). Without this the line's
+/// `runtime error:` text would file a Go panic under `UBSan`.
+fn is_go_test_panic_line(line: &str) -> bool {
+    line.split_once(": panic:").is_some_and(|(position, _)| {
+        position.rsplit_once(".go:").is_some_and(|(file, number)| {
+            !file.is_empty()
+                && !file.contains(' ')
+                && !number.is_empty()
+                && number.bytes().all(|byte| byte.is_ascii_digit())
+        })
     })
 }
 
@@ -161,22 +230,39 @@ fn extract_frames(log: &str, n: usize) -> Vec<String> {
     if lower.contains("traceback (most recent call last)") {
         return extract_python_frames(log, n);
     }
+    if log.contains(JAVA_EXCEPTION_MARK) {
+        return extract_java_frames(log, n);
+    }
+    if log.lines().any(|line| jazzer_js_report(line).is_some()) {
+        return extract_javascript_frames(log, n);
+    }
     extract_top_frames(log, n)
 }
 
 /// Extract the top `n` Go stack frames as `pkg.Func` names. Go prints a function
 /// line (`main.Fuzz(0x...)`) followed by an indented `\t/file.go:line +0xNN`; the
 /// function names are ASLR-independent, so hashing them gives a stable signature.
+///
+/// `go test` indents the whole trace under the failing test, so lines are read
+/// trimmed: a function line carries `(`, a location line starts with a path.
+/// Frames of the Go runtime and of the `testing` and `reflect` machinery that
+/// every fuzz failure passes through are left out, so the signature names the
+/// code under test.
 fn extract_go_frames(log: &str, n: usize) -> Vec<String> {
+    const MACHINERY: [&str; 4] = ["runtime.", "runtime/", "testing.", "reflect."];
     let mut frames = Vec::new();
     for line in log.lines() {
-        if line.starts_with('\t') || line.starts_with(' ') {
+        let trimmed = line.trim();
+        if trimmed.starts_with('/') {
             continue;
         }
-        let trimmed = line.trim_end();
         if let Some(open) = trimmed.find('(') {
             let name = &trimmed[..open];
-            if !name.is_empty() && name.contains('.') && !name.contains(' ') {
+            if !name.is_empty()
+                && name.contains('.')
+                && !name.contains(' ')
+                && !MACHINERY.iter().any(|prefix| name.starts_with(prefix))
+            {
                 frames.push(name.to_owned());
                 if frames.len() >= n {
                     break;
@@ -190,13 +276,133 @@ fn extract_go_frames(log: &str, n: usize) -> Vec<String> {
 /// Extract the deepest `n` Python traceback frames (`func (path:line)`). A
 /// traceback is most-recent-call-last, so the deepest frames sit closest to the
 /// raise site and best identify the bug; paths/lines are ASLR-independent.
+/// The directory a run's retained project sources are imported from, and the
+/// sandbox mount of the harness workspace. A frame's file is reported below
+/// one of them depending on whether the run or a later replay raised it.
+const RETAINED_SOURCES_MARK: &str = "/source-context/";
+const WORKSPACE_MOUNT: &str = "/work/";
+
+/// A Python frame without where its file happened to be installed: the same
+/// module reads `pkg/frames.py` whether it was imported from a run's retained
+/// sources or from the workspace.
+fn normalize_python_frame(frame: &str) -> String {
+    let frame = frame.replace('"', "");
+    if let Some((_, relative)) = frame.split_once(RETAINED_SOURCES_MARK) {
+        return relative.to_owned();
+    }
+    frame
+        .strip_prefix(WORKSPACE_MOUNT)
+        .unwrap_or(&frame)
+        .to_owned()
+}
+
+/// Extract the top `n` Java stack frames as qualified method names, from the
+/// `at pkg.Class.method(File.java:N)` lines that follow Jazzer's exception
+/// line. Line numbers are left out so a recompiled class signs the same. The
+/// generated harness class, Jazzer's own frames, and the JDK's reflection
+/// machinery are not the code under test and are skipped.
+fn extract_java_frames(log: &str, n: usize) -> Vec<String> {
+    const MACHINERY: [&str; 5] = [
+        "OxfuzzFuzzTarget.",
+        "com.code_intelligence.jazzer.",
+        "java.base/jdk.internal.reflect.",
+        "java.base/java.lang.reflect.",
+        "java.base/java.lang.invoke.",
+    ];
+    let mut frames = Vec::new();
+    let mut in_report = false;
+    for line in log.lines() {
+        if line.starts_with(JAVA_EXCEPTION_MARK) {
+            in_report = true;
+            continue;
+        }
+        if !in_report {
+            continue;
+        }
+        let trimmed = line.trim();
+        let Some(frame) = trimmed.strip_prefix("at ") else {
+            // `Caused by:` and `... N more` lines continue a report; anything
+            // else ends it.
+            if trimmed.starts_with("Caused by:") || trimmed.starts_with("...") {
+                continue;
+            }
+            break;
+        };
+        let name = frame.split('(').next().unwrap_or(frame);
+        if MACHINERY.iter().any(|prefix| name.starts_with(prefix)) {
+            continue;
+        }
+        frames.push(name.to_owned());
+        if frames.len() >= n {
+            break;
+        }
+    }
+    frames
+}
+
+/// Extract the top `n` JavaScript stack frames as `function (file)`, from
+/// the `at function (file:line:column)` lines that follow a Jazzer.js
+/// report. The file is the module's path below the project, whether a run
+/// loaded it from its retained sources or a replay from the workspace, and
+/// whether Node.js printed a path or a `file://` URL. Positions are left
+/// out: an instrumented ES module reports its own. The generated harness,
+/// Jazzer.js, and Node.js internals are not the code under test and are
+/// skipped, as is a frame with no file.
+fn extract_javascript_frames(log: &str, n: usize) -> Vec<String> {
+    const MACHINERY: [&str; 3] = ["/tmp/oxfuzz-harness.", "/opt/jazzerjs/", "node:"];
+    let mut frames = Vec::new();
+    let mut in_report = false;
+    for line in log.lines() {
+        if jazzer_js_report(line).is_some() {
+            in_report = true;
+            continue;
+        }
+        if !in_report {
+            continue;
+        }
+        let trimmed = line.trim();
+        let Some(frame) = trimmed.strip_prefix("at ") else {
+            // A bug-detector report names the call on a line of its own.
+            if trimmed.starts_with("in ") {
+                continue;
+            }
+            break;
+        };
+        let frame = frame.strip_prefix("async ").unwrap_or(frame);
+        let (name, location) = match frame.rsplit_once(" (") {
+            Some((name, location)) => (name, location.trim_end_matches(')')),
+            None => ("<anonymous>", frame),
+        };
+        let location = location.strip_prefix("file://").unwrap_or(location);
+        if !location.starts_with('/') || MACHINERY.iter().any(|skip| location.starts_with(skip)) {
+            continue;
+        }
+        // `path:line:column`: drop the two positions.
+        let file = location.rsplitn(3, ':').last().unwrap_or(location);
+        let file = file.split_once(RETAINED_SOURCES_MARK).map_or_else(
+            || file.strip_prefix(WORKSPACE_MOUNT).unwrap_or(file),
+            |(_, relative)| relative,
+        );
+        frames.push(format!("{name} ({file})"));
+        if frames.len() >= n {
+            break;
+        }
+    }
+    frames
+}
+
 fn extract_python_frames(log: &str, n: usize) -> Vec<String> {
     let mut frames: Vec<String> = Vec::new();
     for line in log.lines() {
         let trimmed = line.trim();
-        // `File "path", line N, in func`
+        // `File "path", line N, in func`. The Atheris callback is the
+        // harness, not the code under test, and its file is named after the
+        // place the script was installed, so it is not part of the identity.
         if let Some(rest) = trimmed.strip_prefix("File ") {
-            frames.push(rest.replace('"', ""));
+            if rest.ends_with(", in TestOneInput") {
+                continue;
+            }
+            frames.push(normalize_python_frame(rest));
         }
     }
     frames.reverse();
@@ -219,7 +425,7 @@ fn extract_top_frames(log: &str, n: usize) -> Vec<String> {
                 // leading ASLR runtime address so the same crash hashes
                 // identically across runs; keep the module+offset (or any)
                 // tail, mirroring the " in " path which also drops the address.
-                frames.push(strip_leading_frame_address(trimmed));
+                frames.push(strip_module_suffix(&strip_leading_frame_address(trimmed)));
             }
         }
         if frames.len() >= n {
@@ -250,6 +456,32 @@ fn strip_leading_frame_address(frame: &str) -> String {
     }
 }
 
+/// Drop the trailing `(module+0xOFFSET)` and `(BuildId: ...)` groups `TSan`
+/// prints after a symbolized frame (`w /work/t.c:5:35 (t+0x1294f8) (BuildId:
+/// ...)`): both change when the harness is rebuilt, and neither identifies the
+/// bug. A frame that is nothing but such a group (an unsymbolized `ASan` frame)
+/// is returned unchanged, so its signature stays what it was.
+fn strip_module_suffix(frame: &str) -> String {
+    if frame.starts_with('(') {
+        return frame.to_owned();
+    }
+    let mut rest = frame.trim_end();
+    while rest.ends_with(')') {
+        let Some(open) = rest.rfind(" (") else {
+            break;
+        };
+        let group = &rest[open + 2..];
+        if !(group.starts_with("BuildId:") || group.contains("+0x")) {
+            break;
+        }
+        rest = rest[..open].trim_end();
+    }
+    rest.to_owned()
+}
+
+/// The line Atheris prints before the exception a fuzz callback raised.
+const ATHERIS_EXCEPTION_MARK: &str = "=== Uncaught Python exception: ===";
+
 fn extract_summary(log: &str, kind: CrashKind) -> String {
     if kind == CrashKind::Panic {
         // A Go panic leads with `panic: <message>`; a Python traceback ends with
@@ -260,6 +492,40 @@ fn extract_summary(log: &str, kind: CrashKind) -> String {
             if trimmed.starts_with("panic:") {
                 return trimmed.to_owned();
             }
+            if is_go_test_panic_line(&trimmed.to_ascii_lowercase()) {
+                if let Some(at) = trimmed.find("panic:") {
+                    return trimmed[at..].to_owned();
+                }
+            }
+        }
+        // Jazzer names the exception on its marker line.
+        if let Some(exception) = log
+            .lines()
+            .find_map(|line| line.strip_prefix(JAVA_EXCEPTION_MARK))
+        {
+            return exception.trim().to_owned();
+        }
+        // Jazzer.js names the exception, or the bug detector's finding, on
+        // its report line; a detector puts the call on the next one.
+        let mut lines = log.lines();
+        if let Some(report) = lines.by_ref().find_map(jazzer_js_report) {
+            let report = report
+                .strip_prefix(JAZZER_JS_EXCEPTION_MARK)
+                .unwrap_or(report)
+                .trim();
+            return match lines.next().map(str::trim) {
+                Some(call) if call.starts_with("in ") => format!("{report} {call}"),
+                _ => report.to_owned(),
+            };
+        }
+        // Atheris names the exception on the line after its marker; the
+        // libFuzzer lines it prints afterwards say only that the target
+        // exited.
+        let mut lines = log.lines().map(str::trim);
+        if lines.any(|line| line == ATHERIS_EXCEPTION_MARK) {
+            if let Some(exception) = lines.find(|line| !line.is_empty()) {
+                return exception.to_owned();
+            }
         }
         if let Some(last) = log.lines().map(str::trim).rev().find(|t| !t.is_empty()) {
             return last.to_owned();
@@ -267,7 +533,12 @@ fn extract_summary(log: &str, kind: CrashKind) -> String {
     }
     for line in log.lines() {
         let lower = line.to_ascii_lowercase();
-        if lower.contains("error") || lower.contains("asan") || lower.contains("ubsan") {
+        if lower.contains("error")
+            || lower.contains("asan")
+            || lower.contains("ubsan")
+            || lower.contains("memorysanitizer")
+            || lower.contains("threadsanitizer")
+        {
             return line.trim().to_owned();
         }
     }
@@ -278,6 +549,42 @@ fn extract_summary(log: &str, kind: CrashKind) -> String {
 mod tests {
     use super::{classify, detect_kind, looks_like_crash};
     use hf_core::crash::CrashKind;
+
+    /// The report the binary-only replay shim prints: no sanitizer, module
+    /// offsets instead of symbols. The kind comes from the signal name and the
+    /// signature from the offsets, whatever addresses the loader picked.
+    #[test]
+    fn a_binary_only_replay_report_is_signed_by_module_offsets() {
+        let report = |base: &str, top: &str, name: &str, signal: u32| {
+            format!(
+                "==ERROR: oxfuzz-crashinfo: {name} (signal {signal}) at (/work/target+{top}), \
+                 fault address 0x0\n    \
+                 #0 0x{base}0934 (/work/target+{top})\n    \
+                 #1 0x{base}098c (/work/target+0x98c)\n    \
+                 #2 0x{base}84c4 (/lib/aarch64-linux-gnu/libc.so.6+0x284c4)\n    \
+                 #3 0x{base}8598 in __libc_start_main (/lib/aarch64-linux-gnu/libc.so.6+0x28598)\n\
+                 SUMMARY: oxfuzz-crashinfo: {name} (signal {signal}) at (/work/target+{top})\n"
+            )
+        };
+        let (kind, signature, summary) = classify(&report("55000", "0x934", "SEGV", 11));
+        assert_eq!(kind, CrashKind::Segv);
+        assert_eq!(signature.len(), 64);
+        assert!(summary.contains("oxfuzz-crashinfo: SEGV"), "{summary}");
+        assert!(looks_like_crash(&report("55000", "0x934", "SEGV", 11)));
+
+        // Another load address, the same fault.
+        assert_eq!(classify(&report("7f000", "0x934", "SEGV", 11)).1, signature);
+        // Another faulting instruction is another finding.
+        assert_ne!(classify(&report("55000", "0x7a0", "SEGV", 11)).1, signature);
+
+        let (kind, aborted, _) = classify(&report("55000", "0x934", "ABORT", 6));
+        assert_eq!(kind, CrashKind::Abort);
+        assert_ne!(aborted, signature, "the kind is part of the signature");
+        assert_eq!(
+            classify(&report("55000", "0x934", "FPE", 8)).0,
+            CrashKind::Other
+        );
+    }
 
     #[test]
     fn unsymbolized_frames_ignore_the_aslr_address() {
@@ -434,6 +741,64 @@ SUMMARY: AddressSanitizer: 4 byte(s) leaked in 1 allocation(s).
         assert_eq!(detect_kind(real_timeout), CrashKind::Timeout);
     }
 
+    /// The failure text Go 1.26.5 printed in the sandbox image for a planted
+    /// out-of-range read found by `-test.fuzz`.
+    const GO_FUZZ_FAILURE: &str = "\
+--- FAIL: FuzzParse (0.54s)
+    --- FAIL: FuzzParse (0.00s)
+        testing.go:1927: panic: runtime error: index out of range [235] with length 21
+            goroutine 41213 [running]:
+            runtime/debug.Stack()
+            \t/usr/local/go/src/runtime/debug/stack.go:26 +0xc4
+            testing.tRunner.func1()
+            \t/usr/local/go/src/testing/testing.go:1927 +0x218
+            panic({0x235320?, 0x6d8f820c0060?})
+            \t/usr/local/go/src/runtime/panic.go:860 +0x12c
+            example.com/probe.Parse(...)
+            \t/work/parse.go:10
+            example.com/probe.FuzzParse.func1(0x6d8f7ba6a7a8?, {0x6d8f7bb80000, 0x15, 0x0?})
+            \t/work/fuzz_harness_test.go:8 +0x24c
+            reflect.Value.call({0x209c80?, 0x25aee0?, 0x6d8f7ba6ae28?}, {0x2495de, 0x4}, {0x6d8f8705a030, 0x2, 0x0?})
+            \t/usr/local/go/src/reflect/value.go:586 +0xac8
+            testing.(*F).Fuzz.func1.1(0x6d8f87058488?)
+            \t/usr/local/go/src/testing/fuzz.go:341 +0x25c
+            created by testing.(*F).Fuzz.func1 in goroutine 6
+            \t/usr/local/go/src/testing/fuzz.go:328 +0x4ac
+
+    Failing input written to testdata/fuzz/FuzzParse/4f85edf10c3c3e2c
+FAIL
+";
+
+    #[test]
+    fn a_go_fuzz_failure_is_a_panic_signed_by_the_code_under_test() {
+        let (kind, signature, summary) = super::classify(GO_FUZZ_FAILURE);
+        assert_eq!(kind, CrashKind::Panic, "not UBSan despite 'runtime error:'");
+        assert_eq!(
+            summary,
+            "panic: runtime error: index out of range [235] with length 21"
+        );
+        assert_eq!(
+            super::extract_go_frames(GO_FUZZ_FAILURE, 3),
+            [
+                "example.com/probe.Parse",
+                "example.com/probe.FuzzParse.func1"
+            ]
+        );
+        assert!(super::looks_like_crash(GO_FUZZ_FAILURE));
+        // Addresses and goroutine numbers differ per run; the signature must not.
+        let again = GO_FUZZ_FAILURE
+            .replace("41213", "7")
+            .replace("0x6d8f7ba6a7a8", "0x1")
+            .replace("[235] with length 21", "[9] with length 4");
+        assert_eq!(super::classify(&again).1, signature);
+        assert!(!signature.is_empty());
+        // A UBSan finding in a file whose name ends in .go-like text stays UBSan.
+        let ubsan = "src/parse.c:12:3: runtime error: signed integer overflow";
+        assert_eq!(super::classify(ubsan).0, CrashKind::Ubsan);
+        assert!(!super::is_go_test_panic_line("note: panic: not a position"));
+        assert!(super::is_go_test_panic_line("testing.go:1927: panic: boom"));
+    }
+
     #[test]
     fn frameless_classified_crashes_are_not_deduped() {
         use crate::dedup::dedup;
@@ -541,6 +906,236 @@ SUMMARY: AddressSanitizer: 4 byte(s) leaked in 1 allocation(s).
     }
 
     #[test]
+    fn a_python_exception_signs_the_same_from_a_run_and_from_a_replay() {
+        let traceback = |harness: &str, module: &str| {
+            format!(
+                " === Uncaught Python exception: ===\n\
+                 IndexError: list index out of range\n\
+                 Traceback (most recent call last):\n\
+                 \x20 File \"{harness}\", line 17, in TestOneInput\n\
+                 \x20   oxfuzz_target.parse(data)\n\
+                 \x20 File \"{module}\", line 4, in parse\n\
+                 \x20   return table[data[2]]\n\
+                 IndexError: list index out of range\n\
+                 \n\
+                 ==6== ERROR: libFuzzer: fuzz target exited\n\
+                 SUMMARY: libFuzzer: fuzz target exited\n"
+            )
+        };
+        let run = classify(&traceback(
+            "/work/runs/7d0c/input/harness",
+            "/work/runs/7d0c/input/source-context/pkg/frames.py",
+        ));
+        let replay = classify(&traceback("/work/fuzz_parse", "/work/pkg/frames.py"));
+        assert_eq!(run.1, replay.1, "one defect, one signature");
+        assert_eq!(run.2, "IndexError: list index out of range");
+        let elsewhere = classify(&traceback("/work/fuzz_parse", "/work/pkg/other.py"));
+        assert_ne!(elsewhere.1, replay.1, "another module is another defect");
+        assert_eq!(
+            super::extract_python_frames(&traceback("/work/fuzz_parse", "/work/pkg/frames.py"), 5),
+            ["pkg/frames.py, line 4, in parse"]
+        );
+    }
+
+    /// Captured from Jazzer 0.30.0 in sandbox image 0.2.3.
+    const JAZZER_FINDING: &str = "INFO: Instrumented com.example.Frames (took 4 ms, size +64%)\n\
+        \n\
+        == Java Exception: java.lang.ArrayIndexOutOfBoundsException: Index 90 out of bounds for length 3\n\
+        \tat com.example.Frames.parse(Frames.java:8)\n\
+        \tat OxfuzzFuzzTarget.fuzzerTestOneInput(OxfuzzFuzzTarget.java:3)\n\
+        DEDUP_TOKEN: 3be24d4548a2ca66\n\
+        == libFuzzer crashing input ==\n\
+        reproducer_path='/tmp'; Java reproducer written to /tmp/Crash_c87c.java\n";
+
+    #[test]
+    fn a_clean_jazzer_replay_is_not_a_crash() {
+        let log = "INFO: Loaded 31 hooks from com.code_intelligence.jazzer.sanitizers.FilePathTraversal\n\
+INFO: Loaded 63 hooks from com.code_intelligence.jazzer.sanitizers.UnsafeSanitizer\n\
+INFO: Instrumented OxfuzzFuzzTarget (took 61 ms, size +29%)\n\
+INFO: using inputs from: /work/out/crash-b084b39be118ed218c2cf935548563d2f01c05f6\n\
+jazzer: Running 1 inputs 1 time(s) each.\n\
+Executed /work/out/crash-b084b39be118ed218c2cf935548563d2f01c05f6 in 5 ms\n";
+        assert!(!looks_like_crash(log));
+        let finding = format!(
+            "{log}== Java Exception: java.lang.ArrayIndexOutOfBoundsException: Index 128 out of bounds for length 3\n"
+        );
+        assert!(looks_like_crash(&finding));
+    }
+
+    #[test]
+    fn a_java_exception_classifies_and_signs_by_the_frames_under_test() {
+        let (kind, signature, summary) = classify(JAZZER_FINDING);
+        assert_eq!(kind, CrashKind::Panic);
+        assert_eq!(
+            summary,
+            "java.lang.ArrayIndexOutOfBoundsException: Index 90 out of bounds for length 3"
+        );
+        assert!(looks_like_crash(JAZZER_FINDING));
+        assert_eq!(
+            super::extract_frames(JAZZER_FINDING, 3),
+            ["com.example.Frames.parse"]
+        );
+        // A different message or line of the same frames is the same defect;
+        // a different frame is another one.
+        let other_index = JAZZER_FINDING
+            .replace("Index 90", "Index 77")
+            .replace("Frames.java:8", "Frames.java:9");
+        assert_eq!(classify(&other_index).1, signature);
+        let elsewhere = JAZZER_FINDING.replace("Frames.parse", "Frames.decode");
+        assert_ne!(classify(&elsewhere).1, signature);
+        // A clean Jazzer replay is not a crash.
+        assert!(!looks_like_crash(
+            "INFO: Instrumented com.example.Frames (took 4 ms, size +64%)\n\
+             jazzer: Running 1 inputs 1 time(s) each.\nExecuted /work/in in 2 ms\n"
+        ));
+    }
+
+    /// Captured from Jazzer.js 4.0.0 on Node.js 24.22.3 in the sandbox.
+    const JAZZER_JS_FINDING: &str = "INFO: Using generated seed: 1094029775\n\
+        #2\tINITED cov: 4 ft: 4 corp: 1/1b exec/s: 0 rss: 176Mb\n\
+        ==7== Uncaught Exception: TypeError: Cannot read properties of undefined (reading 'toString')\n\
+        \x20   at header (/work/src/frames.js:5:25)\n\
+        \x20   at Module.parse (/work/src/frames.js:13:12)\n\
+        \x20   at fuzz (file:///tmp/oxfuzz-harness.mjs:19:17)\n\
+        MS: 3 CopyPart-CopyPart-EraseBytes-; base unit: 11ec412a9136c59be4e4e1f7cb89d28ee98d160c\n\
+        0x7b,0x36,0x7b,0x1a,0xa,\n\
+        artifact_prefix='/work/o1/'; Test unit written to /work/o1/crash-f6a8e64792ace4675416351477eefbfa5711fec8\n";
+
+    #[test]
+    fn a_javascript_exception_classifies_and_signs_by_the_frames_under_test() {
+        let (kind, signature, summary) = classify(JAZZER_JS_FINDING);
+        assert_eq!(kind, CrashKind::Panic);
+        assert_eq!(
+            summary,
+            "TypeError: Cannot read properties of undefined (reading 'toString')"
+        );
+        assert!(looks_like_crash(JAZZER_JS_FINDING));
+        // The harness frame is not the code under test.
+        assert_eq!(
+            super::extract_frames(JAZZER_JS_FINDING, 5),
+            ["header (src/frames.js)", "Module.parse (src/frames.js)"]
+        );
+        // A run loads the module from its retained sources and a replay from
+        // the workspace; an ES module's frames are URLs; a later line or
+        // message of the same frames is the same defect.
+        let from_a_run = JAZZER_JS_FINDING
+            .replace(
+                "(/work/src/frames.js:5:25)",
+                "(file:///work/run/inputs/source-context/src/frames.js:9:1)",
+            )
+            .replace(
+                "(/work/src/frames.js:13:12)",
+                "(file:///work/run/inputs/source-context/src/frames.js:14:3)",
+            )
+            .replace("reading 'toString'", "reading 'length'")
+            .replace("==7==", "==4021==");
+        assert_eq!(classify(&from_a_run).1, signature);
+        let elsewhere = JAZZER_JS_FINDING.replace("at header", "at trailer");
+        assert_ne!(classify(&elsewhere).1, signature);
+    }
+
+    #[test]
+    fn javascript_frames_keep_what_names_the_code_under_test() {
+        let log = "==22== Uncaught Exception: RangeError: bad prefix 4\n\
+                   \x20   at async Module.decode (file:///work/esm/codec.js:13:13)\n\
+                   \x20   at /work/src/table.js:3:53\n\
+                   \x20   at new Promise (<anonymous>)\n\
+                   \x20   at Object.lookup (/work/node_modules/dep/index.js:7:1)\n\
+                   \x20   at fuzz (file:///tmp/oxfuzz-harness.mjs:19:17)\n\
+                   \x20   at /opt/jazzerjs/node_modules/@jazzer.js/core/core.ts:403:15\n\
+                   \x20   at processTicksAndRejections (node:internal/process/task_queues:104:5)\n\
+                   Executed /work/out/crash-ed69 in 0 ms\n\
+                   \x20   at not.a.frame (/work/after.js:1:1)\n";
+        assert_eq!(
+            super::extract_frames(log, 8),
+            [
+                "Module.decode (esm/codec.js)",
+                "<anonymous> (src/table.js)",
+                "Object.lookup (node_modules/dep/index.js)",
+            ]
+        );
+        assert_eq!(
+            super::extract_frames(log, 1),
+            ["Module.decode (esm/codec.js)"]
+        );
+        assert_eq!(classify(log).2, "RangeError: bad prefix 4");
+    }
+
+    #[test]
+    fn a_jazzer_js_bug_detector_report_is_a_finding_with_its_own_summary() {
+        let log = "Running: /work/corpus/seed\n\
+                   ==78== Command Injection\n\
+                   \x20   in execSync(): called with 'ls jaz_zer'\n\
+                   \x20   at Module.run (/work/src/frames.js:23:37)\n\
+                   \x20   at fuzz (file:///tmp/oxfuzz-harness.mjs:19:17)\n\
+                   Executed /work/corpus/seed in 3 ms\n";
+        let (kind, _, summary) = classify(log);
+        assert_eq!(kind, CrashKind::Panic);
+        assert_eq!(
+            summary,
+            "Command Injection in execSync(): called with 'ls jaz_zer'"
+        );
+        assert!(looks_like_crash(log));
+        assert_eq!(
+            super::extract_frames(log, 5),
+            ["Module.run (src/frames.js)"]
+        );
+    }
+
+    #[test]
+    fn a_clean_jazzer_js_replay_is_not_a_crash_and_a_timeout_is_a_timeout() {
+        let clean = "INFO: Using generated seed: 795174003\n\
+                     INFO: using inputs from: /tmp/benign\n\
+                     Dictionary: 4 entries\n\
+                     INFO: Loaded 1 modules   (512 inline 8-bit counters): 512 [0xffffbc10f010, 0xffffbc10f210), \n\
+                     unused_arg0_report_a_bug_if_you_see_this: Running 1 inputs 1 time(s) each.\n\
+                     Running: /tmp/benign\n\
+                     Executed /tmp/benign in 0 ms\n\
+                     ***\n\
+                     *** NOTE: fuzzing was not performed, you have only\n\
+                     ***       executed the target code on a fixed set of inputs.\n\
+                     ***\n\
+                     \n\
+                     == Jazzer.js:\n\
+                     \x20 Exclusively observed synchronous return values from fuzzed function. Fuzzing in synchronous mode seems beneficial!\n\
+                     \x20 To enable it, append a `--sync` to your Jazzer.js invocation.\n";
+        assert!(!looks_like_crash(clean));
+        // libFuzzer's own lines carry the same process mark and are not
+        // Jazzer.js reports.
+        let timeout = "==9== ERROR: libFuzzer: timeout after 2 seconds\n\
+                       SUMMARY: libFuzzer: timeout\n";
+        assert_eq!(classify(timeout).0, CrashKind::Timeout);
+        assert!(
+            super::jazzer_js_report("==9== ERROR: libFuzzer: timeout after 2 seconds").is_none()
+        );
+        assert!(super::jazzer_js_report("==9== libFuzzer: run interrupted; exiting").is_none());
+        assert!(
+            super::jazzer_js_report("==9==ERROR: AddressSanitizer: heap-use-after-free").is_none()
+        );
+        assert!(super::jazzer_js_report("== Jazzer.js:").is_none());
+        assert!(super::jazzer_js_report("== Java Exception: java.lang.Error").is_none());
+        assert_eq!(
+            super::jazzer_js_report("==9== Uncaught Exception: Error: x"),
+            Some("Uncaught Exception: Error: x")
+        );
+    }
+
+    #[test]
+    fn a_clean_atheris_replay_is_not_a_crash() {
+        let log = "INFO: Instrumenting pkg.frames\n\
+                   INFO: Using built-in libfuzzer\n\
+                   WARNING: Failed to find function \"__sanitizer_acquire_crash_state\".\n\
+                   WARNING: Failed to find function \"__sanitizer_print_stack_trace\".\n\
+                   WARNING: Failed to find function \"__sanitizer_set_death_callback\".\n\
+                   /work/fuzz_parse: Running 1 inputs 1 time(s) each.\n\
+                   Executed /work/out/crash-4456 in 0 ms\n";
+        assert!(!looks_like_crash(log));
+        assert!(looks_like_crash(&format!(
+            "{log} === Uncaught Python exception: ===\nIndexError: x\n"
+        )));
+    }
+
+    #[test]
     fn detects_a_still_firing_crash() {
         let trace = "==1==ERROR: AddressSanitizer: heap-buffer-overflow\nSUMMARY: AddressSanitizer: heap-buffer-overflow";
         assert!(looks_like_crash(trace));
@@ -554,5 +1149,48 @@ SUMMARY: AddressSanitizer: 4 byte(s) leaked in 1 allocation(s).
     fn clean_replay_is_not_a_crash() {
         assert!(!looks_like_crash(""));
         assert!(!looks_like_crash("Executed crash-abc in 2 ms\nDone 1 runs"));
+    }
+
+    /// Captured from a libFuzzer `-fsanitize=memory` run in sandbox image 0.2.2.
+    const MSAN_REPORT: &str = "\
+==14==WARNING: MemorySanitizer: use-of-uninitialized-value
+    #0 0xaaaae5438f4c in parse /work/msan.c:9:7
+    #1 0xaaaae5438978 in LLVMFuzzerTestOneInput /work/msan.c:13:58
+SUMMARY: MemorySanitizer: use-of-uninitialized-value /work/msan.c:9:7 in parse
+";
+
+    #[test]
+    fn memory_sanitizer_reports_classify_as_msan() {
+        let (kind, signature, summary) = classify(MSAN_REPORT);
+        assert_eq!(kind, CrashKind::Msan);
+        assert!(!signature.is_empty());
+        assert_eq!(
+            summary,
+            "==14==WARNING: MemorySanitizer: use-of-uninitialized-value"
+        );
+    }
+
+    #[test]
+    fn thread_sanitizer_reports_classify_as_tsan() {
+        let report = crate::frames::tests::TSAN_RACE;
+        let (kind, signature, summary) = classify(report);
+        assert_eq!(kind, CrashKind::Tsan);
+        assert!(!signature.is_empty());
+        assert_eq!(summary, "WARNING: ThreadSanitizer: data race (pid=45)");
+    }
+
+    /// `TSan` prints the module offset and build id on every frame. Neither
+    /// identifies the bug, and both change when the harness is rebuilt.
+    #[test]
+    fn tsan_signature_survives_a_rebuild() {
+        let report = crate::frames::tests::TSAN_RACE;
+        let rebuilt = report
+            .replace(
+                "62f281dae895bb4a0d88cec48fa7e02ce30ba699",
+                "0000000000000000000000000000000000000000",
+            )
+            .replace("t+0x1294f8", "t+0x1300a0")
+            .replace("pid=45", "pid=46");
+        assert_eq!(classify(report).1, classify(&rebuilt).1);
     }
 }

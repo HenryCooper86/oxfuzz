@@ -836,6 +836,202 @@ async fn real_docker_make_fixture_produces_and_retains_the_selected_database() {
     assert_eq!(missing.profile_state, BuildProfileState::Invalid);
 }
 
+/// Copy a directory tree, leaving out links, so a live test never writes into
+/// the project an operator named.
+fn copy_tree_without_links(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let kind = entry.file_type().unwrap();
+        let target = to.join(entry.file_name());
+        if kind.is_dir() {
+            copy_tree_without_links(&entry.path(), &target);
+        } else if kind.is_file() {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+/// A libFuzzer harness for the function the vendored sample project declares
+/// in `include/records.h`.
+const BAZEL_SAMPLE_HARNESS: &str = "#include <cstddef>\n#include <cstdint>\n\n#include \"records.h\"\n\nextern \"C\" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {\n  parse_records(data, size);\n  return 0;\n}\n";
+
+/// `OXFUZZ_BAZEL_PROJECT` names a Bzlmod project whose dependencies were
+/// vendored with `bazel vendor` on a machine with network access. Its
+/// `cc_library` sets `includes = ["include"]` and `defines =
+/// ["RECORDS_MAX=16"]`, depends on `@abseil-cpp//absl/strings`, and its
+/// `parse_records` writes past a `RECORDS_MAX`-sized table.
+///
+/// The offline plan must yield the compile commands of the project and of
+/// the vendored library, and a harness must then link against both and find
+/// the planted write.
+#[tokio::test]
+#[ignore = "requires Docker, the pinned sandbox image and OXFUZZ_BAZEL_PROJECT"]
+async fn real_docker_bazel_project_builds_offline_and_its_harness_links_the_vendored_library() {
+    let source = PathBuf::from(
+        std::env::var("OXFUZZ_BAZEL_PROJECT").expect("a vendored Bazel project is required"),
+    );
+    let runtime = Arc::new(hf_runtime::docker::DockerRuntime::new(
+        hf_runtime::RuntimeConfig::default(),
+        workspace(),
+    ));
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("project");
+    copy_tree_without_links(&source, &project);
+    // A vendor directory is normally written on the user's machine, by a
+    // Bazel built for another platform, and the fingerprint Bazel keeps
+    // beside each repository then differs from the one the sandbox's Bazel
+    // computes. Rewriting the fingerprints reproduces that here.
+    let vendor = project.join("third_party/bazel");
+    for entry in std::fs::read_dir(&vendor).unwrap() {
+        let path = entry.unwrap().path();
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "marker")
+        {
+            std::fs::write(&path, "0".repeat(64)).unwrap();
+        }
+    }
+    // The link `bazel vendor` leaves behind points into the output base of
+    // the machine that ran it; staging has to leave it out, not refuse it.
+    // Creating a link needs a privilege on Windows, so it is planted on Unix
+    // hosts only.
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(
+        "/nonexistent/output-base/external",
+        project.join("third_party/bazel/bazel-external"),
+    )
+    .unwrap();
+    let service = ServiceContainer::new(runtime.clone(), None).with_store(Arc::new(
+        hf_storage::Store::connect(dir.path().join("store.db"))
+            .await
+            .unwrap(),
+    ));
+    let detected = service.diagnose_build(&project).await.unwrap();
+    println!("detected={:?}", detected.detected);
+    let profile = service
+        .save_build_profile(SaveBuildProfileRequest {
+            project: project.display().to_string(),
+            component_root: ".".into(),
+            build_system: ProfileBuildSystem::Bazel,
+            compile_database_path: "build/compile_commands.json".into(),
+            cmake_definitions: std::collections::BTreeMap::new(),
+            dependencies: vec![],
+        })
+        .await
+        .unwrap();
+    let diagnosis = service.diagnose_build(&project).await.unwrap();
+    println!(
+        "state={:?} reasons={:?}",
+        diagnosis.profile_state, diagnosis.reasons
+    );
+    assert_eq!(diagnosis.profile_state, BuildProfileState::NeedsBuild);
+    let outcome = service
+        .run_build_plan(RunBuildPlanRequest {
+            project: project.display().to_string(),
+            expected_profile_sha256: profile.profile_sha256.clone(),
+        })
+        .await
+        .unwrap();
+    println!(
+        "image={} status={:?} steps={} terminal={:?}",
+        profile.sandbox_image_id, outcome.status, outcome.steps_run, outcome.diagnosis.terminal
+    );
+    assert_eq!(outcome.status, BuildTerminalStatus::Succeeded);
+    assert_eq!(outcome.steps_run, 1);
+    let database = std::fs::read_to_string(project.join("build/compile_commands.json")).unwrap();
+    let context = outcome.build_context.unwrap();
+    println!("context={context:?}");
+    let project_root = std::fs::canonicalize(&project).unwrap();
+    assert!(context.entry_count > 2, "project and library sources");
+    assert!(context.include_dirs.contains(&project_root.join("include")));
+    assert!(context
+        .include_dirs
+        .contains(&project_root.join("third_party/bazel/abseil-cpp+")));
+    assert!(context.defines.contains(&"-DRECORDS_MAX=16".to_owned()));
+    assert_eq!(context.std_flag.as_deref(), Some("-std=c++17"));
+    assert!(database.contains("src/records.cc"));
+    assert!(database.contains("third_party/bazel/abseil-cpp+/absl/strings/ascii.cc"));
+    assert!(
+        !database.contains("bazel-out") && !database.contains("/tmp/oxfuzz-bazel"),
+        "the database names only paths of the project"
+    );
+    assert!(
+        !database.contains("__DATE__"),
+        "Bazel's reproducibility defines are not project settings"
+    );
+    assert_eq!(
+        service
+            .diagnose_build(&project)
+            .await
+            .unwrap()
+            .profile_state,
+        BuildProfileState::Ready
+    );
+    assert!(
+        std::fs::symlink_metadata(project.join("bazel-bin")).is_err(),
+        "no Bazel output link is published into the project"
+    );
+
+    let compiled = service
+        .harness_compile(
+            BAZEL_SAMPLE_HARNESS.to_owned(),
+            &project,
+            hf_core::engine::EngineKind::LibFuzzer,
+            "parse_records",
+            hf_core::target::TargetLanguage::Cpp,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+    println!(
+        "harness status={:?} binary={} workspace={}",
+        compiled.status,
+        compiled.binary_name,
+        compiled.workspace.display()
+    );
+    std::fs::create_dir_all(compiled.workspace.join("out")).unwrap();
+    let run = runtime
+        .run_command_opts(
+            &[
+                format!("./{}", compiled.binary_name),
+                "-max_total_time=60".into(),
+                "-artifact_prefix=out/".into(),
+            ],
+            &compiled.workspace,
+            &ResourceLimits {
+                max_mem_mb: 2048,
+                max_cpus: 1,
+                max_duration_secs: 120,
+                ..ResourceLimits::default()
+            },
+            &SandboxOptions {
+                image: Some(profile.sandbox_image_id.clone()),
+                network_mode: SandboxNetworkMode::None,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let report = format!("{}\n{}", run.stdout, run.stderr);
+    println!(
+        "exit={} report tail={}",
+        run.exit_code,
+        report
+            .chars()
+            .rev()
+            .take(1500)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect::<String>()
+    );
+    assert_ne!(run.exit_code, 0, "the planted write stops the fuzzer");
+    assert!(report.contains("global-buffer-overflow"), "{report}");
+    assert!(report.contains("parse_records"), "{report}");
+}
+
 #[tokio::test]
 async fn normalization_rewrites_only_execution_path_prefixes_and_preserves_other_text() {
     let mut runtime = BuildRuntime::new();

@@ -427,6 +427,8 @@ export function DiscoverView({ embedded = false, onNavigate }: { embedded?: bool
             { value: "cpp", label: "C++" },
             { value: "go", label: "Go" },
             { value: "python", label: "Python" },
+            { value: "java", label: "Java" },
+            { value: "javascript", label: "JavaScript" },
           ]}
         />
         <Button

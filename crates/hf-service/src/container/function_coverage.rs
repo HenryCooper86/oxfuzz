@@ -166,6 +166,18 @@ mod collection {
             EngineKind::GoNative => Err(ClassifiedError::Validation(
                 "userspace LLVM function profiles are unavailable for Go native fuzzing".to_owned(),
             )),
+            // Atheris counts Python bytecode events, not LLVM profiles.
+            EngineKind::Atheris => Err(ClassifiedError::Validation(
+                "userspace LLVM function profiles are unavailable for Atheris".to_owned(),
+            )),
+            // Jazzer counts JVM bytecode edges, not LLVM profiles.
+            EngineKind::Jazzer => Err(ClassifiedError::Validation(
+                "userspace LLVM function profiles are unavailable for Jazzer".to_owned(),
+            )),
+            // Jazzer.js counts edges it instruments in JavaScript source.
+            EngineKind::JazzerJs => Err(ClassifiedError::Validation(
+                "userspace LLVM function profiles are unavailable for Jazzer.js".to_owned(),
+            )),
         }
     }
 

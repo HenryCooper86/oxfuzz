@@ -913,10 +913,27 @@ impl ServiceContainer {
                     TargetLanguage::harnessable_ids()
                 )));
             }
+            // Name the engine that does drive what was found, so a Go
+            // project under the default engine is one flag from working.
+            let mut hints: Vec<String> = candidates
+                .iter()
+                .filter_map(|candidate| {
+                    let driver = candidate.language.default_engine()?;
+                    Some(format!(
+                        "{} targets run under --engine {}",
+                        candidate.language.as_str(),
+                        driver.as_str()
+                    ))
+                })
+                .collect();
+            hints.sort_unstable();
+            hints.dedup();
             return Err(ClassifiedError::Validation(format!(
-                "discovered {} candidate(s), but engine '{}' cannot drive any of their languages",
+                "discovered {} candidate(s), but engine '{}' cannot drive any of their languages \
+                 ({})",
                 candidates.len(),
-                engine.as_str()
+                engine.as_str(),
+                hints.join("; ")
             )));
         };
         Ok((best.symbol.clone(), best.language))
@@ -937,6 +954,8 @@ impl ServiceContainer {
             TargetLanguage::Rust,
             TargetLanguage::Go,
             TargetLanguage::Python,
+            TargetLanguage::Java,
+            TargetLanguage::JavaScript,
         ] {
             match self.discover(project, language).await {
                 Ok(inventory) => all.extend(inventory.candidates),

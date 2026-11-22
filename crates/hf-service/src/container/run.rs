@@ -22,6 +22,7 @@ use super::guards::{
 };
 use super::harness_workspace::{
     build_workspace_dictionary, harness_binary_name, harness_cmplog_binary_name,
+    read_user_dictionary, USER_DICTIONARY_FILE,
 };
 use super::output_budget::{monitor_run_output, run_artifacts_within_budget};
 use super::policy::CurrentHarnessEvidence;
@@ -34,9 +35,10 @@ use super::staging::{
 };
 use super::target_source::read_target_definition;
 use super::workspace::{
-    prepare_configured_workspace_root, run_output_relative, workspace_dir,
-    workspace_relative_record,
+    prepare_configured_workspace_root, prepare_target_workspace, run_output_relative,
+    workspace_dir, workspace_relative_record,
 };
+use super::workspace_file::replace_workspace_file;
 use super::{
     auto_revert_baseline_compatible, auto_revert_decision, ensure_workspace_directory,
     merge_run_discoveries, persist_terminal_run_evidence, resolve_fuzzing_run, syz_kvm_usable,
@@ -707,6 +709,74 @@ impl ServiceContainer {
         }
     }
 
+    /// Store `text` as the operator's dictionary for `target`. Every later run
+    /// of the target puts these tokens ahead of the ones extracted from
+    /// source. Returns the number of distinct tokens stored.
+    ///
+    /// # Errors
+    /// Returns [`ClassifiedError::Validation`] naming the line when `text` is
+    /// not a dictionary the engines accept, and `ClassifiedError` when the
+    /// workspace cannot be prepared or written.
+    pub async fn set_user_dictionary(
+        &self,
+        project: &Path,
+        target: &str,
+        text: &str,
+    ) -> Result<usize, ClassifiedError> {
+        let tokens = hf_engine::dict::parse_user_dict(text)
+            .map_err(|error| ClassifiedError::Validation(format!("invalid dictionary: {error}")))?;
+        // Stored normalized: the file an engine later reads is the one this
+        // parser produced, not the operator's bytes.
+        self.write_user_dictionary(project, target, &hf_engine::dict::render_dict(&tokens))
+            .await?;
+        Ok(tokens.len())
+    }
+
+    /// Remove the operator's dictionary for `target`; later runs use only the
+    /// tokens extracted from source.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` when the workspace cannot be prepared or
+    /// written.
+    pub async fn clear_user_dictionary(
+        &self,
+        project: &Path,
+        target: &str,
+    ) -> Result<(), ClassifiedError> {
+        if read_user_dictionary(&workspace_dir(project, target)).is_none() {
+            return Ok(());
+        }
+        self.write_user_dictionary(project, target, "").await
+    }
+
+    /// The operator's stored dictionary for `target`, in engine format, or
+    /// `None` when none is set.
+    #[must_use]
+    pub fn user_dictionary(&self, project: &Path, target: &str) -> Option<String> {
+        read_user_dictionary(&workspace_dir(project, target))
+    }
+
+    async fn write_user_dictionary(
+        &self,
+        project: &Path,
+        target: &str,
+        body: &str,
+    ) -> Result<(), ClassifiedError> {
+        let _workspace_operation = self.acquire_workspace_operation().await?;
+        let _target_revision = self.acquire_target_revision(project, target).await?;
+        let workspace = prepare_target_workspace(project, target)?;
+        replace_workspace_file(
+            &workspace,
+            Path::new(USER_DICTIONARY_FILE),
+            std::io::Cursor::new(body.as_bytes()),
+            None,
+        )
+        .map_err(|error| {
+            ClassifiedError::Internal(format!("could not store the user dictionary: {error}"))
+        })?;
+        Ok(())
+    }
+
     /// Build the engine dictionary flags for a run: extract the static
     /// dictionary from the target sources, augment it with LLM-proposed tokens
     /// under `policy`, and return the engine-specific `-dict`/`-x`/`-w` args
@@ -1183,6 +1253,14 @@ impl ServiceContainer {
         retain_run_context(&mut record, context);
         verify_staged_qualification(qualified, &artifacts)?;
         verify_run_artifacts(&artifacts)?;
+        if engine == EngineKind::GoNative {
+            // Go reads its corpus only from its own encoded fuzz cache.
+            super::go_corpus::stage_seeds(
+                &artifacts.corpus_host,
+                &artifacts.output_host,
+                &qualified.source,
+            )?;
+        }
         // AFL++ session resume: continue the newest compatible output tree
         // (same project workspace, engine, harness binary) inside this run's
         // own fresh output directory. The tree is staged before the run row is
@@ -1906,6 +1984,22 @@ impl ServiceContainer {
                 "harness generation is not yet available for {} targets; harnessable languages: {}",
                 lang.as_str(),
                 TargetLanguage::harnessable_ids()
+            )));
+        }
+        // Likewise for an engine that does not run the language: no harness
+        // of that language can exist under it, so name the engine that does.
+        if !engine.supports_language(lang) && engine != EngineKind::Syzkaller {
+            let driver = lang.default_engine().map_or_else(String::new, |driver| {
+                format!(
+                    " ({} targets run under --engine {})",
+                    lang.as_str(),
+                    driver.as_str()
+                )
+            });
+            return Err(ClassifiedError::Validation(format!(
+                "engine '{}' cannot drive {} targets{driver}",
+                engine.as_str(),
+                lang.as_str()
             )));
         }
         let started = tokio::time::Instant::now();
@@ -3542,6 +3636,122 @@ mod syzkaller_health_lifecycle_tests {
         assert_eq!(telemetry.managed_invocations_expected, 0);
         assert_eq!(telemetry.managed_invocations_alive, 0);
         assert!(service.live_campaign_telemetry(run_id).is_none());
+    }
+}
+
+#[cfg(test)]
+mod live_syzkaller_tests {
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+
+    /// Run a real syzkaller campaign in the sandbox against operator-built
+    /// artifacts, under emulation where the host has no KVM, and show that a
+    /// guest boots, programs execute, coverage is collected, the run is
+    /// recorded as completed, and its corpus is retained.
+    ///
+    /// `OXFUZZ_KERNEL_ARTIFACTS` names a directory holding the kernel
+    /// (`Image` or `bzImage`), `rootfs.img` and `rootfs.id_rsa`, built as
+    /// `docs/guides/SYZKALLER_SETUP.md` describes. `OXFUZZ_KERNEL_SECONDS`
+    /// overrides the 900 second campaign.
+    #[tokio::test]
+    #[ignore = "requires Docker, the pinned sandbox image and OXFUZZ_KERNEL_ARTIFACTS"]
+    async fn live_syzkaller_boots_executes_programs_and_records_the_campaign() {
+        assert!(hf_runtime::docker_daemon_ready());
+        let artifacts = PathBuf::from(
+            std::env::var("OXFUZZ_KERNEL_ARTIFACTS")
+                .expect("OXFUZZ_KERNEL_ARTIFACTS names the kernel artifact directory"),
+        );
+        let kernel = ["Image", "bzImage"]
+            .iter()
+            .map(|name| artifacts.join(name))
+            .find(|path| path.is_file())
+            .expect("the artifact directory holds Image or bzImage");
+        let duration_secs = std::env::var("OXFUZZ_KERNEL_SECONDS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(900);
+        let _environment = ServiceContainer::workspace_environment_test_gate()
+            .lock()
+            .await;
+        let directory = tempfile::tempdir().unwrap();
+        let project = directory.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let project = std::fs::canonicalize(project).unwrap();
+        let workspace = directory.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let workspace = std::fs::canonicalize(workspace).unwrap();
+        let store = Arc::new(
+            hf_storage::Store::connect(directory.path().join("kernel.db"))
+                .await
+                .unwrap(),
+        );
+        let runtime = hf_runtime::docker::DockerRuntime::new(
+            hf_runtime::RuntimeConfig::default(),
+            directory.path(),
+        );
+        let service = ServiceContainer::new(Arc::new(runtime), None).with_store(Arc::clone(&store));
+        let options = SyzkallerRunOpts {
+            project: project.clone(),
+            arch: None,
+            duration_secs,
+            kernel_image: Some(kernel.to_string_lossy().into_owned()),
+            disk_image: Some(artifacts.join("rootfs.img").to_string_lossy().into_owned()),
+            ssh_key: Some(
+                artifacts
+                    .join("rootfs.id_rsa")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            manager_cfg: None,
+            vm_count: Some(1),
+        };
+        let started = Mutex::new(None);
+        // Retained evidence goes under the configured workspace root; keep it
+        // out of the operator's own application data.
+        let previous = std::env::var_os("HF_WORKSPACE_DIR");
+        std::env::set_var("HF_WORKSPACE_DIR", &workspace);
+
+        let summary = service
+            .run_syzkaller_observed_with_environment(
+                &options,
+                &|progress| {
+                    if let FuzzProgress::LogLine(line) = progress {
+                        println!("{line}");
+                    }
+                },
+                &|run_id| *started.lock().unwrap() = Some(run_id),
+                true,
+                Some(workspace),
+            )
+            .await
+            .unwrap();
+        println!("summary: {summary:?}");
+
+        let run_id = started.lock().unwrap().expect("the campaign was admitted");
+        assert_eq!(summary.run_id, Some(run_id));
+        assert_eq!(summary.project_root, project);
+        assert!(summary.execs_total > 0, "the guest executed programs");
+        assert!(summary.edges > 0, "the kernel reported coverage");
+        let run = store.get_run(run_id).await.unwrap().unwrap();
+        assert_eq!(run.engine, EngineKind::Syzkaller);
+        assert_eq!(run.status, RunStatus::Done);
+        let retained = workspace_dir(&project, &summary.target).join(run_output_relative(run_id));
+        match previous {
+            Some(value) => std::env::set_var("HF_WORKSPACE_DIR", value),
+            None => std::env::remove_var("HF_WORKSPACE_DIR"),
+        }
+        assert!(
+            retained.starts_with(std::fs::canonicalize(directory.path()).unwrap()),
+            "evidence stays inside the test directory: {}",
+            retained.display()
+        );
+        assert!(
+            retained.join("corpus.db").is_file(),
+            "the campaign corpus is retained under {}",
+            retained.display()
+        );
     }
 }
 

@@ -10,7 +10,10 @@ use hf_guardrails::Action;
 use hf_storage::RunRecord;
 use uuid::Uuid;
 
-use super::coverage_cache::{coverage_signature, export_cache, parse_covered_functions};
+use super::coverage_cache::{
+    coverage_signature, export_cache, parse_covered_functions, report_display_path,
+    staged_report_source,
+};
 use super::crash_inputs::{
     bucket_by_cluster, casrep_input_path, collect_casreps, collect_crash_inputs,
     collect_legacy_crash_inputs, deterministic_crash_id, is_regular_file, stage_crash_inputs,
@@ -25,6 +28,62 @@ use super::workspace::workspace_dir;
 use super::{
     run_has_crash_evidence, AiPolicy, LlmProviderBridge, RegressionResult, ServiceContainer,
 };
+
+/// A failing input saved by Go's fuzzer, as the replay needs it.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct GoFailingInput {
+    /// `Fuzz<Symbol>`, the directory Go saved the input under.
+    pub(super) fuzz_test: String,
+    /// The input's file name (a content hash).
+    pub(super) name: String,
+    /// Container path of the directory holding `testdata/fuzz/...`.
+    pub(super) working_directory: String,
+}
+
+/// Recognize `<dir>/testdata/fuzz/Fuzz<Symbol>/<name>` inside `workspace`
+/// whose content starts with the Go corpus header. No other engine writes a
+/// finding at a path of that shape, so the shape and the header together
+/// select the Go replay without the caller naming the engine.
+pub(super) fn go_failing_input(workspace: &Path, input: &Path) -> Option<GoFailingInput> {
+    use std::io::Read as _;
+
+    let name = input.file_name()?.to_str()?;
+    let test_directory = input.parent()?;
+    let fuzz_test = test_directory.file_name()?.to_str()?;
+    let fuzz_directory = test_directory.parent()?;
+    let testdata = fuzz_directory.parent()?;
+    let plain = |text: &str| {
+        !text.is_empty() && text.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    };
+    if fuzz_directory.file_name()? != "fuzz"
+        || testdata.file_name()? != "testdata"
+        || !fuzz_test.starts_with("Fuzz")
+        || !plain(fuzz_test)
+        || !plain(name)
+    {
+        return None;
+    }
+    let root = testdata.parent()?;
+    let relative = root.strip_prefix(workspace).ok()?;
+    let mut header = [0_u8; hf_crash::go_corpus::HEADER.len()];
+    std::fs::File::open(input)
+        .ok()?
+        .read_exact(&mut header)
+        .ok()?;
+    if header != hf_crash::go_corpus::HEADER.as_bytes() {
+        return None;
+    }
+    let relative = hf_core::runtime::posix_relative(relative);
+    Some(GoFailingInput {
+        fuzz_test: fuzz_test.to_owned(),
+        name: name.to_owned(),
+        working_directory: if relative.is_empty() {
+            "/work".to_owned()
+        } else {
+            format!("/work/{relative}")
+        },
+    })
+}
 
 impl ServiceContainer {
     async fn assign_triaged_crash_ids(
@@ -674,8 +733,19 @@ impl ServiceContainer {
             return None;
         }
         let binary = container_input_path(workspace, binary_host);
-        let container_input = container_input_path(workspace, input_host_path);
-        let cmd = vec![binary, container_input];
+        let go_replay = go_failing_input(workspace, input_host_path);
+        let (cmd, workdir) = match go_replay {
+            // A Go failing input is replayed by name from the directory that
+            // holds its `testdata/fuzz` tree, with no fuzzing.
+            Some(replay) => (
+                hf_engine::go_native::build_replay_args(&binary, &replay.fuzz_test, &replay.name),
+                Some(replay.working_directory),
+            ),
+            None => (
+                vec![binary, container_input_path(workspace, input_host_path)],
+                None,
+            ),
+        };
         let limits = hf_core::runtime::ResourceLimits {
             max_mem_mb: 2048,
             max_cpus: 1,
@@ -685,6 +755,7 @@ impl ServiceContainer {
         };
         let sandbox = hf_core::runtime::SandboxOptions {
             workspace_read_only: true,
+            workdir,
             ..hf_core::runtime::SandboxOptions::default()
         };
         match self.scan_command(&cmd, workspace, &limits, &sandbox).await {
@@ -716,6 +787,17 @@ impl ServiceContainer {
         run_id: Uuid,
         target_id: Uuid,
     ) -> Result<Option<Vec<hf_core::crash::Crash>>, ClassifiedError> {
+        // CASR replays a libFuzzer- or AFL-shaped binary under a sanitizer
+        // and a debugger. A Go test binary is neither; its failures are
+        // replayed by name and classified from the Go runtime's own report.
+        // An Atheris, Jazzer or Jazzer.js harness is a launcher whose
+        // findings are exception reports, classified from the replay output.
+        if matches!(
+            engine,
+            EngineKind::GoNative | EngineKind::Atheris | EngineKind::Jazzer | EngineKind::JazzerJs
+        ) {
+            return Ok(None);
+        }
         if !binary_host.is_file() {
             return Ok(None);
         }
@@ -1505,6 +1587,49 @@ impl ServiceContainer {
     ) -> Option<hf_coverage::CoverageSummary> {
         let json = self.coverage_export_json_cached(project, target).await?;
         hf_coverage::parse_llvm_cov_summary(&json)
+    }
+
+    /// The line-by-line coverage of `target` as an lcov tracefile and one
+    /// self-contained HTML page, from the same cached measurement
+    /// [`Self::coverage_summary`] reads. Paths are relative to the project
+    /// layout; source text is the staged copy the measurement compiled.
+    ///
+    /// # Errors
+    /// Returns [`ClassifiedError::Validation`] when no measurement is
+    /// available (no C harness, no corpus, a refused approval, or missing
+    /// coverage tooling) or the export holds no line data.
+    pub async fn coverage_line_report(
+        &self,
+        project: &Path,
+        target: &str,
+    ) -> Result<super::CoverageLineReport, ClassifiedError> {
+        let json = self
+            .coverage_export_json_cached(project, target)
+            .await
+            .ok_or_else(|| {
+                ClassifiedError::Validation(
+                    "no coverage measurement is available: compile a C harness and build a \
+                     corpus first, and approve the coverage run"
+                        .to_owned(),
+                )
+            })?;
+        let report = hf_coverage::parse_llvm_cov_lines(&json).ok_or_else(|| {
+            ClassifiedError::Validation(
+                "the coverage measurement holds no line data to report".to_owned(),
+            )
+        })?;
+        let workspace = workspace_dir(project, target);
+        let title = format!("Coverage: {target}");
+        Ok(super::CoverageLineReport {
+            lcov: report.to_lcov(&report_display_path),
+            html: report.to_html(&title, &report_display_path, &|recorded| {
+                staged_report_source(&workspace, recorded)
+            }),
+            files: report.files.len(),
+            skipped_files: report.skipped_files,
+            lines_hit: report.lines_hit(),
+            lines_total: report.lines_total(),
+        })
     }
 
     /// The coverage totals and covered-function count a report shows, from one

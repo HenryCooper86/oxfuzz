@@ -172,11 +172,13 @@ automatically after its initial scan and displays the three factors directly.
 
 Discovery scans more languages than the harness pipeline can build. Every
 candidate carries a derived `harnessable` flag from the single
-`TargetLanguage::harnessable` predicate (C, C++, and Rust today). A scan of a
-discovery-only language (`--lang go`, `--lang python`) still runs and persists
-its inventory, but each candidate is marked `"harnessable": false` and stderr
-notes that harness generation is not yet available for that language, naming
-the supported set. Harness draft/compile/generate, `oxfuzz fuzz` target
+`TargetLanguage::harnessable` predicate (C, C++, Rust, Go, Python, Java, and
+JavaScript today; Go builds only under the `go-native` engine, Python only
+under the `atheris` engine, Java only under the `jazzer` engine, and
+JavaScript only under the `jazzer-js` engine). A scan of a language without a harness path still runs and
+persists its inventory, but each candidate is marked `"harnessable": false`
+and stderr notes that harness generation is not yet available for that
+language, naming the supported set. Harness draft/compile/generate, `oxfuzz fuzz` target
 auto-selection, and `oxfuzz campaign` enforce the same predicate, so a
 discovery-only target fails with that message at the harness boundary rather
 than at a late build step.
@@ -261,8 +263,8 @@ measured no aggregate coverage gain. See
 | --- | --- |
 | `init` | Scaffold config from templates into the resolved config directory (see Quick Start) and create/migrate the database. |
 | `doctor [--engine <e> [--duration <d>] [--require-provider]] [--build-image] [--json]` | Probe Docker and bundled engines. When the sandbox image is missing, the output names how to build it (`oxfuzz doctor --build-image`, `scripts/build-sandbox.sh`, or the canonical `docker build` command; JSON carries it as `sandbox_image_remedy`). `--build-image` runs that build from the source checkout's `docker/sandbox/Dockerfile` -- the same build the desktop app runs on first launch -- then re-probes; it fails loud when Docker is unavailable or no source checkout is found. With `--engine`, enforce selected-engine availability and run policy; optionally require provider configuration. Exit non-zero on failure. |
-| `discover <project> --lang c [--rank] [--ai auto\|require\|off] [--semgrep] [--json]` | Scan a project; `--rank` requests service-owned AI assessment, and `--semgrep` (only in builds with the `semgrep-enrichment` feature) explicitly adds separate C/C++ enrichment. On a terminal the result is a ranked table (best target first, with the `oxfuzz fuzz` command for the top harnessable one); when stdout is piped, or with `--json`, it is the full JSON inventory. Every candidate carries a derived `harnessable` flag; a discovery-only language (`go`, `python`) still scans and persists its inventory but marks each candidate `false` with a note naming the supported set. |
-| `harness <project> --target <sym> --engine <e> [--lang c\|cpp\|rust] [--ai auto\|require\|off] [--draft-only [--json]] [--repair N] [--refine] [--adopt <harness-id>] [--promote] [--no-llm-review] [--sanitizer address\|undefined] [--cmplog] [--persistent]` | `--lang` defaults to `c`; pass `cpp` or `rust` for those targets (`go` and `python` are discovery-only and refused). `--ai` governs the draft, compile and smoke repairs, and `--refine` (`off` drafts from the template and skips repairs; `--refine` refuses `off`); it does not affect the smoke review. Write, compile (optionally auto-repair or coverage-refine), and smoke-qualify a newly generated harness. The draft prompt carries the target's own definition and the project's promoted harnesses. `--repair N` also repairs a smoke run in which the fuzzer never reached the harness or the harness hung: the engine output goes to the model, the rewrite compiles as a new revision, and that revision is reviewed and approved again before it runs (a smoke crash is a finding and is never repaired). `--adopt <harness-id>` recompiles a stored revision of the target, such as the refine proposal a campaign prints after a coverage plateau, as the new active revision and smoke-qualifies it; it keeps that revision's sanitizer, CmpLog setup and shape, and still needs `--promote` or a later promotion. Smoke requires the independent LLM pre-execution review; with no provider configured it fails closed unless you pass `--no-llm-review` (or set `harness.allow_unreviewed_smoke = true`), which persists a marked bypass record and an audit row -- without the model review, only the lexical lint and your own promotion decision check the harness. Without `--promote`, review the output; rerunning creates another draft. `--cmplog` (AFL++ only) also builds the CmpLog companion binary; see "AFL++ CmpLog/redqueen" below. `--persistent` (AFL++ only) drafts a persistent-mode harness (custom `main`, deferred forkserver, explicit per-iteration reset); see "AFL++ persistent mode" below. Use the retained Work Order flow below when approval must name a previously reviewed source. |
+| `discover <project> --lang c [--rank] [--ai auto\|require\|off] [--semgrep] [--json]` | Scan a project; `--rank` requests service-owned AI assessment, and `--semgrep` (only in builds with the `semgrep-enrichment` feature) explicitly adds separate C/C++ enrichment. On a terminal the result is a ranked table (best target first, with the `oxfuzz fuzz` command for the top harnessable one); when stdout is piped, or with `--json`, it is the full JSON inventory. `--lang` takes `c`, `cpp`, `rust`, `go`, `python`, or `java`. Every candidate carries a derived `harnessable` flag, `true` for each of those languages today; a language scanned without a harness path would be marked `false` with a note naming the supported set. |
+| `harness <project> --target <sym> --engine <e> [--lang c\|cpp\|rust\|go\|python\|java\|javascript] [--ai auto\|require\|off] [--draft-only [--json]] [--repair N] [--refine] [--adopt <harness-id>] [--promote] [--no-llm-review] [--sanitizer address\|undefined] [--cmplog] [--persistent]` | `--lang` defaults to `c`; pass `cpp`, `rust`, `go`, `python`, or `java` for those targets. A Go target needs `--engine go-native`, a Python target `--engine atheris`, and a Java target `--engine jazzer`; the operator enables each under `[fuzzing] enabled_engines`. Their harnesses are always the fixed template (Go: a package-level exported function whose parameters are each `[]byte`, `string`, `bool`, an integer or a float type; Python: a top-level synchronous function whose required parameters each take `bytes`, `str`, `int`, `float` or `bool`; Java: a `public static` method whose parameters are each `byte[]`, `String` or a primitive), so `--ai require`, `--repair`, `--refine`, `--cmplog`, `--persistent`, and any `--sanitizer` other than the default do not apply to them. `--ai` governs the draft, compile and smoke repairs, and `--refine` (`off` drafts from the template and skips repairs; `--refine` refuses `off`); it does not affect the smoke review. Write, compile (optionally auto-repair or coverage-refine), and smoke-qualify a newly generated harness. The draft prompt carries the target's own definition and the project's promoted harnesses. `--repair N` also repairs a smoke run in which the fuzzer never reached the harness or the harness hung: the engine output goes to the model, the rewrite compiles as a new revision, and that revision is reviewed and approved again before it runs (a smoke crash is a finding and is never repaired). `--adopt <harness-id>` recompiles a stored revision of the target, such as the refine proposal a campaign prints after a coverage plateau, as the new active revision and smoke-qualifies it; it keeps that revision's sanitizer, CmpLog setup and shape, and still needs `--promote` or a later promotion. Smoke requires the independent LLM pre-execution review; with no provider configured it fails closed unless you pass `--no-llm-review` (or set `harness.allow_unreviewed_smoke = true`), which persists a marked bypass record and an audit row -- without the model review, only the lexical lint and your own promotion decision check the harness. Without `--promote`, review the output; rerunning creates another draft. `--cmplog` (AFL++ only) also builds the CmpLog companion binary; see "AFL++ CmpLog/redqueen" below. `--persistent` (AFL++ only) drafts a persistent-mode harness (custom `main`, deferred forkserver, explicit per-iteration reset); see "AFL++ persistent mode" below. Use the retained Work Order flow below when approval must name a previously reviewed source. |
 | `work-order export\|import\|list\|submissions\|qualify\|rank\|promote ...` | Manage immutable external harness packets, submissions, qualification attempts, deterministic ranking, and exact-attempt promotion. |
 | `run <project> --target <sym> --engine <e> [--lang <l>] [--duration 60m] [--cpus N] [--timeout-ms N] [--resume] [--sanitizer address\|undefined] [--cmplog] [--seed N] [--ai auto\|require\|off]` | Run a sandboxed campaign with the active promoted harness (Ctrl-C cancels cooperatively). `--lang` defaults to `c`; pass the language the harness was built for. `--ai` covers the LLM seed corpus and the run dictionary: `off` uses heuristic seeds and no dictionary enrichment, `require` refuses to start without a usable provider and fails the run if dictionary enrichment fails. A file-qualified selector is `<relative-file>::<complete-symbol>`; a retained Work Order run always uses that complete selector. `--cpus N` requests a per-run CPU allocation within the configured `fuzzing.sandbox.max_cpus` ceiling; an allocation above one runs libFuzzer fork mode (`-fork=N`) and honggfuzz `--threads N` (AFL++ runs a single instance). `--timeout-ms N` overrides the per-input timeout for this run. `--resume` (AFL++ only) continues the most recent compatible AFL++ session instead of cold-starting; see "AFL++ session resume" below. `--sanitizer` asserts the promoted harness's build sanitizer (mismatch fails before any engine starts); see "Sanitizer selection" below. `--cmplog` (AFL++ only) drives the harness's recorded CmpLog companion via `afl-fuzz -c`; see "AFL++ CmpLog/redqueen" below. `--seed N` selects the retained campaign seed; see "Campaign seeds" below. |
 | `run . --replay <run UUID>` | Replay a retained run with its recorded engine, duration, per-input timeout, and seed under current policy. The positional `.` is ignored in replay mode; the retained run resolves its original project. `--seed`, `--timeout-ms`, `--resume`, `--sanitizer`, and `--cmplog` do not combine with `--replay`: the recorded configuration replays exactly (the CmpLog companion, when the original run used one, is part of the retained inputs). |
@@ -279,16 +281,23 @@ measured no aggregate coverage gain. See
 | `triage <project> --target <sym> [--ai auto\|require\|off]` | Ingest, dedup, classify (CASR), and draft reports for crashes. `--ai` covers the bug-report drafts and the advisory per-crash verification verdicts: `off` ingests and persists crashes with no model calls; `require` fails on a missing provider or a failed verdict call. Triage works from the target's retained run workspace, so it takes no `--lang`. |
 | `corpus <project> --target <sym> --op seed\|llmseed\|grow\|prune\|cprune\|afl-cmin\|survival\|regen\|minimize\|absorb\|concolic\|import\|list [--lang c] [--from <dir>]` | Manage the corpus. `prune` removes byte duplicates; `cprune`, `afl-cmin`, `survival`, `regen`, `minimize`, and optional `concolic` have the distinct execution/provider requirements below; `import` requires `--from`. `--lang` (default `c`) names the language the target was discovered under; `llmseed` and `regen` discover and resolve the target in it. |
 | `build diagnose <project> [--json]` | Read current build prerequisites and the exact available plan without building. |
-| `build profile show\|set\|clear ...` | Read or explicitly change the optional project build profile (`--build-system cmake\|make\|meson\|autotools`; see "Build profiles" below). `show` remains available in builds without Build Doctor. |
+| `build profile show\|set\|clear ...` | Read or explicitly change the optional project build profile (`--build-system cmake\|make\|meson\|autotools\|bazel`; see "Build profiles" below). `show` remains available in builds without Build Doctor. |
 | `build history <project> [--limit N] [--json]` | Read retained diagnosis and build output. |
 | `build run <project> --expected-profile-sha256 <digest> [--json]` | Execute the exact reviewed profile in the sandbox and reject a stale profile digest. |
-| `coverage <project> --target <sym>` | Summarize line/region/function coverage. |
+| `coverage <project> --target <sym> [--lcov <file>] [--html <file>]` | Summarize line/region/function coverage. `--lcov` writes the line-by-line result as an lcov tracefile with project-relative paths (for `genhtml`, Codecov, or an editor gutter); `--html` writes it as one self-contained page with the staged source, no script and no external resource. Both read the same cached measurement as the summary and exit non-zero when no measurement is available. The measurement is the C harness corpus replay under the libFuzzer coverage build. |
 | `unreached <project> [--lang c]` | Rank entry points that no retained coverage measurement has ever covered. Reads cached measurements; never triggers one. |
 | `attribution <project> [--lang c]` | Attribute every discovered target against retained coverage and order the result for the next harness: untouched first, partial frontier next, saturated last. |
 | `regress <project> --target <sym>` | Re-run the known crash reproducers to verify they still (or no longer) crash. |
 | `ci <project> --target <sym> [--engine <e>] [--duration 120s] [--sarif oxfuzz.sarif] [--ai auto\|require\|off]` | CI gate: requires a previously smoke-qualified, promoted harness for the target; seeds, runs, triages, and always writes SARIF (also with zero findings, so stale alerts clear); exits non-zero when crashes are found. Defaults: `--engine libfuzzer`, `--duration 120s`, `--sarif oxfuzz.sarif`. `--ai` covers the run dictionary and triage reports (seeds come from the heuristic generator); `off` spends no tokens. `ci` works from the promoted harness, so it takes no `--lang`. See [CI](CI.md). |
 | `sarif <project> --target <sym> [--out results.sarif]` | Export the latest run's triaged crashes as a SARIF report for code scanning; prints to stdout without `--out`. |
 | `defectdojo <project> [--target <sym>] [--test]` | Push the latest run's triaged crashes to DefectDojo as findings, using `config/defectdojo.toml`. `--target` sets the DefectDojo test title. `--test` only verifies the configured URL and token and pushes nothing. |
+| `issue <project> --crash <uuid> [--draft]` / `issue <project> --test` | File one crash as an issue in the GitHub or GitLab repository, or the Jira project, named by `config/issue_tracker.toml` (Jira needs `host` and a project key in `repo`; issues are created as type Bug with a plain-text description). Filing is an approval-gated publish action and is deduplicated by stack signature. `--draft` prints the title, labels, body, and a new-issue URL without filing (prefilled on GitHub and GitLab; Jira opens its empty create form). `--test` only verifies the repository and token. |
+| `kernel <project> --kernel-image <image> --rootfs <img> [--ssh-key <key>] [--manager-cfg <cfg>] [--vms 1-4] [--arch amd64\|arm64] [--duration 1h] [--json]` | Run a syzkaller kernel campaign in the sandbox: the KCOV-instrumented kernel and a disposable copy of the rootfs boot in managed qemu VMs, with KVM when the host is Linux with `/dev/kvm` and under emulation otherwise. `--kernel-image` and `--rootfs` are required unless `--manager-cfg` names them; a supplied configuration is rewritten to the managed paths and VM sizing. The run is recorded like any other, and `oxfuzz triage <project> --target <kernel image name>` ingests its crashes. See [SYZKALLER_SETUP.md](SYZKALLER_SETUP.md). |
+| `binary <project> --binary <elf> [--stdin \| --socket \| --messages] [--seeds <dir>] [--libs <dir>] [--duration 60s] [--timeout-ms 1000] [--json]` | Fuzz a Linux ELF executable you have no source for, with AFL++ QEMU mode in the sandbox. The target takes the input file as its one argument, or on standard input with `--stdin`. With `--socket` the target is a server: a preload shim compiled in the sandbox delivers each input as the byte stream of the first connection the server accepts, or as one datagram on the UDP socket it binds, and ends the process when the server asks for another connection or datagram. With `--messages` (a server mode; `--socket` is implied) the input is a sequence of messages separated by the bytes `FF FE FD FC`, and each message is sent only after the server has read the one before: one message per read on a stream, one datagram per message on UDP. The fuzzer is given the separator as a dictionary token. Write multi-message seeds with the separator between messages, for example `printf 'LOGIN\377\376\375\374LIST' > seeds/two`. Server modes need a dynamically linked target; what the server sends is discarded, so an exchange that depends on a value the server chose is not followed, and a crash in a forked connection handler is not seen. `--seeds` is a flat directory of starting inputs (one default seed otherwise) and `--libs` a flat directory of shared objects the target loads. The binary must be a 64-bit ELF for the sandbox image's own architecture and at most 256 MiB; it passes the same approval as running a generated harness and is never executed on the host. Each saved crash is replayed under the emulator with a crash reporter preloaded: a finding is `confirmed` when the replay ends with the signal the fuzzer recorded, and it carries the crash kind, the stack frames as module offsets, and a stack signature. Findings with one signature are grouped (`duplicate_of`, `distinct_findings`), and each distinct finding is minimized with `afl-tmin -Q`; a minimized input is kept only when it replays as the same crash. A statically linked target gets no report and its findings keep the signal only. Findings are written to the session directory and `report.json`; they are not rows of the crash table. File one with `binary-issue`. Requires the `binary-only-fuzzing` feature (on by default). See `docs/design/binary-only-fuzzing-design.md`. |
+| `binary-issue <project> --report <session>/report.json --finding <digest prefix> [--draft]` | Draft or file one finding of a `binary` session in the tracker named by `config/issue_tracker.toml`. `--report` is the `report.json` in the session directory `binary` printed and must belong to this project; `--finding` is at least eight hex digits of the finding's input sha256, as the session summary lists it. `--draft` prints the title, labels, body, and a prefilled new-issue URL and files nothing. Filing asks for the same publishing approval as `issue`, and a finding whose stack signature was already filed returns the existing issue. The body carries the binary name and digest, signal, replay result, input and minimized-input digests, signature, and frames; no host path. |
+| `bisect <project> --target <sym> --crash <uuid> --good <rev> [--bad <rev>] [--json]` | Find the first commit, on the first-parent path from `--good` to `--bad` (default `HEAD`), at which the crash input crashes. Each tested commit's sources are read from git as stored objects (no checkout, the working tree is untouched), the promoted harness is built against them in the sandbox, and the input is replayed. A commit that does not build is skipped, never guessed; when skips leave several candidates the result is that range. Compiling and running are approval-gated. C and C++ harnesses on libFuzzer, AFL++, and honggfuzz. The reported commit is where the crash is first observed, which can be a commit that exposes an older defect. See [Crash Bisection](../design/crash-bisection-design.md). |
+| `dict <project> --target <sym> [--set <file> \| --clear]` | Show, set, or clear your own fuzzing dictionary for a target. The file uses the AFL++/libFuzzer format (`"token"` or `name="token"` per line; `\\`, `\"`, `\xNN` escapes; tokens of 1 to 128 bytes; at most 4096). A line an engine would reject fails with its line number. Stored tokens lead the dictionary of every later run of the target, ahead of the tokens extracted from source and proposed by the model. `run --dict <file>` performs the same store before the run. |
+| `notify <project> --target <sym>` / `notify --test` | Alert the webhook named by `config/notifications.toml` when the latest run of the target has crashes; a clean run sends nothing. The alert carries the project directory name, the target, and the crash count, never inputs, traces, source, or the project path. Sending is an approval-gated publish action. Scheduled campaigns send the same alert on their own when the webhook is configured. `--test` posts a message that carries no project data. Requires the `crash-alerts` feature (default on). |
 | `repro <project> --target <sym> [--engine <e>] [--lang c] [--crash <id>] [--out <dir>]` | Bundle a crash reproducer (harness, input, and `REPRODUCE.md`) for handoff outside oxfuzz. Defaults to the first crash and `oxfuzz_repro`. |
 | `ingest <project> --file <file>` | Ingest a document (PDF/Office/HTML) into the knowledge base. |
 | `knowledge index <project>` / `knowledge search <project> <query> [--limit N]` | Index a project's source files into its BM25 knowledge base, or run a full-text query over it (`--limit` defaults to 10). |
@@ -305,14 +314,14 @@ measured no aggregate coverage gain. See
 | `providers` | List configured provider ids with their frozen/healthy state. |
 | `providers thaw <id>` | Thaw a frozen provider after a verifying health check. |
 | `model-budget` | Report the retained spending for the configured `[model_budget]` workflow in `oxfuzz.toml`. Read-only. See [Model budgets](../design/model-budgets-design.md). |
-| `mutator <project> --target <sym> [--engine afl++\|libfuzzer] attach --source <file>\|status\|qualify\|promote` | Managed native custom mutators (AFL++ default, or libFuzzer). `attach` compiles a new unpromoted harness revision containing the C/C++ mutator source; `status` reads source, artifact, image, and bounded smoke evidence; `qualify` runs the independent review and bounded sandbox smoke qualification; `promote` approves that exact qualified revision through the human gate. See [Managed Mutators](MANAGED_MUTATORS.md). |
+| `mutator <project> --target <sym> [--engine afl++\|libfuzzer] attach --source <file>\|grammar --grammar <file> [--emit <file>]\|status\|qualify\|promote` | Managed native custom mutators (AFL++ default, or libFuzzer). `attach` compiles a new unpromoted harness revision containing the C/C++ mutator source; `grammar` generates that source from a BNF grammar (`name = alt \| alt ;` rules of quoted terminals and rule names, first rule is the start rule) and attaches it the same way, so the generated code is reviewed, qualified, and promoted like hand-written source (`--emit` also writes it to a file); `status` reads source, artifact, image, and bounded smoke evidence; `qualify` runs the independent review and bounded sandbox smoke qualification; `promote` approves that exact qualified revision through the human gate. See [Managed Mutators](MANAGED_MUTATORS.md). |
 | `automotive <subcommand> ...` | Sandboxed automotive protocol analysis and replay preparation; see "Optional automotive protocol workflows" below. |
 | `policy decisions [--limit N]` | List recorded guardrail authorization decisions, newest first (default 50). |
 | `tui <project>` | Browse the target inventory and copy accurate next-step commands. |
 
 Userspace engines for `harness`, `run`, and `campaign`: `afl++`, `honggfuzz`,
-`libfuzzer`. `syzkaller` fuzzes kernel images from the trusted-local desktop
-workflow; the CLI harness and run commands do not accept it.
+`libfuzzer`. `syzkaller` fuzzes kernel images through `oxfuzz kernel` or the
+desktop app; the harness and run commands do not accept it.
 
 ### One-command onboarding (`oxfuzz fuzz`)
 
@@ -333,8 +342,10 @@ each step starts:
 
 Each stage is the operation the standalone commands run: target discovery
 (`--target` picks one explicitly, otherwise the highest-fit candidate with a
-working harness path that the engine can drive wins -- discovery-only
-languages, Go and Python today, are never auto-selected; `--lang` pins the
+working harness path that the engine can drive wins -- a Go target is
+picked only when the engine is `go-native`, a Python target only when it
+is `atheris`, a Java target only when it is `jazzer`, and a JavaScript
+target only when it is `jazzer-js`; `--lang` pins the
 language, otherwise every supported language is scanned and the picked
 candidate carries its own), harness
 generation with the auto-repair loop, smoke qualification behind the
@@ -560,9 +571,14 @@ never mix sanitizers.
   active revision's build sanitizer).
 - Rust targets build AddressSanitizer-only (cargo-fuzz/libfuzzer-sys has no
   UBSan path); a non-`address` selection fails before any drafting or build.
-- `memory`, `thread`, and `none` are rejected with the reason; the sandbox
-  toolchain cannot honor them (see `docs/standards/ENGINE_ADAPTER_STANDARD.md`
-  3.5 for the per-engine flag mapping and evidence).
+- `--sanitizer thread` builds a ThreadSanitizer harness for C and C++ on
+  libFuzzer and honggfuzz. `--sanitizer memory` builds a MemorySanitizer
+  harness for C on libFuzzer, AFL++, and honggfuzz, and for C++ on libFuzzer
+  and honggfuzz (against the sandbox image's instrumented libc++). Any other engine or
+  language is rejected with the reason before a build starts.
+- `none` is rejected: the crash evidence comes from sanitizer reports. See
+  `docs/standards/ENGINE_ADAPTER_STANDARD.md` 3.5 for the per-engine flag
+  mapping and evidence.
 
 ### AFL++ session resume
 
@@ -696,16 +712,20 @@ the explicit execution request.
 
 ### Build profiles
 
-Build profiles support `cmake`, `make`, `meson`, and `autotools`, matching the
-four systems Build Doctor detects from root marker files (Bazel is detected
-but has no profile; dependency fetching is unsupported). Each type has a fixed
-plan: CMake configures with `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON`, Meson runs
-`meson setup`, plain Make runs `make -B` under `bear`, and Autotools runs
-`autoreconf -i`, `./configure`, and the same `bear`-observed `make -B`; the
-sandbox image (0.2.0 or later) ships all of those tools. Meson and Autotools
-profiles carry no definitions (the `--define` allowlist is CMake's `-D`
-model). The desktop profile editor currently offers only CMake and plain Make,
-so save Meson and Autotools profiles here. A set operation is explicit:
+Build profiles support `cmake`, `make`, `meson`, `autotools`, and `bazel`,
+matching the five systems Build Doctor detects from root marker files
+(dependency fetching is unsupported: the sandbox has no network). Each type
+has a fixed plan: CMake configures with `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON`,
+Meson runs `meson setup`, plain Make runs `make -B` under `bear`, Autotools
+runs `autoreconf -i`, `./configure`, and the same `bear`-observed `make -B`,
+and Bazel runs `oxfuzz-bazel-compdb`, one offline `bazel aquery` over the
+dependencies the project carries in a Bazel vendor directory (see
+[Fuzz your project](FUZZ_YOUR_PROJECT.md)); the sandbox image ships all of
+those tools (0.2.0 or later; Bazel from 0.2.3). A Bazel profile needs
+`MODULE.bazel` in the component root. Meson, Autotools, and Bazel profiles
+carry no definitions (the `--define` allowlist is CMake's `-D` model). The
+desktop profile editor currently offers only CMake and plain Make, so save
+Meson, Autotools, and Bazel profiles here. A set operation is explicit:
 
 ```bash
 oxfuzz build profile set /path/to/project \
@@ -763,9 +783,10 @@ Ordinary `oxfuzz run` derives a new seed.
 
 The REST API exposes deterministic discovery and start/status/result/cancel/retry
 for progressive AI discovery, plus harness, user-space run start/status/cancel,
-corpus, triage, reporting, and management endpoints. Syzkaller remains a
-trusted-local-desktop workflow because its kernel, rootfs, SSH, and VM inputs
-require a stronger boundary.
+corpus, triage, reporting, and management endpoints. Syzkaller stays a
+local workflow (the desktop app and `oxfuzz kernel`) because its kernel,
+rootfs, SSH, and VM inputs are host files and require a stronger boundary
+than a network request.
 
 #### Recover an ambiguous one-time campaign
 
@@ -907,6 +928,6 @@ errors only).
 | `HF_AUTO_REVERT_NOTIFY_ONLY` | Report the regression without reverting. Overrides `oxfuzz.toml`. | Off. |
 | `HF_GITLAB_URL`, `HF_GITLAB_PROJECT` | When no issue tracker is configured, the GitLab base URL and project path used to build a crash's prefilled new-issue link. Both must be set. | Unset: derived from the project's git `origin` remote. |
 | `HF_DEFECTDOJO_TOKEN` | DefectDojo API v2 token. Read because the default `config/defectdojo.toml` names it in `api_token_env`. | Unset. |
-| `OXFUZZ_SANDBOX_IMAGE` | Image reference built by `scripts/build-sandbox.sh`; it must carry an explicit version tag. | `oxfuzz/fuzz-sandbox:0.2.2`. |
+| `OXFUZZ_SANDBOX_IMAGE` | Image reference built by `scripts/build-sandbox.sh`; it must carry an explicit version tag. | `oxfuzz/fuzz-sandbox:0.2.3`. |
 | `OXFUZZ_SANDBOX_PLATFORM` | `--platform` passed to the `scripts/build-sandbox.sh` build and probe. | Unset (host platform). |
 | `OXFUZZ_SCAPY_IMAGE` | Image reference built by `scripts/build-scapy-sidecar.sh`; must be pinned, not `latest`. | `oxfuzz/scapy-automotive:2.7.0`. |

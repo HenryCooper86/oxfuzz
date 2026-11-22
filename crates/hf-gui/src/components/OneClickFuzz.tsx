@@ -96,7 +96,7 @@ type Phase =
   | { kind: "started"; scope: HarnessScope }
   | { kind: "error"; message: string };
 
-const LANGS: Record<string, string> = { c: "c", cpp: "cpp", "c++": "cpp", rust: "rust", go: "go", python: "python" };
+const LANGS: Record<string, string> = { c: "c", cpp: "cpp", "c++": "cpp", rust: "rust", go: "go", python: "python", java: "java", javascript: "javascript", js: "javascript" };
 
 /**
  * "Fuzz this project": prepare a target and harness in one click, then stop

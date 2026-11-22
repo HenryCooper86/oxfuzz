@@ -774,26 +774,19 @@ mod semgrep_cli_tests {
     }
 
     #[test]
-    fn harnessability_note_covers_exactly_the_discovery_only_languages() {
-        for language in [TargetLanguage::C, TargetLanguage::Cpp, TargetLanguage::Rust] {
+    fn every_scanned_language_has_a_harness_path_and_so_no_note() {
+        for language in [
+            TargetLanguage::C,
+            TargetLanguage::Cpp,
+            TargetLanguage::Rust,
+            TargetLanguage::Go,
+            TargetLanguage::Python,
+            TargetLanguage::Java,
+            TargetLanguage::JavaScript,
+        ] {
             assert!(
                 super::harnessability_note(language).is_none(),
                 "{language:?} has a working harness path"
-            );
-        }
-        for (language, id) in [
-            (TargetLanguage::Go, "go"),
-            (TargetLanguage::Python, "python"),
-        ] {
-            let note = super::harnessability_note(language)
-                .expect("a discovery-only language gets a note");
-            assert!(
-                note.contains(&format!("not yet available for {id}")),
-                "the language is named: {note}"
-            );
-            assert!(
-                note.contains("c, cpp, rust"),
-                "the supported set is named: {note}"
             );
         }
     }
@@ -803,9 +796,9 @@ mod semgrep_cli_tests {
         // The plain inventory payload carries `candidates` at the top level;
         // the ranked advice payload nests them under `inventory`.
         let mut plain = serde_json::json!({"project_root": "/p", "candidates": [{"symbol": "a"}, {"symbol": "b"}], "call_graph": {}});
-        super::mark_candidates_harnessable(&mut plain, TargetLanguage::Go);
-        assert_eq!(plain["candidates"][0]["harnessable"], false);
-        assert_eq!(plain["candidates"][1]["harnessable"], false);
+        super::mark_candidates_harnessable(&mut plain, TargetLanguage::Python);
+        assert_eq!(plain["candidates"][0]["harnessable"], true);
+        assert_eq!(plain["candidates"][1]["harnessable"], true);
 
         let mut ranked =
             serde_json::json!({"inventory": {"candidates": [{"symbol": "a"}]}, "assessments": []});
@@ -813,11 +806,11 @@ mod semgrep_cli_tests {
         assert_eq!(ranked["inventory"]["candidates"][0]["harnessable"], true);
     }
 
-    fn go_inventory_with_candidate(project: &str) -> TargetInventory {
+    fn python_inventory_with_candidate(project: &str) -> TargetInventory {
         serde_json::from_value(serde_json::json!({
             "project_root": project,
             "candidates": [
-                {"id": Uuid::from_u128(7), "project_root": project, "language": "Go", "symbol": "ParsePacket", "kind": "Parser", "location": {"file": "parser.go", "line": 3, "col": 1}, "signature": null, "input_surface": "Bytes", "complexity": 2, "fit_score": 0.85, "sanitizers": [], "rationale": ""}
+                {"id": Uuid::from_u128(7), "project_root": project, "language": "Python", "symbol": "parse_packet", "kind": "Parser", "location": {"file": "parser.py", "line": 3, "col": 1}, "signature": null, "input_surface": "Bytes", "complexity": 2, "fit_score": 0.85, "sanitizers": [], "rationale": ""}
             ],
             "call_graph": {}
         }))
@@ -825,15 +818,15 @@ mod semgrep_cli_tests {
     }
 
     #[tokio::test]
-    async fn discover_marks_a_not_yet_harnessable_language_and_notes_it() {
-        let mut service = FakeDiscoverService::new(TargetLanguage::Go, Vec::new());
-        service.discovered = go_inventory_with_candidate("/tmp/project");
+    async fn discover_marks_python_candidates_harnessable_without_a_note() {
+        let mut service = FakeDiscoverService::new(TargetLanguage::Python, Vec::new());
+        service.discovered = python_inventory_with_candidate("/tmp/project");
         let mut output = RecordingOutput::default();
 
         run_discover_command(
             &service,
             PathBuf::from("/tmp/project"),
-            TargetLanguage::Go,
+            TargetLanguage::Python,
             false,
             AiOption::Auto,
             false,
@@ -845,18 +838,13 @@ mod semgrep_cli_tests {
         .unwrap();
 
         assert!(
-            output.stderr.iter().any(|line| line
-                .contains("harness generation is not yet available for go")
-                && line.contains("c, cpp, rust")),
-            "the note names the language and the supported set: {:?}",
+            output.stderr.is_empty(),
+            "Python runs under the atheris engine, so there is no note: {:?}",
             output.stderr
         );
         let json: serde_json::Value = serde_json::from_str(&output.stdout[0]).unwrap();
-        assert_eq!(json["candidates"][0]["symbol"], "ParsePacket");
-        assert_eq!(
-            json["candidates"][0]["harnessable"], false,
-            "the candidate is marked as not harnessable"
-        );
+        assert_eq!(json["candidates"][0]["symbol"], "parse_packet");
+        assert_eq!(json["candidates"][0]["harnessable"], true);
     }
 
     #[tokio::test]
@@ -897,15 +885,15 @@ mod semgrep_cli_tests {
 
     #[tokio::test]
     async fn discover_rank_marks_candidates_inside_the_ranked_inventory() {
-        let mut service = FakeDiscoverService::new(TargetLanguage::Go, Vec::new());
+        let mut service = FakeDiscoverService::new(TargetLanguage::Python, Vec::new());
         service.provider_available = false;
-        service.discovered = go_inventory_with_candidate("/tmp/project");
+        service.discovered = python_inventory_with_candidate("/tmp/project");
         let mut output = RecordingOutput::default();
 
         run_discover_command(
             &service,
             PathBuf::from("/tmp/project"),
-            TargetLanguage::Go,
+            TargetLanguage::Python,
             true,
             AiOption::Auto,
             false,
@@ -917,13 +905,13 @@ mod semgrep_cli_tests {
         .unwrap();
 
         let json: serde_json::Value = serde_json::from_str(&output.stdout[0]).unwrap();
-        assert_eq!(json["inventory"]["candidates"][0]["harnessable"], false);
+        assert_eq!(json["inventory"]["candidates"][0]["harnessable"], true);
         assert!(
-            output
+            !output
                 .stderr
                 .iter()
-                .any(|line| line.contains("not yet available for go")),
-            "the note accompanies the ranked output too: {:?}",
+                .any(|line| line.contains("not yet available")),
+            "no harnessability note accompanies the ranked output: {:?}",
             output.stderr
         );
     }

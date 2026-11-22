@@ -80,6 +80,18 @@ fn frame_pattern() -> &'static Regex {
     })
 }
 
+/// The frame line a `TSan` report prints: no address column, the source
+/// location (or `<null>`) after the function, then the module offset.
+fn tsan_frame_pattern() -> &'static Regex {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    PATTERN.get_or_init(|| {
+        Regex::new(
+            r"(?m)^\s*#(\d+)\s+(\S.*?)\s+(?:(/[^\s:]+)(?::(\d+))?(?::\d+)?|<null>)\s+\([^()\s]*\+0x[0-9a-fA-F]+\)",
+        )
+        .expect("frame pattern is a compile-time constant")
+    })
+}
+
 /// Parse `#N 0xADDR in FUNC FILE:LINE:COL` frames, in printed order.
 ///
 /// Frames without an `in <function>` clause are skipped. Those are
@@ -88,7 +100,21 @@ fn frame_pattern() -> &'static Regex {
 /// needs a stable key rather than a layer.
 #[must_use]
 pub fn parse_frames(log: &str) -> Vec<StackFrame> {
-    frame_pattern()
+    let frames: Vec<StackFrame> = frames_matching(frame_pattern(), log);
+    if !frames.is_empty() {
+        return frames;
+    }
+    // `TSan` frames carry no address column, so the pattern above matches none
+    // of them. A frame the first pattern would have matched starts with its
+    // address and is not a `TSan` frame.
+    frames_matching(tsan_frame_pattern(), log)
+        .into_iter()
+        .filter(|frame| !frame.function.starts_with("0x") && frame.function != "<null>")
+        .collect()
+}
+
+fn frames_matching(pattern: &Regex, log: &str) -> Vec<StackFrame> {
+    pattern
         .captures_iter(log)
         .filter(|captures| !captures[2].trim_start().starts_with("??"))
         .map(|captures| StackFrame {
@@ -228,6 +254,39 @@ pub(crate) mod tests {
     #1 0x4f2c30 in dns_parse_message /work/src/parser/dns.c:140:9
     #2 0x51b3c4 in LLVMFuzzerTestOneInput /work/harness.c:14:5
 ";
+
+    /// Captured from a libFuzzer `-fsanitize=thread` run in sandbox image 0.2.2.
+    pub(crate) const TSAN_RACE: &str = "\
+WARNING: ThreadSanitizer: data race (pid=45)
+  Write of size 4 at 0xaaaad35e7920 by thread T3:
+    #0 w /work/tsan.c:5:35 (t+0x1294f8) (BuildId: 62f281dae895bb4a0d88cec48fa7e02ce30ba699)
+
+  Previous write of size 4 at 0xaaaad35e7920 by thread T2:
+    #0 w /work/tsan.c:5:35 (t+0x1294f8) (BuildId: 62f281dae895bb4a0d88cec48fa7e02ce30ba699)
+
+  Thread T3 (tid=49, running) created by main thread at:
+    #0 pthread_create <null> (t+0xa051c) (BuildId: 62f281dae895bb4a0d88cec48fa7e02ce30ba699)
+    #1 LLVMFuzzerTestOneInput /work/tsan.c:9:40 (t+0x129440) (BuildId: 62f281dae895bb4a0d88cec48fa7e02ce30ba699)
+    #2 fuzzer::Fuzzer::ExecuteCallback(unsigned char const*, unsigned long) <null> (t+0x571cc) (BuildId: 62f281dae895bb4a0d88cec48fa7e02ce30ba699)
+
+SUMMARY: ThreadSanitizer: data race /work/tsan.c:5:35 in w
+";
+
+    #[test]
+    fn tsan_frames_parse_without_an_address_column() {
+        let frames = parse_frames(TSAN_RACE);
+        assert_eq!(frames[0].function, "w");
+        assert_eq!(frames[0].file.as_deref(), Some("/work/tsan.c"));
+        assert_eq!(frames[0].line, Some(5));
+        let create = frames
+            .iter()
+            .find(|frame| frame.function == "pthread_create")
+            .expect("runtime frame parsed");
+        assert_eq!(create.file, None);
+        assert!(frames.iter().any(|frame| frame.function
+            == "fuzzer::Fuzzer::ExecuteCallback(unsigned char const*, unsigned long)"));
+        assert_eq!(crash_origin(TSAN_RACE), CrashOrigin::Target);
+    }
 
     #[test]
     fn gdb_source_frames_attribute_the_fault_and_unknown_symbols_do_not() {

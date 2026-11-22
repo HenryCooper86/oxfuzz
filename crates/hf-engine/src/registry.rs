@@ -73,6 +73,21 @@ impl_adapter!(
     EngineKind::GoNative,
     crate::go_native::build_run_args
 );
+impl_adapter!(
+    crate::atheris::Atheris,
+    EngineKind::Atheris,
+    crate::atheris::build_run_args
+);
+impl_adapter!(
+    crate::jazzer::Jazzer,
+    EngineKind::Jazzer,
+    crate::jazzer::build_run_args
+);
+impl_adapter!(
+    crate::jazzerjs::JazzerJs,
+    EngineKind::JazzerJs,
+    crate::jazzerjs::build_run_args
+);
 
 /// Return the adapter for an engine kind.
 #[must_use]
@@ -83,5 +98,8 @@ pub fn adapter_for(kind: EngineKind) -> Box<dyn EngineAdapter> {
         EngineKind::Honggfuzz => Box::new(crate::honggfuzz::Honggfuzz),
         EngineKind::Syzkaller => Box::new(crate::syzkaller::Syzkaller),
         EngineKind::GoNative => Box::new(crate::go_native::GoNative),
+        EngineKind::Atheris => Box::new(crate::atheris::Atheris),
+        EngineKind::Jazzer => Box::new(crate::jazzer::Jazzer),
+        EngineKind::JazzerJs => Box::new(crate::jazzerjs::JazzerJs),
     }
 }

@@ -86,7 +86,15 @@ pub struct Harness {
    `harness_target_sources` text. A Rust target's section instead names the
    crate identifier the cargo-fuzz build links (`rust_crate_ident`: the root
    `Cargo.toml` package name with `-` as `_`), because a model shown only the
-   file guesses the crate from the directory name. The base prompt forbids `__has_include`
+   file guesses the crate from the directory name. A Rust project that
+   carries a `cargo vendor` tree (`vendor/`) has it staged whole, because
+   cargo verifies every file of a vendored crate, and the cargo-fuzz build
+   links the image's crates and the project's crates into one directory
+   source, so crates.io dependencies resolve with networking disabled
+   (live test `rust_vendor_tests`, passed 2026-11-22 in image 0.2.3: the
+   build fails naming the crate without the tree and, with it, a panic
+   planted inside the vendored crate is found). Git dependencies and
+   unvendored crates do not build. The base prompt forbids `__has_include`
    probing, code guarded by a macro the model was not shown, rewriting the
    fuzzer's input before the call, and uninitialized output structures; each
    was observed in first drafts for the bundled `cmake_tlv_lib` example.

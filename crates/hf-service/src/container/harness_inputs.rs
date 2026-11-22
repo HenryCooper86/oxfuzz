@@ -263,7 +263,17 @@ impl ServiceContainer {
             } else {
                 context
             };
-        let flags = if language == TargetLanguage::Rust {
+        // Rust, Go, Python, Java, and JavaScript builds take no C compile
+        // flags: cargo-fuzz, `go test`, the interpreter, `javac`, and Node.js
+        // resolve their own inputs from the staged tree.
+        let flags = if matches!(
+            language,
+            TargetLanguage::Rust
+                | TargetLanguage::Go
+                | TargetLanguage::Python
+                | TargetLanguage::Java
+                | TargetLanguage::JavaScript
+        ) {
             Vec::new()
         } else {
             context

@@ -16,3 +16,12 @@ crates/hf-storage/migrations/** text eol=lf
 examples/qualification/*.c text eol=lf
 examples/qualification/rust/** text eol=lf
 examples/qualification/go/** text eol=lf
+
+# The sandbox image build copies these into a Linux image: patches, shell and
+# Python scripts, and a rules tree whose digest is checked byte for byte. A
+# Windows checkout that rewrote their line endings would break the build or
+# the scripts inside the image.
+docker/** text eol=lf
+scripts/** text eol=lf
+tools/clang-analysis/** text eol=lf
+third_party/semgrep-rules/** text eol=lf

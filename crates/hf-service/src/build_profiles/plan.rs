@@ -5,6 +5,9 @@ use hf_storage::{BuildPlanEvidence, BuildPlanStepEvidence};
 
 use super::{BuildDependency, BuildDependencyKind, BuildProfileView, ProfileBuildSystem};
 
+/// The image's command that writes a Bazel project's compile database.
+const BAZEL_COMPILE_DATABASE_TOOL: &str = "oxfuzz-bazel-compdb";
+
 /// Merge service-required tools and saved dependencies in canonical kind/name order.
 pub(crate) fn required_build_dependencies(profile: &BuildProfileView) -> Vec<BuildDependency> {
     let mut dependencies: BTreeSet<_> = profile.dependencies.iter().cloned().collect();
@@ -13,6 +16,7 @@ pub(crate) fn required_build_dependencies(profile: &BuildProfileView) -> Vec<Bui
         ProfileBuildSystem::Make => &["mkdir", "make", "bear"][..],
         ProfileBuildSystem::Meson => &["meson"][..],
         ProfileBuildSystem::Autotools => &["autoreconf", "make", "bear"][..],
+        ProfileBuildSystem::Bazel => &["bazel", BAZEL_COMPILE_DATABASE_TOOL][..],
     };
     let needs_pkg_config = dependencies
         .iter()
@@ -117,6 +121,13 @@ pub(crate) fn profile_build_plan(profile: &BuildProfileView) -> BuildPlanEvidenc
                 "Record the forced Make build in the selected compile database",
             ),
         ],
+        // The image's tool runs one offline `bazel aquery` against the
+        // dependencies the project carries in its vendor directory and writes
+        // the compile commands; no action executes, so no project build runs.
+        ProfileBuildSystem::Bazel => vec![step(
+            vec![BAZEL_COMPILE_DATABASE_TOOL.to_owned(), output],
+            "Query the compile commands of every C and C++ target offline and write the selected compile database",
+        )],
     };
     BuildPlanEvidence {
         steps,

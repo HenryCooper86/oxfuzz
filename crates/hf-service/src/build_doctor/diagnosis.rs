@@ -114,7 +114,7 @@ pub(super) fn fit(evidence: &mut ProjectBuildDiagnosis) -> Result<(), Classified
 pub(super) fn detected(project: &Path, component: &str) -> Vec<BuildSystemEvidence> {
     let mut systems = Vec::new();
     for (build_system, markers) in BUILD_SYSTEM_MARKERS {
-        let markers: Vec<_> = markers
+        let markers: Vec<String> = markers
             .iter()
             .filter(|name| is_root_file(&project.join(component), name))
             .map(|name| {
@@ -133,6 +133,15 @@ pub(super) fn detected(project: &Path, component: &str) -> Vec<BuildSystemEviden
             | BuildSystem::Make
             | BuildSystem::Meson
             | BuildSystem::Autotools => DetectedBuildStatus::Supported,
+            // Bazel builds offline only from a vendor directory, which needs
+            // Bzlmod: a project with the module file can save a profile.
+            BuildSystem::Bazel
+                if markers.iter().any(|marker| {
+                    marker.rsplit('/').next() == Some(crate::build_profiles::BAZEL_MODULE_FILE)
+                }) =>
+            {
+                DetectedBuildStatus::Supported
+            }
             BuildSystem::Cargo => DetectedBuildStatus::NotNeeded,
             _ => DetectedBuildStatus::UnsupportedInImage,
         };
