@@ -149,6 +149,17 @@ jobs:
             live_atheris live_jazzer live_cargo_fuzz 2>&1 | tee "$RUNNER_TEMP/step3-source-engines.log"
           test "${PIPESTATUS[0]}" -eq 0
 
+      - name: Runbook step 3 - campaign, Stop and resume
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          TMP: ${{ runner.temp }}
+          TEMP: ${{ runner.temp }}
+        run: |
+          cargo test --workspace --lib -- --ignored --test-threads=1 --nocapture \
+            live_stop_and_resume 2>&1 | tee "$RUNNER_TEMP/step3-stop-resume.log"
+          test "${PIPESTATUS[0]}" -eq 0
+
       - name: Runbook step 3 - binary-only sessions
         if: ${{ !cancelled() }}
         shell: bash
@@ -158,6 +169,43 @@ jobs:
         run: |
           cargo test --workspace --lib -- --ignored --test-threads=1 \
             live_qemu_session live_socket_session 2>&1 | tee "$RUNNER_TEMP/step3-binary-only.log"
+          test "${PIPESTATUS[0]}" -eq 0
+
+      # The engines run on the engine VM's kernel and cannot change it. These
+      # are the settings they are known to depend on, and what a minimal
+      # MemorySanitizer program does under them.
+      - name: Kernel settings the engines depend on
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          MSYS_NO_PATHCONV: "1"
+          MSYS2_ARG_CONV_EXCL: "*"
+        run: |
+          docker run --rm --network none --tmpfs /tmp:rw,exec,size=64m oxfuzz/fuzz-sandbox:0.2.3 sh -c '
+            echo "kernel=$(uname -r)"
+            echo "core_pattern=$(cat /proc/sys/kernel/core_pattern)"
+            echo "mmap_rnd_bits=$(cat /proc/sys/vm/mmap_rnd_bits)"
+            echo "randomize_va_space=$(cat /proc/sys/kernel/randomize_va_space)"
+            clang --version | head -n 1
+            printf "int main(void) { return 0; }\n" > /tmp/probe.c
+            clang -fsanitize=memory /tmp/probe.c -o /tmp/probe
+            /tmp/probe
+            echo "memory-sanitizer probe exit=$?"
+          ' 2>&1 | tee "$RUNNER_TEMP/kernel-settings.log" || true
+
+      # Diagnostic, not part of the runbook: the same MemorySanitizer test with
+      # the engine VM's address-space randomization lowered, which is a host
+      # setting an operator would have to make.
+      - name: MemorySanitizer with mmap_rnd_bits lowered
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          TMP: ${{ runner.temp }}
+          TEMP: ${{ runner.temp }}
+        run: |
+          wsl -d rancher-desktop sysctl -w vm.mmap_rnd_bits=28
+          cargo test --workspace --lib -- --ignored --test-threads=1 --nocapture \
+            live_cpp_memory_sanitizer 2>&1 | tee "$RUNNER_TEMP/msan-lowered-randomization.log"
           test "${PIPESTATUS[0]}" -eq 0
 
       - name: Containers left behind
@@ -176,6 +224,9 @@ jobs:
             ${{ runner.temp }}/image-build.log
             ${{ runner.temp }}/step2-isolation.log
             ${{ runner.temp }}/step3-source-engines.log
+            ${{ runner.temp }}/step3-stop-resume.log
             ${{ runner.temp }}/step3-binary-only.log
+            ${{ runner.temp }}/kernel-settings.log
+            ${{ runner.temp }}/msan-lowered-randomization.log
           if-no-files-found: warn
           retention-days: 30
