@@ -111,9 +111,9 @@ export const locales = {
       "Linux kernel fuzzing in a VM. You supply the kernel and guest image.",
     engine_syzkaller_link: "syzkaller setup guide",
 
-    new_title: "New in 0.9.8: more languages, and programs without source",
+    new_title: "New in 0.9.9: the desktop app does what the command line does",
     new_intro:
-      "Released in November 2026 and driven from the command line. The two recordings are real sessions on small sample programs with a planted bug.",
+      "Released in November 2026. These features arrived in the command line in 0.9.8; from 0.9.9 the desktop app has them too. The two recordings are real command-line sessions on small sample programs with a planted bug.",
     new_1_title: "Four more languages",
     new_1_text:
       "Go with native fuzzing, Python with Atheris, Java with Jazzer and JavaScript with Jazzer.js. Each is discovered, built and run in the same sandbox.",
@@ -153,7 +153,7 @@ export const locales = {
     term_python_caption:
       "A real session on a sample Python module. Pauses and long paths are shortened; every line is what the command printed.",
     new_status:
-      'These features belong to the <code>oxfuzz</code> command-line tool, which is not in the desktop packages below. <a href="https://github.com/HenryCooper86/oxfuzz/blob/main/docs/guides/INSTALL.md" rel="noopener">Install it from source</a> at the v0.9.8 tag. The <a href="https://github.com/HenryCooper86/oxfuzz/blob/main/CHANGELOG.md" rel="noopener">changelog</a> lists every change.',
+      'These features are in the desktop packages below from v0.9.9. The <code>oxfuzz</code> command-line tool is not in those packages; <a href="https://github.com/HenryCooper86/oxfuzz/blob/main/docs/guides/INSTALL.md" rel="noopener">install it from source</a> at the v0.9.9 tag. The <a href="https://github.com/HenryCooper86/oxfuzz/blob/main/CHANGELOG.md" rel="noopener">changelog</a> lists every change.',
 
     control_title: "The fuzzer runs untrusted code. You stay in charge of it.",
     control_1_title: "Sandboxed",
@@ -330,9 +330,9 @@ export const locales = {
       "在虚拟机中对 Linux 内核做模糊测试。内核和客户机镜像由你提供。",
     engine_syzkaller_link: "syzkaller 配置指南",
 
-    new_title: "0.9.8 新功能：更多语言，以及没有源码的程序",
+    new_title: "0.9.9 新功能：命令行能做的，桌面应用也能做",
     new_intro:
-      "2026 年 11 月发布，通过命令行使用。下面两段录屏是真实的运行过程，对象是带有预埋缺陷的小型示例程序。",
+      "2026 年 11 月发布。以下功能在 0.9.8 加入命令行，从 0.9.9 起桌面应用也可以使用。下面两段录屏是真实的命令行运行过程，对象是带有预埋缺陷的小型示例程序。",
     new_1_title: "新增四种语言",
     new_1_text:
       "Go（原生模糊测试）、Python（Atheris）、Java（Jazzer）和 JavaScript（Jazzer.js）。它们都在同一个沙箱里完成目标发现、构建和运行。",
@@ -372,7 +372,7 @@ export const locales = {
     term_python_caption:
       "真实的运行过程，对象是一个 Python 示例模块。停顿和过长的路径做了缩短，每一行都是命令的原始输出。",
     new_status:
-      '这些功能属于 <code>oxfuzz</code> 命令行工具，下方的桌面安装包不包含它。请在 v0.9.8 标签处<a href="https://github.com/HenryCooper86/oxfuzz/blob/main/docs/guides/INSTALL.md" rel="noopener">从源码安装</a>。全部改动见<a href="https://github.com/HenryCooper86/oxfuzz/blob/main/CHANGELOG.md" rel="noopener">更新日志</a>。',
+      '从 v0.9.9 起，下方的桌面安装包已包含这些功能。<code>oxfuzz</code> 命令行工具不在安装包内，请在 v0.9.9 标签处<a href="https://github.com/HenryCooper86/oxfuzz/blob/main/docs/guides/INSTALL.md" rel="noopener">从源码安装</a>。全部改动见<a href="https://github.com/HenryCooper86/oxfuzz/blob/main/CHANGELOG.md" rel="noopener">更新日志</a>。',
 
     control_title: "模糊测试运行的是不可信代码，控制权始终在你手里。",
     control_1_title: "沙箱隔离",

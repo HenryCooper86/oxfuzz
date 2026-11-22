@@ -10,6 +10,8 @@ retain only the current release; older entries remain here as the record.
 
 ## Unreleased
 
+## 0.9.9 - 2026-11-23
+
 ### Added
 
 - Desktop app: the operations that were command-line only are now in the
