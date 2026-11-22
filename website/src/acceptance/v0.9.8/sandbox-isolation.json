@@ -1,0 +1,38 @@
+{
+  "schema_version": 3,
+  "claim": "sandbox_isolation",
+  "candidate_commit": "840cbb56a7e8d49baedabd0758a8e68a6c64117d",
+  "tag": "v0.9.8",
+  "platform": "macOS arm64 / Linux arm64 Docker",
+  "sandbox_image": {
+    "reference": "oxfuzz/fuzz-sandbox:0.2.3",
+    "id": "sha256:06af564185261a34f77de51f71b325fa9f73947690f8a71cee3c52da9d668956",
+    "architecture": "linux/arm64",
+    "distribution": "Built locally with scripts/build-sandbox.sh; not published to a registry."
+  },
+  "command": "cargo test --locked -p hf-runtime --test live_isolation -- --ignored --test-threads=1 --nocapture",
+  "exit_code": 0,
+  "observed_on": "2026-11-22",
+  "started_utc": "2026-11-22T15:48:16Z",
+  "ended_utc": "2026-11-22T15:48:36Z",
+  "scenarios_passed": [
+    "Network unavailable, input read-only, explicitly mounted output writable, 256 MiB and 1 CPU cgroup limits verified",
+    "Explicit numeric UID/GID can read private input and creates correctly owned output",
+    "Timeout awaits owned-container cleanup",
+    "Running container registered with owned workspace label",
+    "Runtime ownership records inaccessible inside the sandbox",
+    "Fresh runtime cleans up container left by terminated helper client"
+  ],
+  "helper": "Seventh test is the recovery child-process helper, not an independent scenario.",
+  "semgrep": {
+    "provenance": "The 0.2.3 image build runs an offline Semgrep scan with a read-only source mount and checks its report on the host. That check passed when this image was built on 2026-11-22; it was not repeated as a separate acceptance step for this record."
+  },
+  "limitations": [
+    "Host is macOS arm64; this is not a Windows Docker or Linux KVM qualification.",
+    "Docker failure recovery scenarios cover only disposable owned containers.",
+    "All seven tests reported ok (six scenarios and the recovery helper).",
+    "The sandbox image changed from 0.2.2 to 0.2.3 in this release. Only the linux/arm64 build was used here; the linux/amd64 build was not."
+  ],
+  "observed_commit": "840cbb56a7e8d49baedabd0758a8e68a6c64117d",
+  "candidate_delta": "None. The evidence was produced on a clean checkout of the tag commit (empty working-tree patch)."
+}

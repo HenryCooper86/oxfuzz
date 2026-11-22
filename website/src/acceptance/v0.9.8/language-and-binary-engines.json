@@ -1,0 +1,127 @@
+{
+  "schema_version": 3,
+  "claim": "language_and_binary_engines",
+  "release_gate": "Not one of the claims the release workflow checks. Published so that each capability advertised for 0.9.8 has a reviewable result.",
+  "candidate_commit": "840cbb56a7e8d49baedabd0758a8e68a6c64117d",
+  "tag": "v0.9.8",
+  "observed_commit": "840cbb56a7e8d49baedabd0758a8e68a6c64117d",
+  "candidate_delta": "None. The evidence was produced on a clean checkout of the tag commit (empty working-tree patch).",
+  "platform": "macOS 27.2.1 arm64 / Linux arm64 Docker",
+  "sandbox_image": {
+    "reference": "oxfuzz/fuzz-sandbox:0.2.3",
+    "id": "sha256:06af564185261a34f77de51f71b325fa9f73947690f8a71cee3c52da9d668956",
+    "architecture": "linux/arm64",
+    "distribution": "Built locally with scripts/build-sandbox.sh; not published to a registry."
+  },
+  "command": "cargo test --locked --workspace --lib -- --ignored --test-threads=1 --nocapture live_go_native live_bisection live_cpp_memory_sanitizer live_atheris live_jazzer live_cargo_fuzz live_stop_and_resume live_qemu_session live_socket_session",
+  "exit_code": 0,
+  "tests_passed": 16,
+  "tests_failed": 0,
+  "duration_secs": 594.56,
+  "started_utc": "2026-11-22T15:57:40Z",
+  "ended_utc": "2026-11-22T16:07:43Z",
+  "provider_and_approval": "None. Every source is a constant in a test file with a planted defect; no model was asked for anything and no approval was requested. The tests call the service operations directly, not the command line.",
+  "trials": "One run of each test.",
+  "results": {
+    "go_native": [
+      {
+        "test": "live_go_native_finds_replays_and_classifies_a_planted_panic",
+        "observed": "20-second run at 147,801 executions per second; the planted panic was found, replayed and classified"
+      },
+      {
+        "test": "live_go_native_fuzzes_a_function_with_typed_parameters",
+        "observed": "20-second run at 87,053 executions per second; the planted defect was found"
+      }
+    ],
+    "python_atheris": [
+      {
+        "test": "live_atheris_finds_replays_and_classifies_a_planted_exception",
+        "observed": "planted exception found, replayed and classified; rate not measured"
+      },
+      {
+        "test": "live_atheris_fuzzes_typed_parameters_with_a_vendored_package",
+        "observed": "planted defect found through typed parameters with a vendored package; rate not measured"
+      }
+    ],
+    "java_jazzer": [
+      {
+        "test": "live_jazzer_finds_replays_and_classifies_a_planted_exception",
+        "observed": "planted exception found, replayed and classified; rate not measured"
+      },
+      {
+        "test": "live_jazzer_fuzzes_a_method_with_typed_parameters",
+        "observed": "planted defect found; rate not measured"
+      },
+      {
+        "test": "live_jazzer_builds_against_a_vendored_jar",
+        "observed": "built against a vendored jar and found the planted defect; rate not measured"
+      }
+    ],
+    "javascript_jazzer_js": [
+      {
+        "test": "live_jazzer_js_finds_replays_and_classifies_a_planted_exception",
+        "observed": "planted exception found, replayed and classified; rate not measured"
+      },
+      {
+        "test": "live_jazzer_js_fuzzes_an_async_es_module_function_with_typed_parameters",
+        "observed": "20-second run at 59,777 executions per second; the planted defect was found"
+      }
+    ],
+    "rust_vendored_dependency": [
+      {
+        "test": "live_cargo_fuzz_builds_against_a_vendored_crate",
+        "observed": "cargo-fuzz target built offline against a vendored crate and found the planted defect; rate not measured"
+      }
+    ],
+    "memory_sanitizer": [
+      {
+        "test": "live_cpp_memory_sanitizer_reports_a_planted_read_and_keeps_a_control_clean",
+        "observed": "C++ target: the planted uninitialized read was reported (libFuzzer run at 37,862 executions per second) and the control stayed clean"
+      }
+    ],
+    "bisect": [
+      {
+        "test": "live_bisection_finds_the_commit_that_introduced_a_planted_overflow",
+        "observed": "the introducing commit of a planted overflow was identified in a fixture repository"
+      }
+    ],
+    "binary_only": [
+      {
+        "test": "live_qemu_session_finds_and_confirms_a_planted_crash",
+        "observed": "AFL++ QEMU mode, file input: 74,523 executions at 1,863 per second; two crashing inputs with one signature (signal 11), both confirmed by replay, the second marked a duplicate"
+      },
+      {
+        "test": "live_socket_session_fuzzes_a_server_through_its_first_connection",
+        "observed": "TCP server: 7,506 executions at 188 per second; one crash confirmed by replay and minimized from 35 to 4 bytes; no hangs"
+      },
+      {
+        "test": "live_socket_sessions_reach_datagram_servers_and_stateful_exchanges",
+        "observed": "UDP server and stateful exchange: 8,962 executions at 224 per second; one distinct crash; no hangs"
+      }
+    ],
+    "stop_and_resume": [
+      {
+        "test": "live_stop_and_resume_keeps_the_queue_of_a_stopped_campaign",
+        "observed": "AFL++ campaign stopped 158 ms after the request with 87 queue entries and 275,444 executions; the resumed run kept every entry"
+      }
+    ]
+  },
+  "not_exercised_live_on_this_candidate": [
+    "ThreadSanitizer builds",
+    "User dictionaries and the grammar mutator",
+    "The issue command and Jira filing, and webhook alerts",
+    "lcov and HTML coverage export",
+    "The oxfuzz kernel command line (see the syzkaller record)",
+    "Meson, Autotools and Bazel build profiles",
+    "The command-line front ends of the operations above, including their approval prompts"
+  ],
+  "limitations": [
+    "Linux arm64 sandbox on a macOS arm64 host only.",
+    "The three binary-only session tests fail on the linux/amd64 image under emulation on this host and failed on a GitHub-hosted Windows Server 2025 runner (about 100 executions per second, planted crash not found). The cause is not established and a native Linux x86_64 host has not been tried.",
+    "Each test uses a small fixture with a planted defect and a run of 20 to 30 seconds. They show that the path works end to end, not throughput or the ability to find unplanted bugs.",
+    "Where the rate is given as not measured, the engine stopped at the planted defect before reporting one.",
+    "Windows is not qualified. A partial hosted-runner result is in docs/acceptance/windows-host-2026-11-22.md at the tag.",
+    "These capabilities are driven from the command line. The desktop packages do not contain the command-line program."
+  ],
+  "review": "Produced by an AI coding agent in the maintainer's session on 2026-11-22; not independently reviewed."
+}

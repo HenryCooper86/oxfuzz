@@ -1,0 +1,67 @@
+{
+  "schema_version": 3,
+  "claim": "userspace_engines",
+  "candidate_commit": "840cbb56a7e8d49baedabd0758a8e68a6c64117d",
+  "tag": "v0.9.8",
+  "qualification_commit": "840cbb56a7e8d49baedabd0758a8e68a6c64117d",
+  "qualification_patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "candidate_delta": "None. The evidence was produced on a clean checkout of the tag commit (empty working-tree patch).",
+  "source_sha256": "a21529ba223ec0a03b349e9f78b879eed69dc60d8d130dbac1b97fb7bf05a591",
+  "status": "passed",
+  "started_at": "2026-11-22T15:48:45.605347+00:00",
+  "ended_at": "2026-11-22T15:51:10.445142+00:00",
+  "platform": "macOS-27.2.1-arm64-arm-64bit",
+  "sandbox_image": {
+    "reference": "oxfuzz/fuzz-sandbox:0.2.3",
+    "id": "sha256:06af564185261a34f77de51f71b325fa9f73947690f8a71cee3c52da9d668956",
+    "architecture": "linux/arm64",
+    "distribution": "Built locally with scripts/build-sandbox.sh; not published to a registry."
+  },
+  "cycles": 1,
+  "cpu_cores": 1,
+  "memory_mib": 2048,
+  "smoke_and_replay_duration_secs": 10,
+  "review": "Normal configured provider review passed before execution; explicit human approval was supplied for this exact source pair on 2026-11-22.",
+  "cleanup": "verified_by_fixture",
+  "engines": {
+    "libfuzzer": {
+      "smoke_passed": true,
+      "smoke_duration_secs": 10,
+      "smoke_execs_per_sec": 1048576.0,
+      "smoke_crashes": 0,
+      "stop_ms": 582,
+      "campaign_run_id": "38bddfe3-c71d-4442-93cd-4da3e0e18228",
+      "replay_run_id": "c3e3ed63-a2cc-42a8-bcd5-a85158ad207c",
+      "binary_sha256": "4bf4a4056cdb4b02400bd74b21261ce2f00b543fd47c1231d3ed8116858d63a2"
+    },
+    "afl++": {
+      "smoke_passed": true,
+      "smoke_duration_secs": 10,
+      "smoke_execs_per_sec": 260781.42,
+      "smoke_crashes": 0,
+      "stop_ms": 1614,
+      "campaign_run_id": "8a2b7db0-0cf9-4006-8ffd-c0822cf87fd4",
+      "replay_run_id": "17b14204-8700-4ede-b183-806be4f16ccc",
+      "binary_sha256": "87bc80a92dc98d0a254692a4e3f796a8f483e425564ffd01cde09584cc6ffb04"
+    },
+    "honggfuzz": {
+      "smoke_passed": true,
+      "smoke_duration_secs": 10,
+      "smoke_execs_per_sec": 203977.0,
+      "smoke_crashes": 0,
+      "stop_ms": 331,
+      "campaign_run_id": "324c9451-9d39-474c-aca0-bee7cf85ff3f",
+      "replay_run_id": "e3fb25a3-9b13-457b-b478-774235ca608c",
+      "binary_sha256": "cf29269db3e44e6987f10d0e988aa437c3c0fe3e21202d493378cd80b1a1a054"
+    }
+  },
+  "related_records": {
+    "language_and_binary_engines": "https://oxfuzz.bionicloud.net/acceptance/v0.9.8/language-and-binary-engines.json"
+  },
+  "limitations": [
+    "One short cycle per engine does not establish long-duration stability or a statistical latency percentile.",
+    "No crashes occurred; crash reproduction and symbolization are not claimed by this cycle.",
+    "Executed on macOS arm64 with a Linux arm64 Docker sandbox; not a Windows or Linux desktop installation test.",
+    "This cycle covers C sources on libFuzzer, AFL++ and honggfuzz. The engines added in 0.9.8 are covered by the related record, which is not a release-gate claim."
+  ]
+}

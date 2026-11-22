@@ -1,0 +1,47 @@
+{
+  "schema_version": 3,
+  "claim": "installed_clients",
+  "candidate_commit": "840cbb56a7e8d49baedabd0758a8e68a6c64117d",
+  "tag": "v0.9.8",
+  "local_build_commit": "840cbb56a7e8d49baedabd0758a8e68a6c64117d",
+  "production_delta": "None. The local build was made from a clean checkout of the tag commit.",
+  "platform": "macOS arm64",
+  "version_observed": "0.9.8",
+  "local_executable_sha256": "8d305021462791f45df53a86ccd8eb28c35d1659e00877697f223aefdd4e55d1",
+  "observed_on": "2026-11-22",
+  "observed": {
+    "local_build": "Built with scripts/build-app.sh at the tag commit; the copy in /Applications has the same executable digest. codesign --verify --deep --strict passed and the DMG passed hdiutil verify. A copy was started against empty scratch data: the process stayed up for 12 seconds, created a database and applied all 54 migrations, reported one window named oxfuzz, and exited on a termination request.",
+    "not_observed": [
+      "The contents of the window: no screen was inspected by the agent or by the maintainer for this release",
+      "A launch against the existing per-user data, and any migration of earlier data",
+      "First-run setup wizard",
+      "Any campaign, harness build or report started from the desktop app",
+      "Windows and Linux desktop installations",
+      "Physical-bench automotive operations",
+      "syzkaller campaigns from the desktop app"
+    ]
+  },
+  "final_release_installer": {
+    "workflow_run": 45044418259,
+    "candidate_commit": "840cbb56a7e8d49baedabd0758a8e68a6c64117d",
+    "file": "oxfuzz_0.9.8_aarch64.dmg",
+    "sha256": "e73ecbd6e16351080196e4f57f808bc5f3dd07fd51ac21b11f542394971bcb94",
+    "executable_sha256": "f77eb9807cb561f29d92ad22d0d8e7a089824dcd4d3c12b747e8b86cbd74b081",
+    "observed_on": "2026-11-22",
+    "checks": [
+      "Downloaded asset SHA-256 matches GitHub metadata, as do the other six installers and the two .app.tar.gz archives",
+      "DMG verification and read-only mount succeeded; the Intel DMG also passed verification",
+      "Copied app passes codesign --verify --deep --strict (ad-hoc signature); bundle version 0.9.8; arm64 executable",
+      "Started from the copy against empty scratch data: the process stayed up for 12 seconds, opened its database with all 54 migrations applied, reported one window named oxfuzz, and exited on a termination request",
+      "Not installed to /Applications and not started against the existing per-user data",
+      "The window contents were not observed",
+      "No campaign was executed from the installer build"
+    ]
+  },
+  "limitations": [
+    "This release's installed-client check is a start-up check. Unlike the 0.9.7 record, nobody looked at the window, so the sidebar, status bar and views are not confirmed for 0.9.8.",
+    "Only the macOS Apple silicon installer was started; the other packages were built and digest-checked only.",
+    "macOS packages are ad-hoc signed and not notarized; Windows packages are unsigned.",
+    "The capabilities added in 0.9.8 are driven from the command-line program, which the desktop packages do not contain."
+  ]
+}
