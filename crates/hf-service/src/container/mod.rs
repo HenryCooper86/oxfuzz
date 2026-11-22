@@ -105,6 +105,8 @@ pub use function_coverage::RunFunctionCoverage;
 #[cfg(feature = "run-closeout")]
 mod run_closeout;
 mod staging;
+#[cfg(test)]
+mod stop_resume_tests;
 mod system;
 mod target_source;
 mod triage;

@@ -20,18 +20,24 @@ it.
 ## What you need
 
 - Windows 10 or 11 on x86_64.
-- Docker Desktop running Linux containers. Record which backend it uses
-  (WSL 2 or Hyper-V) and where the repository checkout lives (a Windows
-  drive, a UNC path, or inside a WSL distribution). Only a checkout on a
-  Windows drive is covered by the mount-argument tests; the others are
-  separate configurations.
+- A container engine that runs Linux containers and accepts a Windows path
+  as a bind source: Docker Desktop, or Rancher Desktop with the `moby`
+  engine. A Podman machine also translates the path, but oxfuzz has not been
+  run against Podman. A `dockerd` started by hand inside a WSL distribution
+  does not: it rejects `D:\...` as "not absolute", so oxfuzz cannot use it
+  from Windows. Record the engine, its version, which backend it uses (WSL 2
+  or Hyper-V) and where the repository checkout lives (a Windows drive, a UNC
+  path, or inside a WSL distribution). Only a checkout on a Windows drive is
+  covered by the mount-argument tests; the others are separate
+  configurations.
 - The Rust toolchain named in `rust-toolchain.toml`, with the MSVC build
   tools, and Git for Windows (the gate script is bash).
 - The sandbox image `oxfuzz/fuzz-sandbox:0.2.3` for `linux/amd64` in that
-  Docker daemon. It is not published. `scripts/build-sandbox.sh` builds and
-  verifies it; the script is bash and has not been run from a Windows shell,
-  so running it inside a WSL distribution that shares the Docker Desktop
-  daemon is the safer route. The amd64 image was built and passed the
+  engine. It is not published. `scripts/build-sandbox.sh` builds and
+  verifies it; run it from Git Bash in the checkout. A default Git for
+  Windows checkout rewrites line endings; `.gitattributes` keeps the files
+  the image build copies in with LF, so no git setting needs changing. The
+  amd64 image was also built and passed the
   script's verification on 2026-11-22, on an arm64 Mac under emulation. Run
   against that image there, the six isolation tests of step 2, the Bazel
   build test and twelve of the fifteen engine tests of step 3 passed. The
@@ -82,22 +88,33 @@ here before any engine is involved.
 ```bash
 cargo test --workspace --lib -- --ignored --test-threads=1 \
   live_go_native live_qemu_session live_socket_session live_bisection \
-  live_cpp_memory_sanitizer live_atheris live_jazzer live_cargo_fuzz
+  live_cpp_memory_sanitizer live_atheris live_jazzer live_cargo_fuzz \
+  live_stop_and_resume
 ```
 
-Fifteen tests. Each builds a small program with a planted bug in the
-sandbox, fuzzes it for a bounded time, and checks that the bug is found,
-replayed and classified. Nothing here asks a model for anything and no
-approval is involved: the sources are constants in the test files.
+Sixteen tests. Fifteen build a small program with a planted bug in the
+sandbox, fuzz it for a bounded time, and check that the bug is found,
+replayed and classified. The sixteenth, `live_stop_and_resume`, builds an
+AFL++ harness, starts a ten-minute campaign, stops it once the host reads
+measured progress from the engine's own files, requires the Stop to finish
+within 15 seconds with no container left, and then resumes the same output
+tree and checks that the stopped campaign's queue was carried over. Nothing
+here asks a model for anything and no approval is involved: the sources are
+constants in the test files. It is the building blocks of steps 4 to 6
+without the review, the promotion and the service's run records, so it does
+not replace them.
 
-Look closely at the three `binary_only` tests. They run AFL++ with its output
-directory on the host, and AFL++ 4.09c names queue and crash files with
-colons (`id:000000,sig:11,...`). A Windows file system does not store a colon
-in a file name. What Docker Desktop does with such a name on a Windows-drive
-bind mount (refuse it, or store a substitute character) decides whether
-oxfuzz then finds the crash files, and it has not been observed. If these
-tests fail, record the names that appear under the session's
-`out/default/crashes` directory as Windows shows them.
+Look closely at the three `binary_only` tests and the Stop-and-resume test.
+They run AFL++ with its output directory on the host, and AFL++ 4.09c names
+queue and crash files with colons (`id:000000,sig:11,...`). A Windows file
+name cannot hold a colon. Through a WSL 2 drive mount the file is stored
+with U+F03A in place of each colon: seen on Windows Server 2025 with
+Rancher Desktop 1.25.0, with Podman 6.2.0 and with a plain `dockerd`, on
+2026-11-22. The container still sees the colon. oxfuzz reads such names
+with either character. Whether Docker Desktop stores the same substitute
+has not been observed; if these tests fail there, record the names that
+appear under the session's `out/default/crashes` directory as Windows shows
+them.
 
 ### 4. Build, smoke, promotion, campaign, Stop and replay
 
