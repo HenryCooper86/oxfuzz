@@ -111,9 +111,9 @@ export const locales = {
       "Linux kernel fuzzing in a VM. You supply the kernel and guest image.",
     engine_syzkaller_link: "syzkaller setup guide",
 
-    new_title: "New in the source: more languages, and programs without source",
+    new_title: "New in 0.9.8: more languages, and programs without source",
     new_intro:
-      "This work was merged in November 2026. It is driven from the command line.",
+      "Released in November 2026. This work is driven from the command line.",
     new_1_title: "Four more languages",
     new_1_text:
       "Go with native fuzzing, Python with Atheris, Java with Jazzer and JavaScript with Jazzer.js. Each is discovered, built and run in the same sandbox.",
@@ -133,7 +133,7 @@ export const locales = {
     new_6_text:
       "<code>oxfuzz kernel</code> runs a syzkaller campaign from the command line, checked under emulation so far. Bazel projects build offline from a vendored directory. Builds still never download anything.",
     new_status:
-      'These features are on the <a href="https://github.com/HenryCooper86/oxfuzz" rel="noopener">main branch</a> and are not in the v{{VERSION}} downloads below. To use them now, <a href="https://github.com/HenryCooper86/oxfuzz/blob/main/docs/guides/INSTALL.md" rel="noopener">build from source</a>. The <a href="https://github.com/HenryCooper86/oxfuzz/blob/main/CHANGELOG.md" rel="noopener">changelog</a> lists every change.',
+      'These features belong to the <code>oxfuzz</code> command-line tool, which is not in the desktop packages below. <a href="https://github.com/HenryCooper86/oxfuzz/blob/main/docs/guides/INSTALL.md" rel="noopener">Install it from source</a> at the v0.9.8 tag. The <a href="https://github.com/HenryCooper86/oxfuzz/blob/main/CHANGELOG.md" rel="noopener">changelog</a> lists every change.',
 
     control_title: "The fuzzer runs untrusted code. You stay in charge of it.",
     control_1_title: "Sandboxed",
@@ -310,8 +310,8 @@ export const locales = {
       "在虚拟机中对 Linux 内核做模糊测试。内核和客户机镜像由你提供。",
     engine_syzkaller_link: "syzkaller 配置指南",
 
-    new_title: "源码中的新功能：更多语言，以及没有源码的程序",
-    new_intro: "以下功能已于 2026 年 11 月合并，目前通过命令行使用。",
+    new_title: "0.9.8 新功能：更多语言，以及没有源码的程序",
+    new_intro: "2026 年 11 月发布。以下功能通过命令行使用。",
     new_1_title: "新增四种语言",
     new_1_text:
       "Go（原生模糊测试）、Python（Atheris）、Java（Jazzer）和 JavaScript（Jazzer.js）。它们都在同一个沙箱里完成目标发现、构建和运行。",
@@ -331,7 +331,7 @@ export const locales = {
     new_6_text:
       "<code>oxfuzz kernel</code> 从命令行运行 syzkaller 测试，目前只在模拟环境下验证过。Bazel 项目使用 vendor 目录离线构建。构建过程依然不会下载任何内容。",
     new_status:
-      '这些功能已在 <a href="https://github.com/HenryCooper86/oxfuzz" rel="noopener">main 分支</a>，但不包含在下方的 v{{VERSION}} 安装包中。想现在使用，请<a href="https://github.com/HenryCooper86/oxfuzz/blob/main/docs/guides/INSTALL.md" rel="noopener">从源码构建</a>。全部改动见<a href="https://github.com/HenryCooper86/oxfuzz/blob/main/CHANGELOG.md" rel="noopener">更新日志</a>。',
+      '这些功能属于 <code>oxfuzz</code> 命令行工具，下方的桌面安装包不包含它。请在 v0.9.8 标签处<a href="https://github.com/HenryCooper86/oxfuzz/blob/main/docs/guides/INSTALL.md" rel="noopener">从源码安装</a>。全部改动见<a href="https://github.com/HenryCooper86/oxfuzz/blob/main/CHANGELOG.md" rel="noopener">更新日志</a>。',
 
     control_title: "模糊测试运行的是不可信代码，控制权始终在你手里。",
     control_1_title: "沙箱隔离",

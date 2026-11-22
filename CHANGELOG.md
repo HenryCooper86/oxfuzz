@@ -10,6 +10,8 @@ retain only the current release; older entries remain here as the record.
 
 ## Unreleased
 
+## 0.9.8 - 2026-11-22
+
 ### Added
 
 - Sanitizers: MemorySanitizer and ThreadSanitizer builds, beside

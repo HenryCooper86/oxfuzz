@@ -1,4 +1,4 @@
-# oxfuzz 0.9.7 sandbox build kit
+# oxfuzz 0.9.8 sandbox build kit
 
 This kit builds the local Docker image required by the desktop app. It contains
 only the sandbox recipe, verification scripts, Clang helper source, bundled
@@ -14,7 +14,7 @@ Run from this directory:
 
     ./scripts/build-sandbox.sh
 
-Keep the resulting image named oxfuzz/fuzz-sandbox:0.2.2. Start oxfuzz, configure
+Keep the resulting image named oxfuzz/fuzz-sandbox:0.2.3. Start oxfuzz, configure
 a provider, and check sandbox readiness in Settings before opening a project.
 Every generated harness still requires the application's review and human
 approval flow. Do not execute generated harnesses on the host.

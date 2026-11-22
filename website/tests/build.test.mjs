@@ -170,7 +170,7 @@ test("the workflow gallery shows four captures that exist, and a recording", asy
   }
 });
 
-test("the page lists what is new on main and says the downloads lack it", async () => {
+test("the page lists what is new and says the desktop packages lack the CLI", async () => {
   const root = await previewBuild();
   try {
     const repository = "https://github.com/HenryCooper86/oxfuzz";
@@ -189,11 +189,12 @@ test("the page lists what is new on main and says the downloads lack it", async 
         "/blob/main/docs/guides/INSTALL.md",
       ])
         assert.ok(section[0].includes(`${repository}${path}`), path);
-      // The packages on this page predate the section; it has to say so.
+      // The desktop packages do not carry the command-line tool these
+      // features belong to; the section has to say where to get it.
       assert.match(section[0], /v\d+\.\d+\.\d+/);
     }
     const english = await readFile(join(root, "dist/index.html"), "utf8");
-    assert.match(english, /not in the v\d+\.\d+\.\d+ downloads/);
+    assert.match(english, /not in the desktop packages below/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
