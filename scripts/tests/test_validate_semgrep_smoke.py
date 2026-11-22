@@ -98,6 +98,50 @@ for argument in sys.argv:
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Verified regular, symlink-safe, bounded Semgrep JSON", result.stdout)
 
+    # Windows Python has no O_NOFOLLOW, O_NONBLOCK or O_CLOEXEC. The validator
+    # is run there by scripts/build-sandbox.sh, so it must work without them
+    # and still refuse a symbolic link.
+    def run_validator_without_posix_open_flags(
+        self, report_path: pathlib.Path
+    ) -> subprocess.CompletedProcess[str]:
+        program = (
+            "import os, runpy, sys\n"
+            "for flag in ('O_NOFOLLOW', 'O_NONBLOCK', 'O_CLOEXEC'):\n"
+            "    delattr(os, flag)\n"
+            f"sys.argv = [{str(VALIDATOR)!r}, {str(report_path)!r}, {str(OUTPUT_LIMIT_BYTES)!r}]\n"
+            f"runpy.run_path({str(VALIDATOR)!r}, run_name='__main__')\n"
+        )
+        return subprocess.run(
+            ["python3", "-c", program], check=False, capture_output=True, text=True, timeout=5
+        )
+
+    def test_report_is_accepted_on_a_host_without_posix_open_flags(self) -> None:
+        report = {
+            "results": [{"check_id": "raptor-insecure-api-gets", "path": "vulnerable.c"}],
+            "errors": [],
+            "paths": {"scanned": ["clean.c", "vulnerable.c"]},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            report_path = pathlib.Path(directory) / "semgrep.json"
+            report_path.write_text(json.dumps(report), encoding="utf-8")
+
+            result = self.run_validator_without_posix_open_flags(report_path)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Verified regular, symlink-safe, bounded Semgrep JSON", result.stdout)
+
+    def test_symlink_is_rejected_on_a_host_without_posix_open_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = pathlib.Path(directory) / "elsewhere.json"
+            target.write_text("{}", encoding="utf-8")
+            report_path = pathlib.Path(directory) / "semgrep.json"
+            report_path.symlink_to(target)
+
+            result = self.run_validator_without_posix_open_flags(report_path)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Semgrep report is not a regular file", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

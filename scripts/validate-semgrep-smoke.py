@@ -10,10 +10,15 @@ import sys
 
 def read_regular_bounded(report_path: pathlib.Path, limit: int) -> bytes:
     """Open a report without blocking on special files and read at most limit bytes."""
-    report_fd = os.open(
-        report_path,
-        os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOFOLLOW,
-    )
+    # Windows Python has none of the three POSIX flags and opens in text mode
+    # unless O_BINARY is given. Without O_NOFOLLOW the link check is a separate
+    # step there; the container that wrote the report has exited by then.
+    flags = os.O_RDONLY
+    for name in ("O_NONBLOCK", "O_CLOEXEC", "O_NOFOLLOW", "O_BINARY"):
+        flags |= getattr(os, name, 0)
+    if not hasattr(os, "O_NOFOLLOW") and stat.S_ISLNK(os.lstat(report_path).st_mode):
+        raise SystemExit("Semgrep report is not a regular file")
+    report_fd = os.open(report_path, flags)
     report_stat = os.fstat(report_fd)
     if not stat.S_ISREG(report_stat.st_mode):
         os.close(report_fd)
