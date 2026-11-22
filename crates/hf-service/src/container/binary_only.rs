@@ -203,10 +203,22 @@ pub fn elf_machine(image: &[u8]) -> Result<ElfMachine, ClassifiedError> {
     }
 }
 
+/// What a Windows drive mounted into a WSL 2 container engine stores in
+/// place of a colon, which a Windows file name cannot hold. The fuzzer writes
+/// `id:000000,sig:11` in the container; the host then lists the file with
+/// this character where each colon was.
+const WINDOWS_MOUNT_COLON: char = '\u{f03a}';
+
+/// An AFL++ output file name as the fuzzer wrote it, whichever host lists it.
+fn fuzzer_file_name(name: &str) -> String {
+    name.replace(WINDOWS_MOUNT_COLON, ":")
+}
+
 /// The signal AFL++ recorded in a crash file name (`id:000000,sig:11,...`).
 #[must_use]
 pub fn crash_file_signal(name: &str) -> Option<u32> {
-    name.split(',')
+    fuzzer_file_name(name)
+        .split(',')
         .find_map(|field| field.strip_prefix("sig:"))
         .and_then(|value| value.parse().ok())
         .filter(|signal| (1..=64).contains(signal))
@@ -618,7 +630,7 @@ fn saved_crashes(output: &Path) -> Vec<(PathBuf, Option<u32>)> {
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
         .filter_map(|entry| {
-            let name = entry.file_name().to_string_lossy().into_owned();
+            let name = fuzzer_file_name(&entry.file_name().to_string_lossy());
             name.starts_with("id:")
                 .then(|| (entry.path(), crash_file_signal(&name)))
         })
@@ -1753,6 +1765,31 @@ mod tests {
         assert_eq!(
             found.iter().map(|(_, signal)| *signal).collect::<Vec<_>>(),
             [Some(11), Some(6)]
+        );
+    }
+
+    // Seen on a Windows Server 2025 host with a WSL 2 engine on 2026-11-22:
+    // a file the fuzzer names `id:000001,sig:11,...` appears on the Windows
+    // side with U+F03A in place of each colon.
+    #[test]
+    fn crash_files_written_through_a_windows_drive_mount_are_recognized() {
+        let root = tempfile::tempdir().unwrap();
+        let crashes = root.path().join("default/crashes");
+        std::fs::create_dir_all(&crashes).unwrap();
+        std::fs::write(crashes.join("README.txt"), b"how to").unwrap();
+        std::fs::write(
+            crashes.join("id\u{f03a}000000,sig\u{f03a}11,src\u{f03a}000003"),
+            b"a",
+        )
+        .unwrap();
+        let found = saved_crashes(root.path());
+        assert_eq!(
+            found.iter().map(|(_, signal)| *signal).collect::<Vec<_>>(),
+            [Some(11)]
+        );
+        assert_eq!(
+            crash_file_signal("id\u{f03a}000001,sig\u{f03a}06,src\u{f03a}000000"),
+            Some(6)
         );
     }
 
