@@ -1,0 +1,68 @@
+{
+  "schema_version": 3,
+  "claim": "userspace_engines",
+  "candidate_commit": "89c2bdb533faa89f34944732d4e3b162d5878674",
+  "tag": "v0.9.9",
+  "qualification_commit": "89c2bdb533faa89f34944732d4e3b162d5878674",
+  "qualification_patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "candidate_delta": "None. The qualification ran in a separate worktree checked out at the tag commit and recorded that commit and an empty working-tree patch (the digest above is that of an empty patch).",
+  "source_sha256": "a21529ba223ec0a03b349e9f78b879eed69dc60d8d130dbac1b97fb7bf05a591",
+  "status": "passed",
+  "started_at": "2026-11-22T20:17:24.930598+00:00",
+  "ended_at": "2026-11-22T20:19:57.955908+00:00",
+  "platform": "macOS-27.2.1-arm64-arm-64bit",
+  "sandbox_image": {
+    "reference": "oxfuzz/fuzz-sandbox:0.2.3",
+    "id": "sha256:06af564185261a34f77de51f71b325fa9f73947690f8a71cee3c52da9d668956",
+    "architecture": "linux/arm64",
+    "distribution": "Built locally with scripts/build-sandbox.sh; not published to a registry."
+  },
+  "cycles": 1,
+  "cpu_cores": 1,
+  "memory_mib": 2048,
+  "smoke_and_replay_duration_secs": 10,
+  "review": "Normal configured provider review passed before execution; explicit human approval was supplied for this exact source pair on 2026-11-23.",
+  "cleanup": "verified_by_fixture",
+  "engines": {
+    "libfuzzer": {
+      "smoke_passed": true,
+      "smoke_duration_secs": 10,
+      "smoke_execs_per_sec": 1048576.0,
+      "smoke_crashes": 0,
+      "stop_ms": 610,
+      "campaign_run_id": "89614a8c-d688-4d51-9caa-b505cd9d0c67",
+      "replay_run_id": "27c821bc-9eb0-41ae-803d-549ac2a3c7b4",
+      "binary_sha256": "4bf4a4056cdb4b02400bd74b21261ce2f00b543fd47c1231d3ed8116858d63a2"
+    },
+    "afl++": {
+      "smoke_passed": true,
+      "smoke_duration_secs": 10,
+      "smoke_execs_per_sec": 231046.0,
+      "smoke_crashes": 0,
+      "stop_ms": 2449,
+      "campaign_run_id": "dceab821-541d-4afa-a55e-4ad729ccd6ae",
+      "replay_run_id": "2ff833ea-085b-4a53-8c83-dc54ed442af5",
+      "binary_sha256": "87bc80a92dc98d0a254692a4e3f796a8f483e425564ffd01cde09584cc6ffb04"
+    },
+    "honggfuzz": {
+      "smoke_passed": true,
+      "smoke_duration_secs": 10,
+      "smoke_execs_per_sec": 133727.0,
+      "smoke_crashes": 0,
+      "stop_ms": 361,
+      "campaign_run_id": "eaf55ae3-56a8-40dd-8fea-a0c250d0c2cf",
+      "replay_run_id": "f6989c32-3273-4277-aa2d-2d7ca90934af",
+      "binary_sha256": "cf29269db3e44e6987f10d0e988aa437c3c0fe3e21202d493378cd80b1a1a054"
+    }
+  },
+  "related_records": {
+    "language_and_binary_engines": "https://oxfuzz.bionicloud.net/acceptance/v0.9.8/language-and-binary-engines.json"
+  },
+  "limitations": [
+    "One short cycle per engine does not establish long-duration stability or a statistical latency percentile.",
+    "No crashes occurred; crash reproduction and symbolization are not claimed by this cycle.",
+    "Executed on macOS arm64 with a Linux arm64 Docker sandbox; not a Windows or Linux desktop installation test.",
+    "This cycle covers C sources on libFuzzer, AFL++ and honggfuzz. The Go, Python, Java, JavaScript and binary-only engines were not rerun for 0.9.9; their last live results are the 0.9.8 related record, made on a different commit. 0.9.9 changes how the desktop app reaches those engines, not the engines.",
+    "The qualification drives the service operations from a test, not from the desktop app."
+  ]
+}

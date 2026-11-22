@@ -1,0 +1,49 @@
+{
+  "schema_version": 3,
+  "claim": "installed_clients",
+  "candidate_commit": "89c2bdb533faa89f34944732d4e3b162d5878674",
+  "tag": "v0.9.9",
+  "local_build_commit": "89c2bdb533faa89f34944732d4e3b162d5878674",
+  "production_delta": "None known. The local build was made with scripts/build-app.sh in a separate worktree checked out at the tag commit; the engine qualification that ran in that worktree afterwards recorded an empty working-tree patch. No digest was taken for the build itself. The final release installer was built by the release workflow from the tag.",
+  "platform": "macOS arm64",
+  "version_observed": "0.9.9",
+  "local_executable_sha256": "fff9d67c81cfdbe8891dc57bd6b98f05de263d59092f1d52e4bfcfb3353dcaef",
+  "observed_on": "2026-11-22",
+  "observed": {
+    "local_build": "codesign --verify --deep --strict passed and the DMG passed hdiutil verify. Started against empty scratch data: the process stayed up for 14 seconds, applied all 54 migrations and exited on a termination request. The window was read through the macOS accessibility interface by the release agent: the sidebar lists every section including the new Binary page, the footer reads oxfuzz v0.9.9, and the Automation page shows the controls for authorizing scheduled runs on another server and for starting the REST server.",
+    "development_build_walk": "On 2026-11-22 and 23, before the release commit, a debug build of the same desktop changes was driven through the accessibility interface on isolated data with a small C project. Observed working from the app: authorizing and withdrawing scheduled runs against a running oxfuzz server; discovery with the model policy set to require and to off; harness generation and sandbox compilation with UBSan and ASan; a smoke test with the audited model-review bypass, which found the planted crash; a triage scan; the readiness check; saving and clearing a dictionary; a refused CI gate; a one-minute binary-only session (209,115 executions); starting and stopping the REST server (401 without the token, 200 on /health with it).",
+    "not_observed": [
+      "A campaign, a bisection and a concolic enrichment completing from the desktop app. Each reached the service and was refused because no harness had been promoted; the promotion was not given during the walk, so their success path from the app is not confirmed. They are covered by the service's tests and by the request-shape tests of the desktop commands.",
+      "Go, Python, Java and JavaScript runs started from the desktop app",
+      "A launch against the existing per-user data, and any migration of earlier data",
+      "First-run setup wizard",
+      "Windows and Linux desktop installations",
+      "Physical-bench automotive operations",
+      "syzkaller campaigns from the desktop app"
+    ]
+  },
+  "final_release_installer": {
+    "workflow_run": 45069025483,
+    "candidate_commit": "89c2bdb533faa89f34944732d4e3b162d5878674",
+    "file": "oxfuzz_0.9.9_aarch64.dmg",
+    "sha256": "2238b64172ebb3d71755eb2f38439c3dd9ea1765c65a117cc7a90fbd7ede7dc5",
+    "executable_sha256": "0a28a9f20bb4d38fbc873bc7c5add5c822deded86c7899265c527a474baf1ff5",
+    "observed_on": "2026-11-22",
+    "checks": [
+      "Downloaded asset SHA-256 matches GitHub metadata, as do the other six installers and the two .app.tar.gz archives",
+      "DMG verification and read-only mount succeeded; the Intel DMG also passed verification",
+      "Copied app passes codesign --verify --deep --strict (ad-hoc signature); bundle version 0.9.9; arm64 executable",
+      "Started from the copy against empty scratch data: the process stayed up for 14 seconds, applied all 54 migrations and exited on a termination request",
+      "Window read through the accessibility interface: full sidebar including Binary, footer oxfuzz v0.9.9, and the Automation page with the remote authorization and REST server controls; the Binary, Run, Harness, Corpus, Triage and Settings pages opened",
+      "Not installed to /Applications and not started against the existing per-user data",
+      "No project was opened and no harness, run or campaign was executed from the installer build"
+    ]
+  },
+  "limitations": [
+    "The window was read by the release agent through the accessibility interface, not looked at by the maintainer.",
+    "The functional walk of the new desktop controls was made on a development build before the release commit, not on the final installer.",
+    "Only the macOS Apple silicon installer was started; the other packages were built and digest-checked only.",
+    "macOS packages are ad-hoc signed and not notarized; Windows packages are unsigned.",
+    "The oxfuzz command-line tool, its terminal interface and its JSON output are not in the desktop packages."
+  ]
+}
