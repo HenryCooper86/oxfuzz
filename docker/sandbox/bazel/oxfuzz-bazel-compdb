@@ -1,0 +1,251 @@
+#!/usr/bin/env python3
+"""Write compile_commands.json for the Bazel workspace in the current directory.
+
+Usage: oxfuzz-bazel-compdb <output path>
+
+The sandbox has no network, so the workspace must carry its dependencies in
+a Bazel vendor directory (`bazel vendor --vendor_dir=<dir> //...`, run
+beforehand on a machine with network access). One `bazel aquery` reports the
+compile command of every C and C++ target and of the C and C++ libraries
+those targets depend on; no action is executed. Every vendored repository is
+pinned first, so Bazel uses it as it is: the fingerprint Bazel keeps beside
+each vendored repository differs between Bazel builds for different
+platforms, and without the pin a directory vendored on another machine is
+treated as out of date and fetched again. Paths are written relative
+to the workspace: an `external/<repository>` path becomes the vendored copy,
+and paths into Bazel's output tree are left out because nothing has been
+built. Compile actions of build tools (the exec configuration) are left out:
+they are not part of the code under test.
+"""
+
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+
+OUTPUT_USER_ROOT = "/tmp/oxfuzz-bazel"
+VENDOR_FILE = "VENDOR.bazel"
+MARKER_SUFFIX = ".marker"
+# A canonical repository name, as Bazel writes it in a marker file name.
+REPOSITORY_NAME = re.compile(r"[A-Za-z0-9_.+~-]+")
+VENDOR_SEARCH_DEPTH = 3
+QUERY = 'mnemonic("CppCompile", deps(//...))'
+INCLUDE_FLAGS = ("-I", "-iquote", "-isystem")
+# Flags that take the following token as their value and only describe the
+# output of the one Bazel action.
+OUTPUT_FLAGS_WITH_VALUE = ("-MF", "-o")
+OUTPUT_FLAGS = ("-MD", "-MMD", "-c")
+OUTPUT_FLAG_PREFIXES = ("-frandom-seed=",)
+# Bazel redefines the compiler's date macros so its outputs are reproducible;
+# these are not settings of the project.
+REPRODUCIBILITY_DEFINES = ("-D__DATE__=", "-D__TIMESTAMP__=", "-D__TIME__=")
+
+
+def fail(message):
+    print("oxfuzz-bazel-compdb: " + message, file=sys.stderr)
+    sys.exit(2)
+
+
+def configured_vendor_dir():
+    """The vendor directory the workspace's own .bazelrc names, if any."""
+    try:
+        with open(".bazelrc", encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        return None
+    for line in text.splitlines():
+        line = line.split("#", 1)[0]
+        match = re.search(r"--vendor_dir[= ](\S+)", line)
+        if match:
+            return match.group(1)
+    return None
+
+
+def discovered_vendor_dirs():
+    found = []
+    for root, directories, files in os.walk("."):
+        depth = 0 if root == "." else root.count(os.sep)
+        if depth >= VENDOR_SEARCH_DEPTH:
+            directories[:] = []
+        if VENDOR_FILE in files and root != ".":
+            found.append(os.path.normpath(root))
+            directories[:] = []
+    return sorted(found)
+
+
+def vendor_dir():
+    configured = configured_vendor_dir()
+    if configured is not None:
+        if not os.path.isdir(configured):
+            fail(".bazelrc names the vendor directory '%s', which is not in the project" % configured)
+        return os.path.normpath(configured)
+    found = discovered_vendor_dirs()
+    if not found:
+        fail(
+            "this workspace carries no Bazel vendor directory. The sandbox is offline: on a "
+            "machine with network access run `bazel vendor --vendor_dir=third_party/bazel //...` "
+            "in the workspace and keep that directory with the project"
+        )
+    if len(found) > 1:
+        fail(
+            "more than one Bazel vendor directory (%s); name one with "
+            "`common --vendor_dir=<dir>` in .bazelrc" % ", ".join(found)
+        )
+    return found[0]
+
+
+def pin_vendored_repositories(vendor):
+    """Pin every repository the vendor directory holds, in its VENDOR.bazel.
+
+    The file is the one in the sandbox's copy of the project. A repository
+    the file already names is left alone.
+    """
+    vendor_file = os.path.join(vendor, VENDOR_FILE)
+    try:
+        with open(vendor_file, encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError as error:
+        fail("cannot read %s: %s" % (vendor_file, error))
+    named = set(re.findall(r"@@([A-Za-z0-9_.+~-]+)", text))
+    missing = []
+    for entry in sorted(os.listdir(vendor)):
+        if not (entry.startswith("@") and entry.endswith(MARKER_SUFFIX)):
+            continue
+        name = entry[1 : -len(MARKER_SUFFIX)]
+        if not REPOSITORY_NAME.fullmatch(name) or name in named:
+            continue
+        if os.path.isdir(os.path.join(vendor, name)):
+            missing.append(name)
+    if not missing:
+        return
+    lines = ["" if text.endswith("\n") or not text else "\n"]
+    lines.append("# Pinned by oxfuzz-bazel-compdb for this offline query.\n")
+    lines.extend('pin("@@%s")\n' % name for name in missing)
+    try:
+        with open(vendor_file, "a", encoding="utf-8") as handle:
+            handle.write("".join(lines))
+    except OSError as error:
+        fail("cannot pin the vendored repositories in %s: %s" % (vendor_file, error))
+
+
+def workspace_path(path, vendor):
+    """A path of the action as it exists in the workspace, or None."""
+    if path.startswith("bazel-out/") or os.path.isabs(path):
+        return None
+    if path.startswith("external/"):
+        vendored = os.path.join(vendor, path[len("external/"):])
+        return vendored if os.path.exists(vendored) else None
+    return path
+
+
+def compile_arguments(arguments, vendor):
+    """The portable part of one compile action: (source, arguments)."""
+    source = None
+    kept = [arguments[0]]
+    index = 1
+    while index < len(arguments):
+        token = arguments[index]
+        index += 1
+        if token == "-c" and index < len(arguments):
+            source = arguments[index]
+            index += 1
+            continue
+        if token in OUTPUT_FLAGS_WITH_VALUE:
+            index += 1
+            continue
+        if token in OUTPUT_FLAGS or token.startswith(OUTPUT_FLAG_PREFIXES):
+            continue
+        if token.startswith(REPRODUCIBILITY_DEFINES):
+            continue
+        flag = next((name for name in INCLUDE_FLAGS if token.startswith(name)), None)
+        if flag is not None:
+            if token == flag:
+                if index >= len(arguments):
+                    break
+                value = arguments[index]
+                index += 1
+            else:
+                value = token[len(flag):]
+            directory = workspace_path(value, vendor)
+            if directory is not None:
+                # Every search path is written as -I: quote and system search
+                # paths differ only in diagnostics for a fuzzing build.
+                kept.append("-I" + directory)
+            continue
+        kept.append(token)
+    if source is None:
+        return None
+    source = workspace_path(source, vendor)
+    if source is None:
+        return None
+    return source, kept + ["-c", source]
+
+
+def main():
+    if len(sys.argv) != 2:
+        fail("usage: oxfuzz-bazel-compdb <output path>")
+    output = sys.argv[1]
+    if not os.path.isfile("MODULE.bazel"):
+        fail("the current directory has no MODULE.bazel")
+    vendor = vendor_dir()
+    pin_vendored_repositories(vendor)
+    with tempfile.TemporaryFile() as result:
+        command = [
+            "bazel",
+            "--output_user_root=" + OUTPUT_USER_ROOT,
+            "aquery",
+            "--vendor_dir=" + vendor,
+            "--experimental_convenience_symlinks=ignore",
+            "--color=no",
+            "--curses=no",
+            "--noshow_progress",
+            "--output=jsonproto",
+            QUERY,
+        ]
+        status = subprocess.run(command, stdout=result, check=False).returncode
+        if status != 0:
+            fail(
+                "bazel aquery exited %d. A fetch that failed means the vendor directory '%s' "
+                "does not hold everything these targets need: run `bazel vendor` again for "
+                "//... with the same Bazel major version (the image has 8 and 9; .bazelversion "
+                "selects one)" % (status, vendor)
+            )
+        result.seek(0)
+        try:
+            graph = json.load(result)
+        except ValueError as error:
+            fail("bazel aquery wrote output that is not JSON: %s" % error)
+    directory = os.getcwd()
+    entries = []
+    seen = set()
+    tools = {
+        configuration.get("id")
+        for configuration in graph.get("configuration", [])
+        if configuration.get("isTool")
+    }
+    for action in graph.get("actions", []):
+        if action.get("configurationId") in tools:
+            continue
+        compiled = compile_arguments(action.get("arguments") or [""], vendor)
+        if compiled is None:
+            continue
+        source, arguments = compiled
+        if source in seen:
+            continue
+        seen.add(source)
+        entries.append({"directory": directory, "file": source, "arguments": arguments})
+    if not entries:
+        fail("no C or C++ compile action was found for the targets under //...")
+    parent = os.path.dirname(output)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(output, "w", encoding="utf-8") as handle:
+        json.dump(entries, handle, indent=2)
+        handle.write("\n")
+    print("oxfuzz-bazel-compdb: wrote %d compile commands to %s" % (len(entries), output))
+
+
+if __name__ == "__main__":
+    main()

@@ -92,6 +92,67 @@ pub(super) fn coverage_signature(workspace: &Path) -> u64 {
     hasher.finish()
 }
 
+/// The line-by-line coverage of one target, rendered for hand-off.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoverageLineReport {
+    /// An lcov tracefile with project-relative `SF:` paths.
+    pub lcov: String,
+    /// One self-contained HTML page: no script, no external resource.
+    pub html: String,
+    /// Files in the report.
+    pub files: usize,
+    /// Files left out because they exceeded a report bound.
+    pub skipped_files: usize,
+    pub lines_hit: usize,
+    pub lines_total: usize,
+}
+
+/// Where the sandbox mounts the harness workspace; every staged source the
+/// coverage build compiles is recorded under it.
+const SANDBOX_WORKSPACE_PREFIX: &str = "/work/";
+
+/// Source text shown for one file of a coverage report.
+const MAX_REPORT_SOURCE_BYTES: u64 = 4 * 1024 * 1024;
+
+/// The path a coverage report shows for a file `llvm-cov` recorded: relative
+/// to the workspace (which mirrors the project layout) when it was staged
+/// there, otherwise unchanged (a system header, for example).
+pub(super) fn report_display_path(recorded: &str) -> String {
+    recorded
+        .strip_prefix(SANDBOX_WORKSPACE_PREFIX)
+        .unwrap_or(recorded)
+        .to_owned()
+}
+
+/// The staged text of a file `llvm-cov` recorded, read from the workspace the
+/// measurement compiled. `None` when the path is not a workspace path, leaves
+/// the workspace (a `..` component or a symlink), is not a regular file, or is
+/// larger than the report shows.
+pub(super) fn staged_report_source(workspace: &Path, recorded: &str) -> Option<String> {
+    let relative = Path::new(recorded.strip_prefix(SANDBOX_WORKSPACE_PREFIX)?);
+    if relative.as_os_str().is_empty()
+        || relative
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+    let path = workspace.join(relative);
+    // The export comes from an untrusted binary: resolve the path and require
+    // it to stay inside the workspace, so a staged symlink cannot make the
+    // report read a host file.
+    let resolved = path.canonicalize().ok()?;
+    if !resolved.starts_with(workspace.canonicalize().ok()?) {
+        return None;
+    }
+    let metadata = std::fs::metadata(&resolved).ok()?;
+    if !metadata.is_file() || metadata.len() > MAX_REPORT_SOURCE_BYTES {
+        return None;
+    }
+    let bytes = std::fs::read(&resolved).ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
 /// Parse `llvm-cov export` JSON, returning the names of functions with a
 /// non-zero execution count (the covered set).
 pub(super) fn parse_covered_functions(json: &str) -> Vec<String> {
@@ -121,7 +182,7 @@ pub(super) fn parse_covered_functions(json: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod coverage_tests {
-    use super::parse_covered_functions;
+    use super::{parse_covered_functions, report_display_path, staged_report_source};
 
     #[test]
     fn parses_covered_functions_from_llvm_cov_json() {
@@ -143,6 +204,50 @@ mod coverage_tests {
             {"functions":[{"name":"second","count":2},{"name":"first","count":3}]}
         ]}"#;
         assert_eq!(parse_covered_functions(json), vec!["first", "second"]);
+    }
+
+    #[test]
+    fn report_paths_are_workspace_relative() {
+        assert_eq!(report_display_path("/work/src/parse.c"), "src/parse.c");
+        assert_eq!(
+            report_display_path("/usr/include/stdio.h"),
+            "/usr/include/stdio.h"
+        );
+    }
+
+    #[test]
+    fn report_source_is_read_only_from_inside_the_workspace() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("ws");
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        std::fs::write(workspace.join("src/parse.c"), "int x;\n").unwrap();
+        std::fs::write(root.path().join("secret.txt"), "host secret").unwrap();
+
+        assert_eq!(
+            staged_report_source(&workspace, "/work/src/parse.c").as_deref(),
+            Some("int x;\n")
+        );
+        // Not a workspace path, a parent escape, a directory, a missing file.
+        assert_eq!(staged_report_source(&workspace, "/etc/hosts"), None);
+        assert_eq!(
+            staged_report_source(&workspace, "/work/../secret.txt"),
+            None
+        );
+        assert_eq!(staged_report_source(&workspace, "/work/src"), None);
+        assert_eq!(staged_report_source(&workspace, "/work/absent.c"), None);
+        assert_eq!(staged_report_source(&workspace, "/work/"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn report_source_does_not_follow_a_symlink_out_of_the_workspace() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("ws");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(root.path().join("secret.txt"), "host secret").unwrap();
+        std::os::unix::fs::symlink(root.path().join("secret.txt"), workspace.join("link.c"))
+            .unwrap();
+        assert_eq!(staged_report_source(&workspace, "/work/link.c"), None);
     }
 
     #[test]

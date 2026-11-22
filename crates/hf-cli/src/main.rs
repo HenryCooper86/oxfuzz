@@ -30,8 +30,8 @@ use crate::commands::campaign::cmd_health;
 #[cfg(feature = "campaign-trust")]
 use crate::commands::campaign::cmd_trust;
 use crate::commands::campaign::{
-    cmd_campaign, cmd_ci, cmd_coverage, cmd_defectdojo, cmd_ingest, cmd_regress, cmd_report,
-    cmd_repro, cmd_sarif,
+    cmd_campaign, cmd_ci, cmd_coverage, cmd_defectdojo, cmd_ingest, cmd_issue, cmd_regress,
+    cmd_report, cmd_repro, cmd_sarif,
 };
 use crate::commands::discovery::cmd_discover;
 use crate::commands::fuzz::cmd_fuzz;
@@ -208,7 +208,11 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
             cmplog,
             replay,
             ai,
+            dict,
         }) => {
+            if let (Some(file), Some(target)) = (dict.as_deref(), target.as_deref()) {
+                commands::campaign::cmd_dict_before_run(&project, target, file).await?;
+            }
             cmd_run(
                 project,
                 target.as_deref(),
@@ -285,9 +289,7 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
             lang,
             from,
         }) => cmd_corpus(project, &target, &op, &lang, from.as_deref()).await?,
-        Commands::Coverage(args::CoverageArgs { project, target }) => {
-            cmd_coverage(project, &target).await?;
-        }
+        Commands::Coverage(args) => cmd_coverage(args).await?,
         #[cfg(feature = "campaign-trust")]
         Commands::Trust(args::TrustArgs { run }) => cmd_trust(&run).await?,
         #[cfg(feature = "unreached-surface")]
@@ -334,6 +336,17 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
             target,
             test,
         }) => cmd_defectdojo(project, target.as_deref(), test).await?,
+        Commands::Issue(args) => cmd_issue(args).await?,
+        Commands::Dict(args) => commands::campaign::cmd_dict(args).await?,
+        Commands::Kernel(args) => commands::campaign::cmd_kernel(args).await?,
+        #[cfg(feature = "binary-only-fuzzing")]
+        Commands::Binary(args) => commands::campaign::cmd_binary(args).await?,
+        #[cfg(feature = "binary-only-fuzzing")]
+        Commands::BinaryIssue(args) => commands::campaign::cmd_binary_issue(args).await?,
+        #[cfg(feature = "crash-bisection")]
+        Commands::Bisect(args) => commands::campaign::cmd_bisect(args).await?,
+        #[cfg(feature = "crash-alerts")]
+        Commands::Notify(args) => commands::campaign::cmd_notify(args).await?,
         Commands::Export(args::ExportArgs { project, output }) => {
             cmd_export(project, output).await?;
         }

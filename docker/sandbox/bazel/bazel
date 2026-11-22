@@ -1,0 +1,23 @@
+#!/bin/sh
+# Starts the pinned Bazel whose major version the workspace asks for in
+# .bazelversion; a workspace without that file gets the newest one. Nothing
+# is downloaded: the image carries exactly the releases under /opt/bazel.
+set -eu
+want=""
+dir="$PWD"
+while :; do
+  if [ -f "$dir/.bazelversion" ]; then
+    want="$(head -n 1 "$dir/.bazelversion" | tr -d '[:space:]')"
+    break
+  fi
+  [ "$dir" = "/" ] && break
+  dir="$(dirname "$dir")"
+done
+case "$want" in
+  "" | 9 | 9.*) exec /opt/bazel/bazel-9 "$@" ;;
+  8 | 8.*) exec /opt/bazel/bazel-8 "$@" ;;
+  *)
+    echo "oxfuzz: the sandbox image carries Bazel 8 and Bazel 9, and .bazelversion asks for '$want'" >&2
+    exit 64
+    ;;
+esac

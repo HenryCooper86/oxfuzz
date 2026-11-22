@@ -46,6 +46,10 @@ pub enum WeaknessClass {
     ResourceExhaustion,
     /// Memory never released (CWE-401).
     MemoryLeak,
+    /// CWE-457: a value read before anything wrote it.
+    UninitializedMemory,
+    /// CWE-362: unsynchronized concurrent access to shared memory.
+    RaceCondition,
     /// Other undefined behavior reported by `UBSan` (CWE-758).
     UndefinedBehavior,
     /// An assertion or abort reachable from input (CWE-617).
@@ -62,7 +66,7 @@ pub enum WeaknessClass {
 
 impl WeaknessClass {
     /// Every class, for exhaustive checks over the guidance table.
-    pub const ALL: [Self; 22] = [
+    pub const ALL: [Self; 24] = [
         Self::OutOfBoundsRead,
         Self::OutOfBoundsWrite,
         Self::StackBufferOverflow,
@@ -79,6 +83,8 @@ impl WeaknessClass {
         Self::ExcessiveAllocation,
         Self::ResourceExhaustion,
         Self::MemoryLeak,
+        Self::UninitializedMemory,
+        Self::RaceCondition,
         Self::UndefinedBehavior,
         Self::ReachableAssertion,
         Self::ExcessiveIteration,
@@ -113,6 +119,11 @@ impl WeaknessClass {
             Self::MemoryLeak => (
                 "CWE-401",
                 "Missing Release of Memory after Effective Lifetime",
+            ),
+            Self::UninitializedMemory => ("CWE-457", "Use of Uninitialized Variable"),
+            Self::RaceCondition => (
+                "CWE-362",
+                "Concurrent Execution using Shared Resource with Improper Synchronization",
             ),
             Self::UndefinedBehavior => ("CWE-758", "Reliance on Undefined Behavior"),
             Self::ReachableAssertion => ("CWE-617", "Reachable Assertion"),
@@ -160,6 +171,8 @@ pub fn classify(crash: &Crash) -> WeaknessClass {
         CrashKind::Ubsan => WeaknessClass::UndefinedBehavior,
         CrashKind::KernelBug => WeaknessClass::KernelBug,
         CrashKind::Leak => WeaknessClass::MemoryLeak,
+        CrashKind::Msan => WeaknessClass::UninitializedMemory,
+        CrashKind::Tsan => WeaknessClass::RaceCondition,
         CrashKind::Segv => WeaknessClass::NullDereference,
         CrashKind::Abort => WeaknessClass::ReachableAssertion,
         CrashKind::Timeout => WeaknessClass::ExcessiveIteration,
@@ -219,6 +232,10 @@ fn from_short_description(short: &str) -> Option<WeaknessClass> {
         W::ResourceExhaustion
     } else if has("leak") {
         W::MemoryLeak
+    } else if has("uninitialized") {
+        W::UninitializedMemory
+    } else if has("data race") || has("data-race") {
+        W::RaceCondition
     } else if has("timeout") {
         W::ExcessiveIteration
     } else if has("abort") || has("assert") {
@@ -365,6 +382,20 @@ const fn english(class: WeaknessClass) -> Guidance {
             &[
                 "Release the allocation reported by LeakSanitizer on every path, including early returns on error.",
                 "Use scoped cleanup (RAII, goto-cleanup blocks, defer) so error paths cannot skip the release.",
+            ],
+        ),
+        W::UninitializedMemory => (
+            "The code acts on memory it never wrote. The value is whatever was there before, so behavior varies between runs and can disclose earlier contents of the heap or stack.",
+            &[
+                "Initialize the object at its allocation or declaration; MemorySanitizer's origin trace names where it was created.",
+                "Check that every path, including short or truncated input, writes a field before it is read.",
+            ],
+        ),
+        W::RaceCondition => (
+            "Two threads access the same memory without synchronization and at least one writes. The outcome depends on timing and can corrupt state.",
+            &[
+                "Guard the shared object with one lock held for every access, or make it atomic.",
+                "Prefer passing ownership between threads over sharing mutable state.",
             ],
         ),
         W::UndefinedBehavior => (
@@ -534,6 +565,20 @@ const fn chinese(class: WeaknessClass) -> Guidance {
             &[
                 "在所有路径上释放 LeakSanitizer 报告的分配，包括出错提前返回的路径。",
                 "使用作用域清理（RAII、goto 清理块、defer），避免错误路径跳过释放。",
+            ],
+        ),
+        W::UninitializedMemory => (
+            "代码使用了从未写入的内存。其值是此前遗留的内容，因此每次运行的行为可能不同，并可能泄露堆或栈上的旧数据。",
+            &[
+                "在分配或声明处初始化该对象；MemorySanitizer 的来源追踪会指出它的创建位置。",
+                "确认每条路径（包括过短或被截断的输入）都在读取字段之前写入它。",
+            ],
+        ),
+        W::RaceCondition => (
+            "两个线程在没有同步的情况下访问同一块内存，且至少有一个在写入。结果取决于时序，可能破坏状态。",
+            &[
+                "用同一把锁保护对该共享对象的每一次访问，或将其改为原子类型。",
+                "优先在线程之间传递所有权，而不是共享可变状态。",
             ],
         ),
         W::UndefinedBehavior => (

@@ -314,15 +314,22 @@ fn collect_artifacts(run_dir: &Path, mode: IngestMode) -> Result<BoundedPaths, C
     let mut artifacts = BoundedPaths::default();
 
     if matches!(mode, IngestMode::Legacy)
-        || matches!(mode, IngestMode::Engine(engine) if matches!(engine, EngineKind::Honggfuzz | EngineKind::LibFuzzer))
+        || matches!(mode, IngestMode::Engine(engine) if matches!(engine, EngineKind::Honggfuzz | EngineKind::LibFuzzer | EngineKind::Atheris | EngineKind::Jazzer | EngineKind::JazzerJs))
     {
         collect_files(run_dir, &mut artifacts, |name| match mode {
             IngestMode::Legacy => is_libfuzzer_crash(name) || is_honggfuzz_crash(name),
             IngestMode::Engine(EngineKind::Honggfuzz) => is_honggfuzz_crash(name),
-            IngestMode::Engine(EngineKind::LibFuzzer) => is_libfuzzer_crash(name),
+            // Atheris, Jazzer and Jazzer.js write libFuzzer's own artifact
+            // names.
+            IngestMode::Engine(
+                EngineKind::LibFuzzer
+                | EngineKind::Atheris
+                | EngineKind::Jazzer
+                | EngineKind::JazzerJs,
+            ) => is_libfuzzer_crash(name),
             // Flat ingestion stays empty for AFL++ (nested instance dirs),
-            // syzkaller (per-bug directories), and Go's fuzzer (its own
-            // layout, to be defined from the qualified control evidence).
+            // syzkaller (per-bug directories), and Go's fuzzer (failing
+            // inputs under `testdata/fuzz/<FuzzXxx>/`, collected below).
             IngestMode::Engine(
                 EngineKind::AflPlusPlus | EngineKind::Syzkaller | EngineKind::GoNative,
             ) => false,
@@ -336,7 +343,56 @@ fn collect_artifacts(run_dir: &Path, mode: IngestMode) -> Result<BoundedPaths, C
         collect_afl_artifacts(run_dir, &mut artifacts)?;
     }
 
+    if matches!(mode, IngestMode::Engine(EngineKind::GoNative)) {
+        collect_go_artifacts(run_dir, &mut artifacts)?;
+    }
+
     Ok(artifacts)
+}
+
+/// Where `go test` writes failing fuzz inputs, relative to the directory the
+/// test binary ran in. The service runs the binary with the run's output
+/// directory as its working directory, so this sits under `run_dir`.
+pub const GO_FAILING_INPUT_DIR: &str = "testdata/fuzz";
+
+/// Collect the failing inputs of a Go native fuzzing run:
+/// `<run_dir>/testdata/fuzz/<FuzzXxx>/<hash>`, one corpus-encoded file per
+/// failure (Go 1.26.5 `internal/fuzz`, verified in the pinned sandbox image).
+/// Only regular directories named like a fuzz test and regular files named
+/// like a Go corpus hash are accepted.
+fn collect_go_artifacts(
+    run_dir: &Path,
+    artifacts: &mut BoundedPaths,
+) -> Result<(), ClassifiedError> {
+    let testdata = run_dir.join("testdata");
+    let root = testdata.join("fuzz");
+    if !is_regular_directory(&testdata) || !is_regular_directory(&root) {
+        return Ok(());
+    }
+    for entry in read_directory(&root)? {
+        let entry = entry.map_err(|error| ClassifiedError::Internal(error.to_string()))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| ClassifiedError::Internal(error.to_string()))?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !file_type.is_dir() || !is_go_fuzz_test_name(&name) {
+            continue;
+        }
+        collect_files(&entry.path(), artifacts, is_go_failing_input)?;
+    }
+    Ok(())
+}
+
+fn is_go_fuzz_test_name(name: &str) -> bool {
+    name.strip_prefix("Fuzz").is_some_and(|rest| {
+        !rest.is_empty() && rest.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
+/// Go names a failing input by a hex digest of its contents.
+fn is_go_failing_input(name: &str) -> bool {
+    (8..=64).contains(&name.len()) && name.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn collect_afl_artifacts(
@@ -876,5 +932,46 @@ mod tests {
             "crash ingestion followed its root symlink"
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn go_failing_inputs_are_collected_from_the_run_working_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let failing = dir.path().join("testdata/fuzz/FuzzParse");
+        std::fs::create_dir_all(&failing).unwrap();
+        std::fs::write(
+            failing.join("4f85edf10c3c3e2c"),
+            "go test fuzz v1\n[]byte(\"FUZ\\xe7\")\n",
+        )
+        .unwrap();
+        // Not a corpus hash, not a fuzz-test directory, and a libFuzzer name.
+        std::fs::write(failing.join("README"), "x").unwrap();
+        std::fs::create_dir_all(dir.path().join("testdata/fuzz/other")).unwrap();
+        std::fs::write(dir.path().join("testdata/fuzz/other/abcdef0123456789"), "x").unwrap();
+        std::fs::write(dir.path().join("crash-0123"), "x").unwrap();
+
+        let result = ingest_for_engine(
+            dir.path(),
+            EngineKind::GoNative,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        )
+        .unwrap();
+        let inputs: Vec<_> = result
+            .crashes
+            .iter()
+            .map(|crash| crash.input_path.clone())
+            .collect();
+        assert_eq!(inputs, vec![failing.join("4f85edf10c3c3e2c")]);
+        // Another engine's scan of the same directory does not pick it up.
+        let libfuzzer = ingest_for_engine(
+            dir.path(),
+            EngineKind::LibFuzzer,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        )
+        .unwrap();
+        assert_eq!(libfuzzer.crashes.len(), 1);
+        assert!(libfuzzer.crashes[0].input_path.ends_with("crash-0123"));
     }
 }

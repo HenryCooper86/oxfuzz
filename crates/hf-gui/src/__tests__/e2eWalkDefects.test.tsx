@@ -110,12 +110,13 @@ describe("labels that claimed more than the product does", () => {
     expect(chinese["runs.healthUnprocessed"]).toBe("收尾未完成");
   });
 
-  it("marks Go and Python as discovery-only in About", () => {
+  it("marks Go, Python, and Java as discovery-only in the app in About", () => {
     const about = source("../components/settings/AboutTab.tsx");
-    expect(about).not.toMatch(/<Badge>(Go|Python)<\/Badge>/);
+    expect(about).not.toMatch(/<Badge>(Go|Python|Java)<\/Badge>/);
+    expect(about).toContain('language: "Java"');
     expect(about).toContain("settings.about.discoveryOnly");
     const [english, chinese] = [enExtra, zhExtra];
-    expect(english["settings.about.discoveryOnly"]).toBe("{language} (discovery only)");
-    expect(chinese["settings.about.discoveryOnly"]).toBe("{language}（仅发现目标）");
+    expect(english["settings.about.discoveryOnly"]).toBe("{language} (discovery here, fuzzing from the CLI)");
+    expect(chinese["settings.about.discoveryOnly"]).toBe("{language}（此处仅发现目标，模糊测试请使用命令行）");
   });
 });

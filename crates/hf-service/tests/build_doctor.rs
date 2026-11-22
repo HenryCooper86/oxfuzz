@@ -49,6 +49,17 @@ fn every_marker_file_identifies_its_build_system() {
 }
 
 #[test]
+fn a_bazel_project_is_supported_only_with_its_module_file() {
+    let found = detect_build_systems(project(&["MODULE.bazel", "BUILD.bazel"]).path());
+    assert_eq!(found[0].build_system, BuildSystem::Bazel);
+    assert_eq!(found[0].status, BuildSystemStatus::Supported);
+
+    let found = detect_build_systems(project(&["WORKSPACE", "BUILD.bazel"]).path());
+    assert_eq!(found[0].build_system, BuildSystem::Bazel);
+    assert_eq!(found[0].status, BuildSystemStatus::UnsupportedInImage);
+}
+
+#[test]
 fn a_project_with_no_marker_is_unknown_and_never_guessed() {
     let dir = project(&["parser.c", "README.md"]);
     let found = detect_build_systems(dir.path());

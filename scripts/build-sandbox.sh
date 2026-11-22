@@ -5,7 +5,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-IMAGE="${OXFUZZ_SANDBOX_IMAGE:-oxfuzz/fuzz-sandbox:0.2.2}"
+IMAGE="${OXFUZZ_SANDBOX_IMAGE:-oxfuzz/fuzz-sandbox:0.2.3}"
 if [[ "$IMAGE" == "latest" || "$IMAGE" == *":latest" ]]; then
     echo "OXFUZZ_SANDBOX_IMAGE must use an explicit version tag" >&2
     exit 1
@@ -47,9 +47,12 @@ docker run "${run_args[@]}" \
     --mount "type=bind,src=${verification_output},dst=/work/output" \
     "$IMAGE" bash -lc '
         set -euo pipefail
-        for binary in clang afl-fuzz honggfuzz python3 syz-manager ssh scp qemu-system-aarch64 qemu-system-x86_64 casr-san casr-cluster cargo semgrep; do
+        for binary in clang afl-fuzz afl-qemu-trace honggfuzz python3 java javac jazzer jazzer-js bazel oxfuzz-bazel-compdb syz-manager ssh scp qemu-system-aarch64 qemu-system-x86_64 casr-san casr-cluster cargo semgrep; do
             command -v "$binary" >/dev/null
         done
+        python3 -I -c "import atheris"
+        test -f /opt/oxfuzz/msan-libcxx/lib/libc++.so.1
+        test -f /opt/oxfuzz/msan-libcxx/lib/libFuzzer-msan.a
         cargo fuzz --version >/dev/null
         test "$(semgrep --version --disable-version-check)" = "1.169.0"
         test -z "$(

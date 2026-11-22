@@ -89,6 +89,7 @@ config/providers.toml
 config/defectdojo.toml
 # Issue-tracker config may hold a direct Personal Access Token -- never commit it.
 config/issue_tracker.toml
+config/notifications.toml
 
 ### TypeScript incremental build cache
 *.tsbuildinfo

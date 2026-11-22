@@ -27,6 +27,7 @@ pub enum ProfileBuildSystem {
     Make,
     Meson,
     Autotools,
+    Bazel,
 }
 
 /// Dependency probe kinds, ordered for canonical serialization.
@@ -567,8 +568,12 @@ fn validate_profile(record: &ProjectBuildProfileRecord) -> Result<(), StorageErr
     if record.updated_at < record.created_at {
         return Err(invalid("build profile update predates creation"));
     }
-    if record.build_system == ProfileBuildSystem::Make && !record.cmake_definitions.is_empty() {
-        return Err(invalid("Make profile has CMake definitions"));
+    if matches!(
+        record.build_system,
+        ProfileBuildSystem::Make | ProfileBuildSystem::Bazel
+    ) && !record.cmake_definitions.is_empty()
+    {
+        return Err(invalid("Make or Bazel profile has CMake definitions"));
     }
     for (name, value) in &record.cmake_definitions {
         if name.is_empty()

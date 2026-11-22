@@ -10,7 +10,8 @@ configuration:
   coverage-stagnation, scheduling/session, coverage-regression policy, and the
   optional automotive sidecar policy.
 - `defectdojo.toml` -- DefectDojo connection and lifecycle settings.
-- `issue_tracker.toml` -- GitHub/GitLab crash issue integration.
+- `issue_tracker.toml` -- GitHub, GitLab, or Jira crash issue integration.
+- `notifications.toml` -- crash alert webhook (JSON or Slack-style body) for scheduled campaigns and `oxfuzz notify`. An empty `webhook_url` disables alerts; the URL must be https unless it is a loopback address.
 - `agents/*.toml` -- optional user agent definitions that add to or override
   the built-in agents. No template is shipped and `oxfuzz init` does not create
   this directory; see [Agent definitions](#agent-definitions).
@@ -234,12 +235,12 @@ Top level:
 
 | Key | Default | Notes |
 | --- | --- | --- |
-| `enabled_engines` | `["libfuzzer", "afl++", "honggfuzz", "syzkaller"]` | Canonical ids only; at least one |
+| `enabled_engines` | `["libfuzzer", "afl++", "honggfuzz", "syzkaller"]` | Canonical ids only; at least one. Add `"go-native"` to fuzz Go targets with Go's native fuzzer, `"atheris"` to fuzz Python targets with Atheris, `"jazzer"` to fuzz Java targets with Jazzer, and `"jazzer-js"` to fuzz JavaScript targets with Jazzer.js; none of the four is in the default set |
 | `default_engine` | `"libfuzzer"` | Must be enabled |
 | `default_duration_secs` | `60` | Must not exceed `sandbox.max_duration_secs` |
 | `default_timeout_ms` | `1000` | Per-input hang threshold, 1 to 3,600,000 |
 | `default_resume` | `false` | AFL++ only |
-| `default_sanitizer` | `"address"` | `address` or `undefined` |
+| `default_sanitizer` | `"address"` | `address`, `undefined`, `memory`, or `thread`. `memory` and `thread` build only for the engines and languages listed in the [Support Matrix](SUPPORT_MATRIX.md) |
 | `collect_function_coverage` | `true` in builds with the `proof-carrying` feature (the default CLI build) | About 4% throughput cost |
 
 `[fuzzing.sandbox]`:

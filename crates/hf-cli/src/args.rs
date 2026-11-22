@@ -97,6 +97,25 @@ pub(crate) enum Commands {
     Repro(ReproArgs),
     /// Push the latest run's triaged crashes to `DefectDojo` as findings.
     Defectdojo(DefectdojoArgs),
+    /// Draft or file one crash as an issue in the configured `GitHub` or
+    /// `GitLab` repository.
+    Issue(IssueArgs),
+    /// Show, set, or clear your own fuzzing dictionary for a target.
+    Dict(DictArgs),
+    /// Fuzz a Linux kernel with syzkaller in sandboxed qemu VMs.
+    Kernel(KernelArgs),
+    /// Fuzz an existing Linux binary without source (AFL++ QEMU mode).
+    #[cfg(feature = "binary-only-fuzzing")]
+    Binary(BinaryArgs),
+    /// Draft or file one finding of a binary-only session as an issue.
+    #[cfg(feature = "binary-only-fuzzing")]
+    BinaryIssue(BinaryIssueArgs),
+    /// Find the first commit at which a triaged crash input crashes.
+    #[cfg(feature = "crash-bisection")]
+    Bisect(BisectArgs),
+    /// Alert the configured webhook about the latest run's crashes.
+    #[cfg(feature = "crash-alerts")]
+    Notify(NotifyArgs),
     /// Export a reproducibility/evidence bundle for hand-off and CI artifacts.
     Export(ExportArgs),
     /// Replay stored crashes against the current harness (regression check).
@@ -216,9 +235,9 @@ pub(crate) struct HarnessArgs {
     /// Generated function harnesses support AFL++, honggfuzz, and
     /// libFuzzer only.
     ///
-    /// Syzkaller kernel campaigns use the local desktop application's
-    /// dedicated kernel-campaign workflow with operator approval and
-    /// handoff.
+    /// Syzkaller kernel campaigns have no harness: start one with
+    /// `oxfuzz kernel` or the desktop application, each behind operator
+    /// approval.
     #[arg(long)]
     pub(crate) engine: String,
     /// Target language. Defaults to c. Only languages with a harness path
@@ -281,9 +300,11 @@ pub(crate) struct HarnessArgs {
 /// build.
 #[derive(clap::Args)]
 pub(crate) struct HarnessBuildArgs {
-    /// Sanitizer for the built harness: `address` (default) or `undefined`
-    /// (`UBSan`, halt-on-error). Baked into the harness binary; runs over the
-    /// promoted harness record its sanitizer. Overrides the configured
+    /// Sanitizer for the built harness: `address` (default), `undefined`
+    /// (`UBSan`, halt-on-error), `thread` (`TSan`; C and C++ on libFuzzer and
+    /// honggfuzz), or `memory` (`MSan`; C on every userspace engine, C++ on
+    /// libFuzzer and honggfuzz). Baked into the
+    /// harness binary; runs over the promoted harness record its sanitizer. Overrides the configured
     /// `fuzzing.default_sanitizer` for this build.
     #[arg(long)]
     pub(crate) sanitizer: Option<String>,
@@ -361,7 +382,8 @@ pub(crate) struct RunArgs {
     #[arg(long, conflicts_with = "replay")]
     pub(crate) resume: bool,
     /// Assert the sanitizer the promoted harness was built with
-    /// (`address`|`undefined`): a mismatch fails before any engine starts,
+    /// (`address`|`undefined`|`memory`|`thread`): a mismatch fails before any
+    /// engine starts,
     /// telling you to rebuild the harness with that sanitizer. Omitted means
     /// unconstrained -- the run records the harness's own sanitizer.
     #[arg(long, conflicts_with = "replay")]
@@ -377,6 +399,11 @@ pub(crate) struct RunArgs {
     /// deterministic seed.
     #[arg(long)]
     pub(crate) replay: Option<String>,
+    /// Store this dictionary file for the target before the run (the same
+    /// operation as `oxfuzz dict --set`); its tokens lead the run dictionary
+    /// of this and every later run.
+    #[arg(long, value_name = "FILE", conflicts_with = "replay")]
+    pub(crate) dict: Option<PathBuf>,
     /// How this run may use the model. It reaches two places: the LLM seed
     /// corpus and the run dictionary. `off` calls no model at all (heuristic
     /// seeds, no dictionary enrichment); `require` refuses to start when no
@@ -498,7 +525,8 @@ pub(crate) struct CampaignArgs {
     #[arg(long)]
     pub(crate) resume: bool,
     /// Assert the sanitizer the promoted harness was built with
-    /// (`address`|`undefined`): a mismatch fails before any iteration starts.
+    /// (`address`|`undefined`|`memory`|`thread`): a mismatch fails before any
+    /// iteration starts.
     /// Omitted means unconstrained -- each iteration records the harness's own
     /// sanitizer.
     #[arg(long)]
@@ -574,8 +602,10 @@ pub(crate) struct FuzzArgs {
     #[arg(long)]
     pub(crate) seed: Option<u64>,
     /// Sanitizer for a freshly built harness, and the asserted sanitizer of a
-    /// reused promoted one: `address` (default) or `undefined` (`UBSan`,
-    /// halt-on-error). A promoted harness built with the other sanitizer is
+    /// reused promoted one: `address` (default), `undefined` (`UBSan`,
+    /// halt-on-error), `thread` (C and C++ on libFuzzer and honggfuzz), or
+    /// `memory` (C on every userspace engine, C++ on libFuzzer and
+    /// honggfuzz). A promoted harness built with the other sanitizer is
     /// not reused -- the pipeline drafts and qualifies a fresh revision.
     /// Overrides the configured `fuzzing.default_sanitizer` for this pipeline.
     #[arg(long)]
@@ -671,6 +701,13 @@ pub(crate) struct CoverageArgs {
     /// Target symbol.
     #[arg(long)]
     pub(crate) target: String,
+    /// Also write the line-by-line coverage as an lcov tracefile (for
+    /// `genhtml`, Codecov, or an editor gutter).
+    #[arg(long, value_name = "FILE")]
+    pub(crate) lcov: Option<PathBuf>,
+    /// Also write the line-by-line coverage as one self-contained HTML page.
+    #[arg(long, value_name = "FILE")]
+    pub(crate) html: Option<PathBuf>,
 }
 
 /// Audit which claims about a finished run its retained evidence supports.
@@ -810,6 +847,200 @@ pub(crate) struct DefectdojoArgs {
     #[arg(long)]
     pub(crate) target: Option<String>,
     /// Only verify the configured URL + token; do not push.
+    #[arg(long)]
+    pub(crate) test: bool,
+}
+
+/// Draft or file one crash as an issue in the repository named by
+/// `config/issue_tracker.toml`.
+#[derive(clap::Args)]
+pub(crate) struct IssueArgs {
+    /// Project root path.
+    pub(crate) project: PathBuf,
+    /// Crash id (the full UUID `oxfuzz triage` prints). Required unless
+    /// `--test` is given.
+    #[arg(long, required_unless_present = "test")]
+    pub(crate) crash: Option<String>,
+    /// Print the issue title, labels, body, and a prefilled new-issue URL
+    /// without filing anything.
+    #[arg(long, conflicts_with = "test")]
+    pub(crate) draft: bool,
+    /// Only verify the configured repository and token; file nothing.
+    #[arg(long)]
+    pub(crate) test: bool,
+}
+
+/// Run a syzkaller kernel campaign in the sandbox. The kernel image must be
+/// built with coverage (KCOV) for the sandbox image's architecture, and the
+/// rootfs must accept the SSH key. Without `/dev/kvm` the VMs run under
+/// emulation, which is correct but slow.
+#[derive(clap::Args)]
+pub(crate) struct KernelArgs {
+    /// Project directory the campaign is recorded against.
+    pub(crate) project: PathBuf,
+    /// The coverage-instrumented kernel image (`bzImage`, or `Image` on
+    /// arm64).
+    #[arg(long, required_unless_present = "manager_cfg")]
+    pub(crate) kernel_image: Option<PathBuf>,
+    /// The rootfs disk image the VMs boot. It is copied before a VM writes
+    /// to it.
+    #[arg(long, required_unless_present = "manager_cfg")]
+    pub(crate) rootfs: Option<PathBuf>,
+    /// The SSH private key that logs in to the rootfs as root.
+    #[arg(long)]
+    pub(crate) ssh_key: Option<PathBuf>,
+    /// An existing syz-manager configuration. Its paths and VM sizing are
+    /// rewritten to the managed ones; `--kernel-image`, `--rootfs` and
+    /// `--ssh-key` override what it names.
+    #[arg(long)]
+    pub(crate) manager_cfg: Option<PathBuf>,
+    /// Number of fuzzing VMs, at most four. Defaults to two.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=4))]
+    pub(crate) vms: Option<u32>,
+    /// Kernel architecture (`amd64` or `arm64`). Defaults to the sandbox
+    /// platform.
+    #[arg(long)]
+    pub(crate) arch: Option<String>,
+    /// How long to fuzz (for example 30m, 1h).
+    #[arg(long, default_value = "1h")]
+    pub(crate) duration: String,
+    /// Print the result as JSON; progress goes to standard error.
+    #[arg(long)]
+    pub(crate) json: bool,
+}
+
+/// Fuzz an uninstrumented Linux ELF executable in the sandbox with AFL++
+/// QEMU mode, then keep and replay the crashing inputs. The binary must be
+/// built for the sandbox image's architecture.
+#[cfg(feature = "binary-only-fuzzing")]
+#[derive(clap::Args)]
+pub(crate) struct BinaryArgs {
+    /// Project directory the session belongs to.
+    pub(crate) project: PathBuf,
+    /// The ELF executable to fuzz.
+    #[arg(long)]
+    pub(crate) binary: PathBuf,
+    /// How the target takes its input.
+    #[command(flatten)]
+    pub(crate) input: BinaryInputFlags,
+    /// A flat directory of seed inputs.
+    #[arg(long)]
+    pub(crate) seeds: Option<PathBuf>,
+    /// A flat directory of shared objects the target loads.
+    #[arg(long)]
+    pub(crate) libs: Option<PathBuf>,
+    /// How long to fuzz (for example 60s, 10m, 1h).
+    #[arg(long, default_value = "60s")]
+    pub(crate) duration: String,
+    /// Per-input timeout in milliseconds.
+    #[arg(long, default_value_t = 1000)]
+    pub(crate) timeout_ms: u64,
+    /// Print the result as JSON.
+    #[arg(long)]
+    pub(crate) json: bool,
+}
+
+/// How an `oxfuzz binary` target takes its input. With no flag it reads the
+/// file named by its one argument.
+#[cfg(feature = "binary-only-fuzzing")]
+#[derive(clap::Args, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct BinaryInputFlags {
+    /// The target reads its input from standard input instead of from the
+    /// file named by its one argument.
+    #[arg(long)]
+    pub(crate) stdin: bool,
+    /// The target is a server: deliver the input as the first connection it
+    /// accepts on a stream socket, or as the datagrams it receives on a
+    /// datagram socket. Dynamically linked targets only.
+    #[arg(long, conflicts_with = "stdin")]
+    pub(crate) socket: bool,
+    /// The target is a server (as with `--socket`) and the input is a
+    /// sequence of messages separated by the bytes FF FE FD FC. Each message
+    /// is sent after the server has read the one before, so a stateful
+    /// exchange can be fuzzed step by step.
+    #[arg(long, conflicts_with = "stdin")]
+    pub(crate) messages: bool,
+}
+
+/// Draft or file one finding of an `oxfuzz binary` session as an issue in
+/// the repository named by `config/issue_tracker.toml`. The finding is read
+/// from the session's own report; a finding whose stack signature was
+/// already filed returns that issue.
+#[cfg(feature = "binary-only-fuzzing")]
+#[derive(clap::Args)]
+pub(crate) struct BinaryIssueArgs {
+    /// Project directory the session belongs to.
+    pub(crate) project: PathBuf,
+    /// The `report.json` in the session directory `oxfuzz binary` printed.
+    #[arg(long)]
+    pub(crate) report: PathBuf,
+    /// The finding, by at least 8 hex digits of its input sha256.
+    #[arg(long)]
+    pub(crate) finding: String,
+    /// Print the issue title, labels, body, and a prefilled new-issue URL
+    /// without filing anything.
+    #[arg(long)]
+    pub(crate) draft: bool,
+}
+
+/// Bisect a triaged crash over git history: build the promoted harness
+/// against each tested commit in the sandbox and replay the crash input.
+/// History is read as stored objects; the checkout is not changed.
+#[cfg(feature = "crash-bisection")]
+#[derive(clap::Args)]
+pub(crate) struct BisectArgs {
+    /// Project root path (a git repository).
+    pub(crate) project: PathBuf,
+    /// Target symbol the crash belongs to.
+    #[arg(long)]
+    pub(crate) target: String,
+    /// Crash id (the full UUID `oxfuzz triage` prints).
+    #[arg(long)]
+    pub(crate) crash: String,
+    /// A revision at which the input does not crash.
+    #[arg(long)]
+    pub(crate) good: String,
+    /// A revision at which the input crashes.
+    #[arg(long, default_value = "HEAD")]
+    pub(crate) bad: String,
+    /// Print the result as JSON.
+    #[arg(long)]
+    pub(crate) json: bool,
+}
+
+/// Manage the operator-supplied fuzzing dictionary of a target. With neither
+/// `--set` nor `--clear`, prints the stored dictionary.
+#[derive(clap::Args)]
+pub(crate) struct DictArgs {
+    /// Project root path.
+    pub(crate) project: PathBuf,
+    /// Target symbol.
+    #[arg(long)]
+    pub(crate) target: String,
+    /// Dictionary file in AFL++/libFuzzer format (`"token"` or
+    /// `name="token"` per line; `\\`, `\"`, `\xNN` escapes). Its tokens lead
+    /// the dictionary of every later run of the target.
+    #[arg(long, value_name = "FILE", conflicts_with = "clear")]
+    pub(crate) set: Option<PathBuf>,
+    /// Remove the stored dictionary.
+    #[arg(long)]
+    pub(crate) clear: bool,
+}
+
+/// Alert the webhook named by `config/notifications.toml` when the latest run
+/// of a target has crashes. The alert carries the project directory name, the
+/// target, and the crash count.
+#[cfg(feature = "crash-alerts")]
+#[derive(clap::Args)]
+pub(crate) struct NotifyArgs {
+    /// Project root path. Required unless `--test` is given.
+    #[arg(required_unless_present = "test")]
+    pub(crate) project: Option<PathBuf>,
+    /// Target symbol whose latest run is reported. Required unless `--test`
+    /// is given.
+    #[arg(long, required_unless_present = "test")]
+    pub(crate) target: Option<String>,
+    /// Only post a connection test that carries no project data.
     #[arg(long)]
     pub(crate) test: bool,
 }
@@ -1266,8 +1497,8 @@ mod harness_help_tests {
         );
         assert!(!help.contains("libfuzzer, syzkaller"), "{help}");
         assert!(!help.contains("run_syzkaller"), "{help}");
-        assert!(help.contains("local desktop application"), "{help}");
-        assert!(help.contains("kernel-campaign workflow"), "{help}");
+        assert!(help.contains("oxfuzz kernel"), "{help}");
+        assert!(help.contains("desktop application"), "{help}");
         assert!(help.contains("operator approval"), "{help}");
     }
 
@@ -1550,7 +1781,7 @@ mod build_surface_tests {
 
     #[test]
     fn profile_set_accepts_every_supported_build_system() {
-        for system in ["cmake", "make", "meson", "autotools"] {
+        for system in ["cmake", "make", "meson", "autotools", "bazel"] {
             let parsed = Cli::try_parse_from([
                 "oxfuzz",
                 "build",
@@ -1692,6 +1923,7 @@ pub(crate) enum ProfileSystemArg {
     Make,
     Meson,
     Autotools,
+    Bazel,
 }
 
 #[cfg(all(test, not(feature = "build-doctor")))]
@@ -2802,6 +3034,38 @@ mod mutator_cli_tests {
             Commands::Mutator(_)
         ));
     }
+
+    #[test]
+    fn a_grammar_mutator_needs_its_grammar_file() {
+        assert!(Cli::try_parse_from([
+            "oxfuzz", "mutator", "/project", "--target", "parse", "grammar"
+        ])
+        .is_err());
+        let parsed = Cli::try_parse_from([
+            "oxfuzz",
+            "mutator",
+            "/project",
+            "--target",
+            "parse",
+            "--engine",
+            "libfuzzer",
+            "grammar",
+            "--grammar",
+            "json.bnf",
+            "--emit",
+            "mutator.c",
+        ])
+        .unwrap();
+        let Commands::Mutator(MutatorArgs {
+            command: MutatorCommand::Grammar { grammar, emit },
+            ..
+        }) = parsed.command
+        else {
+            panic!("expected mutator grammar");
+        };
+        assert_eq!(grammar, PathBuf::from("json.bnf"));
+        assert_eq!(emit, Some(PathBuf::from("mutator.c")));
+    }
 }
 
 #[cfg(feature = "managed-mutators")]
@@ -2824,6 +3088,18 @@ pub(crate) enum MutatorCommand {
         #[arg(long)]
         source: PathBuf,
     },
+    /// Generate a native mutator from a BNF grammar and compile a new
+    /// unpromoted harness revision containing it. The generated source is
+    /// reviewed, qualified and promoted like hand-written source.
+    Grammar {
+        /// Grammar file: `name = alt | alt ;` rules of quoted terminals and
+        /// rule names; the first rule is the start rule.
+        #[arg(long)]
+        grammar: PathBuf,
+        /// Also write the generated mutator source to this file.
+        #[arg(long, value_name = "FILE")]
+        emit: Option<PathBuf>,
+    },
     /// Run the existing independent review and bounded sandbox smoke qualification.
     Qualify,
     /// Approve the exact qualified revision through the existing human gate.
@@ -2836,7 +3112,7 @@ pub(crate) enum MutatorCommand {
 mod unread_flag_tests {
     use clap::Parser as _;
 
-    use super::Cli;
+    use super::{Cli, Commands};
 
     #[test]
     fn triage_and_ci_do_not_accept_a_language_they_never_read() {
@@ -2858,5 +3134,307 @@ mod unread_flag_tests {
         ] {
             assert!(Cli::try_parse_from(argv).is_ok(), "{argv:?} must parse");
         }
+    }
+
+    #[test]
+    fn issue_requires_a_crash_unless_testing_the_connection() {
+        let id = "6648e1d3-f5c2-4039-a336-5dc336590709";
+        let parsed = Cli::try_parse_from(["oxfuzz", "issue", "/p", "--crash", id]).unwrap();
+        let Commands::Issue(crate::args::IssueArgs {
+            crash, draft, test, ..
+        }) = parsed.command
+        else {
+            panic!("expected issue");
+        };
+        assert_eq!(crash.as_deref(), Some(id));
+        assert!(!draft && !test);
+
+        let parsed =
+            Cli::try_parse_from(["oxfuzz", "issue", "/p", "--crash", id, "--draft"]).unwrap();
+        let Commands::Issue(crate::args::IssueArgs { draft, .. }) = parsed.command else {
+            panic!("expected issue");
+        };
+        assert!(draft);
+
+        assert!(Cli::try_parse_from(["oxfuzz", "issue", "/p", "--test"]).is_ok());
+        // Filing needs a crash to file; a draft and a connection test are
+        // different operations.
+        assert!(Cli::try_parse_from(["oxfuzz", "issue", "/p"]).is_err());
+        assert!(Cli::try_parse_from(["oxfuzz", "issue", "/p", "--test", "--draft"]).is_err());
+    }
+
+    #[test]
+    fn kernel_needs_a_kernel_and_rootfs_unless_a_manager_config_names_them() {
+        let parse = |args: &[&str]| {
+            Cli::try_parse_from(["oxfuzz", "kernel", "/p"].iter().chain(args)).map(|cli| {
+                let Commands::Kernel(args) = cli.command else {
+                    panic!("expected kernel");
+                };
+                args
+            })
+        };
+        let args = parse(&[
+            "--kernel-image",
+            "/k/Image",
+            "--rootfs",
+            "/k/rootfs.img",
+            "--ssh-key",
+            "/k/id_rsa",
+            "--vms",
+            "1",
+            "--duration",
+            "30m",
+        ])
+        .unwrap();
+        assert_eq!(
+            args.kernel_image.as_deref(),
+            Some(std::path::Path::new("/k/Image"))
+        );
+        assert_eq!(
+            args.rootfs.as_deref(),
+            Some(std::path::Path::new("/k/rootfs.img"))
+        );
+        assert_eq!(args.vms, Some(1));
+        assert_eq!(args.duration, "30m");
+        assert!(!args.json);
+
+        let from_config = parse(&["--manager-cfg", "/k/manager.cfg"]).unwrap();
+        assert!(from_config.kernel_image.is_none() && from_config.rootfs.is_none());
+        assert_eq!(from_config.duration, "1h");
+
+        assert!(parse(&[]).is_err());
+        assert!(parse(&["--kernel-image", "/k/Image"]).is_err());
+        assert!(parse(&["--manager-cfg", "/c", "--vms", "0"]).is_err());
+        assert!(parse(&["--manager-cfg", "/c", "--vms", "5"]).is_err());
+    }
+
+    #[cfg(feature = "binary-only-fuzzing")]
+    #[test]
+    fn binary_messages_is_a_server_mode_and_excludes_stdin() {
+        let messages_of = |args: &[&str]| {
+            let Commands::Binary(crate::args::BinaryArgs { input, .. }) = Cli::try_parse_from(
+                ["oxfuzz", "binary", "/p", "--binary", "/b"]
+                    .iter()
+                    .chain(args),
+            )
+            .unwrap()
+            .command
+            else {
+                panic!("expected binary");
+            };
+            (input.socket, input.messages)
+        };
+        assert_eq!(messages_of(&["--socket", "--messages"]), (true, true));
+        // Messages imply a server target; `--socket` may be left out.
+        assert_eq!(messages_of(&["--messages"]), (false, true));
+        assert_eq!(messages_of(&["--socket"]), (true, false));
+        assert!(Cli::try_parse_from([
+            "oxfuzz",
+            "binary",
+            "/p",
+            "--binary",
+            "/b",
+            "--stdin",
+            "--messages"
+        ])
+        .is_err());
+    }
+
+    #[cfg(feature = "binary-only-fuzzing")]
+    #[test]
+    fn binary_issue_names_a_session_report_and_a_finding() {
+        let parsed = Cli::try_parse_from([
+            "oxfuzz",
+            "binary-issue",
+            "/p",
+            "--report",
+            "/w/session/report.json",
+            "--finding",
+            "e87a3081cfe0",
+            "--draft",
+        ])
+        .unwrap();
+        let Commands::BinaryIssue(crate::args::BinaryIssueArgs {
+            project,
+            report,
+            finding,
+            draft,
+        }) = parsed.command
+        else {
+            panic!("expected binary-issue");
+        };
+        assert_eq!(project, std::path::PathBuf::from("/p"));
+        assert_eq!(report, std::path::PathBuf::from("/w/session/report.json"));
+        assert_eq!((finding.as_str(), draft), ("e87a3081cfe0", true));
+        // Both the report and the finding are required: neither has a default.
+        assert!(Cli::try_parse_from(["oxfuzz", "binary-issue", "/p", "--report", "/r"]).is_err());
+        assert!(
+            Cli::try_parse_from(["oxfuzz", "binary-issue", "/p", "--finding", "e87a3081"]).is_err()
+        );
+    }
+
+    #[cfg(feature = "binary-only-fuzzing")]
+    #[test]
+    fn binary_needs_the_binary_and_defaults_to_file_input() {
+        let parsed =
+            Cli::try_parse_from(["oxfuzz", "binary", "/p", "--binary", "/b/parser"]).unwrap();
+        let Commands::Binary(crate::args::BinaryArgs {
+            binary,
+            input,
+            duration,
+            timeout_ms,
+            seeds,
+            libs,
+            json,
+            ..
+        }) = parsed.command
+        else {
+            panic!("expected binary");
+        };
+        assert_eq!(binary, std::path::PathBuf::from("/b/parser"));
+        assert_eq!(
+            (input, duration.as_str(), timeout_ms, json),
+            (crate::args::BinaryInputFlags::default(), "60s", 1000, false)
+        );
+        assert!(seeds.is_none() && libs.is_none());
+        assert!(Cli::try_parse_from(["oxfuzz", "binary", "/p"]).is_err());
+        assert!(Cli::try_parse_from([
+            "oxfuzz",
+            "binary",
+            "/p",
+            "--binary",
+            "/b",
+            "--stdin",
+            "--seeds",
+            "/s",
+            "--libs",
+            "/l",
+            "--duration",
+            "10m",
+            "--timeout-ms",
+            "250",
+            "--json",
+        ])
+        .is_ok());
+        // A server target takes the input as its first accepted connection;
+        // that excludes reading it from standard input.
+        let Commands::Binary(crate::args::BinaryArgs { input, .. }) =
+            Cli::try_parse_from(["oxfuzz", "binary", "/p", "--binary", "/b", "--socket"])
+                .unwrap()
+                .command
+        else {
+            panic!("expected binary");
+        };
+        assert!(input.socket && !input.stdin);
+        assert!(Cli::try_parse_from([
+            "oxfuzz", "binary", "/p", "--binary", "/b", "--socket", "--stdin",
+        ])
+        .is_err());
+    }
+
+    #[cfg(feature = "crash-bisection")]
+    #[test]
+    fn bisect_needs_a_crash_and_a_good_revision() {
+        let id = "6648e1d3-f5c2-4039-a336-5dc336590709";
+        let parsed = Cli::try_parse_from([
+            "oxfuzz", "bisect", "/p", "--target", "f", "--crash", id, "--good", "v1.0",
+        ])
+        .unwrap();
+        let Commands::Bisect(crate::args::BisectArgs {
+            good, bad, json, ..
+        }) = parsed.command
+        else {
+            panic!("expected bisect");
+        };
+        assert_eq!((good.as_str(), bad.as_str(), json), ("v1.0", "HEAD", false));
+        assert!(
+            Cli::try_parse_from(["oxfuzz", "bisect", "/p", "--target", "f", "--crash", id])
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["oxfuzz", "bisect", "/p", "--target", "f", "--good", "v1"])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn dict_sets_clears_or_shows() {
+        let parsed =
+            Cli::try_parse_from(["oxfuzz", "dict", "/p", "--target", "f", "--set", "my.dict"])
+                .unwrap();
+        let Commands::Dict(crate::args::DictArgs { set, clear, .. }) = parsed.command else {
+            panic!("expected dict");
+        };
+        assert_eq!(set.as_deref(), Some(std::path::Path::new("my.dict")));
+        assert!(!clear);
+        assert!(Cli::try_parse_from(["oxfuzz", "dict", "/p", "--target", "f"]).is_ok());
+        assert!(Cli::try_parse_from(["oxfuzz", "dict", "/p", "--target", "f", "--clear"]).is_ok());
+        assert!(Cli::try_parse_from([
+            "oxfuzz", "dict", "/p", "--target", "f", "--set", "d", "--clear"
+        ])
+        .is_err());
+        // `run --dict` is the same operation, done before the run starts.
+        let parsed = Cli::try_parse_from([
+            "oxfuzz", "run", "/p", "--target", "f", "--engine", "afl++", "--dict", "my.dict",
+        ])
+        .unwrap();
+        let Commands::Run(crate::args::RunArgs { dict, .. }) = parsed.command else {
+            panic!("expected run");
+        };
+        assert_eq!(dict.as_deref(), Some(std::path::Path::new("my.dict")));
+        // A replay reruns retained inputs; it cannot take a new dictionary.
+        assert!(Cli::try_parse_from([
+            "oxfuzz",
+            "run",
+            "/p",
+            "--replay",
+            "6648e1d3-f5c2-4039-a336-5dc336590709",
+            "--dict",
+            "my.dict"
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn coverage_accepts_line_report_outputs() {
+        let parsed = Cli::try_parse_from([
+            "oxfuzz", "coverage", "/p", "--target", "f", "--lcov", "c.info", "--html", "c.html",
+        ])
+        .unwrap();
+        let Commands::Coverage(crate::args::CoverageArgs { lcov, html, .. }) = parsed.command
+        else {
+            panic!("expected coverage");
+        };
+        assert_eq!(lcov.as_deref(), Some(std::path::Path::new("c.info")));
+        assert_eq!(html.as_deref(), Some(std::path::Path::new("c.html")));
+
+        let parsed = Cli::try_parse_from(["oxfuzz", "coverage", "/p", "--target", "f"]).unwrap();
+        let Commands::Coverage(crate::args::CoverageArgs { lcov, html, .. }) = parsed.command
+        else {
+            panic!("expected coverage");
+        };
+        assert!(lcov.is_none() && html.is_none());
+    }
+
+    #[cfg(feature = "crash-alerts")]
+    #[test]
+    fn notify_needs_a_project_and_target_unless_testing_the_webhook() {
+        let parsed =
+            Cli::try_parse_from(["oxfuzz", "notify", "/p", "--target", "parse_header"]).unwrap();
+        let Commands::Notify(crate::args::NotifyArgs {
+            project,
+            target,
+            test,
+        }) = parsed.command
+        else {
+            panic!("expected notify");
+        };
+        assert_eq!(project.as_deref(), Some(std::path::Path::new("/p")));
+        assert_eq!(target.as_deref(), Some("parse_header"));
+        assert!(!test);
+
+        assert!(Cli::try_parse_from(["oxfuzz", "notify", "--test"]).is_ok());
+        assert!(Cli::try_parse_from(["oxfuzz", "notify"]).is_err());
+        assert!(Cli::try_parse_from(["oxfuzz", "notify", "/p"]).is_err());
     }
 }

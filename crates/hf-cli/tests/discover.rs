@@ -34,8 +34,48 @@ impl Fixture {
         command
     }
 
-    /// A project with one exported, parameter-bearing Go function: a real
-    /// discovery result with no harness path today.
+    /// A project with one public static Java method: harnessable under the
+    /// jazzer engine only.
+    fn java_project(&self) -> PathBuf {
+        let project = self.directory.path().join("javaproj");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("Frames.java"),
+            "public final class Frames {\n    public static int parse(byte[] data) {\n        return data.length;\n    }\n}\n",
+        )
+        .unwrap();
+        project
+    }
+
+    /// A project with one exported JavaScript function: harnessable under
+    /// the jazzer-js engine only.
+    fn javascript_project(&self) -> PathBuf {
+        let project = self.directory.path().join("jsproj");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("package.json"), "{ \"name\": \"frames\" }\n").unwrap();
+        std::fs::write(
+            project.join("frames.js"),
+            "/** @param {Buffer} data */\nfunction parseFrame(data) {\n  return data.length;\n}\nmodule.exports = { parseFrame };\n",
+        )
+        .unwrap();
+        project
+    }
+
+    /// A project with one parameter-bearing Python function: harnessable
+    /// under the atheris engine only.
+    fn python_project(&self) -> PathBuf {
+        let project = self.directory.path().join("pyproj");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("parser.py"),
+            "def parse_packet(data, offset):\n    return len(data) > offset\n",
+        )
+        .unwrap();
+        project
+    }
+
+    /// A project with one exported, parameter-bearing Go function: harnessable
+    /// under the go-native engine only.
     fn go_project(&self) -> PathBuf {
         let project = self.directory.path().join("goproj");
         std::fs::create_dir_all(&project).unwrap();
@@ -79,7 +119,37 @@ fn inventory(output: &Output) -> serde_json::Value {
 }
 
 #[test]
-fn discover_go_scans_for_real_but_marks_every_candidate_not_harnessable() {
+fn discover_python_java_and_javascript_mark_candidates_harnessable_without_a_note() {
+    let fixture = Fixture::new();
+    for (project, language, symbol) in [
+        (fixture.python_project(), "python", "parse_packet"),
+        (fixture.java_project(), "java", "Frames.parse"),
+        (fixture.javascript_project(), "javascript", "parseFrame"),
+        (fixture.javascript_project(), "js", "parseFrame"),
+    ] {
+        let run = fixture
+            .oxfuzz(&["discover", &project.to_string_lossy(), "--lang", language])
+            .output()
+            .expect("spawn oxfuzz discover");
+
+        assert!(run.status.success(), "{language}: {}", stderr(&run));
+        let inventory = inventory(&run);
+        let candidates = inventory["candidates"]
+            .as_array()
+            .expect("candidates array");
+        assert_eq!(candidates.len(), 1, "{language}: {candidates:?}");
+        assert_eq!(candidates[0]["symbol"], symbol);
+        assert_eq!(candidates[0]["harnessable"], serde_json::Value::Bool(true));
+        assert!(
+            !stderr(&run).contains("not yet available"),
+            "{language}: {}",
+            stderr(&run)
+        );
+    }
+}
+
+#[test]
+fn discover_go_marks_candidates_harnessable_without_a_note() {
     let fixture = Fixture::new();
     let project = fixture.go_project();
 
@@ -88,31 +158,18 @@ fn discover_go_scans_for_real_but_marks_every_candidate_not_harnessable() {
         .output()
         .expect("spawn oxfuzz discover");
 
-    assert!(
-        run.status.success(),
-        "explicit Go discovery still works: {}",
-        stderr(&run)
-    );
+    assert!(run.status.success(), "{}", stderr(&run));
     let inventory = inventory(&run);
     let candidates = inventory["candidates"]
         .as_array()
         .expect("candidates array");
-    assert_eq!(candidates.len(), 1, "the Go scan is real: {candidates:?}");
+    assert_eq!(candidates.len(), 1, "{candidates:?}");
     assert_eq!(candidates[0]["symbol"], "ParsePacket");
-    assert_eq!(
-        candidates[0]["harnessable"],
-        serde_json::Value::Bool(false),
-        "the candidate is marked: {candidates:?}"
-    );
-
-    let err = stderr(&run);
+    assert_eq!(candidates[0]["harnessable"], serde_json::Value::Bool(true));
     assert!(
-        err.contains("harness generation is not yet available for go"),
-        "the note names the language: {err}"
-    );
-    assert!(
-        err.contains("c, cpp, rust"),
-        "the note names what is supported: {err}"
+        !stderr(&run).contains("not yet available"),
+        "{}",
+        stderr(&run)
     );
 }
 
@@ -145,7 +202,42 @@ fn discover_c_marks_candidates_harnessable_without_a_note() {
 }
 
 #[test]
-fn fuzz_on_a_go_only_project_fails_at_discovery_naming_the_supported_set() {
+fn fuzz_on_a_managed_language_project_under_the_default_engine_names_its_engine() {
+    let fixture = Fixture::new();
+    for (project, expected) in [
+        (
+            fixture.python_project(),
+            "python targets run under --engine atheris",
+        ),
+        (
+            fixture.java_project(),
+            "java targets run under --engine jazzer",
+        ),
+        (
+            fixture.javascript_project(),
+            "javascript targets run under --engine jazzer-js",
+        ),
+    ] {
+        let run = fixture
+            .oxfuzz(&["fuzz", &project.to_string_lossy()])
+            .output()
+            .expect("spawn oxfuzz fuzz");
+
+        assert!(!run.status.success(), "{}", stdout(&run));
+        let err = stderr(&run);
+        assert!(
+            err.contains(expected),
+            "the engine that drives the language is named: {err}"
+        );
+        assert!(
+            !err.contains("[2/5] harness"),
+            "the pipeline never reaches harness work: {err}"
+        );
+    }
+}
+
+#[test]
+fn fuzz_on_a_go_only_project_under_the_default_engine_names_go_native() {
     let fixture = Fixture::new();
     let project = fixture.go_project();
 
@@ -156,14 +248,9 @@ fn fuzz_on_a_go_only_project_fails_at_discovery_naming_the_supported_set() {
 
     assert!(!run.status.success(), "{}", stdout(&run));
     let err = stderr(&run);
-    assert!(err.contains("discover"), "the stage is named: {err}");
     assert!(
-        err.contains("not yet available"),
-        "the capability gap is named: {err}"
-    );
-    assert!(
-        err.contains("c, cpp, rust"),
-        "the supported set is named: {err}"
+        err.contains("go targets run under --engine go-native"),
+        "the engine that drives Go is named: {err}"
     );
     assert!(
         !err.contains("[2/5] harness"),

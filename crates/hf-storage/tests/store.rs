@@ -6539,6 +6539,40 @@ async fn build_profile_upsert_preserves_creation_and_clear_retains_history() {
 }
 
 #[tokio::test]
+async fn build_profile_stores_every_saved_build_system() {
+    let (store, _dir) = temp_store().await;
+    for system in [
+        hf_storage::ProfileBuildSystem::CMake,
+        hf_storage::ProfileBuildSystem::Make,
+        hf_storage::ProfileBuildSystem::Meson,
+        hf_storage::ProfileBuildSystem::Autotools,
+        hf_storage::ProfileBuildSystem::Bazel,
+    ] {
+        let mut profile = build_profile("/proj");
+        profile.build_system = system;
+        if system != hf_storage::ProfileBuildSystem::CMake {
+            profile.cmake_definitions.clear();
+        }
+        store.set_project_build_profile(&profile).await.unwrap();
+        assert_eq!(
+            store
+                .project_build_profile("/proj")
+                .await
+                .unwrap()
+                .map(|saved| saved.build_system),
+            Some(system),
+            "{system:?} round-trips"
+        );
+    }
+    let mut defined = build_profile("/proj");
+    defined.build_system = hf_storage::ProfileBuildSystem::Bazel;
+    assert!(
+        store.set_project_build_profile(&defined).await.is_err(),
+        "a Bazel profile cannot carry CMake definitions"
+    );
+}
+
+#[tokio::test]
 async fn build_profile_rejects_malformed_durable_configuration() {
     let (store, _dir) = temp_store().await;
     let profile = build_profile("/proj");

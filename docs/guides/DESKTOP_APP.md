@@ -209,8 +209,9 @@ own build uses. The compile step then offers Build Doctor: it reads the project
 root and reports which build systems it found and on which marker files. CMake
 (`CMakeLists.txt`), Meson (`meson.build`), Autotools (`configure.ac`,
 `configure.in`, `Makefile.am`), and plain Make (`GNUmakefile`, `makefile`,
-`Makefile`) are reported as supported; a Cargo project needs no compile
-database; Bazel is reported as not runnable in the sandbox image. Detection
+`Makefile`) are reported as supported, as is Bazel when the workspace has
+`MODULE.bazel`; a Cargo project needs no compile database; a Bazel workspace
+without `MODULE.bazel` is reported as not runnable in the sandbox image. Detection
 runs nothing. A build plan exists only once you save a build profile: the exact
 commands are then shown in full before anything happens; you approve them, and
 they run in the sandbox, not on your machine. Running the plan creates an
@@ -220,8 +221,10 @@ what you are approving.
 Each profile type has a fixed plan. CMake configures with
 `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON`; Meson runs `meson setup`; plain Make runs
 a forced `make -B` under `bear`; Autotools runs `autoreconf -i`, `./configure`,
-and then the same `bear`-observed `make -B`. The sandbox image (0.2.0 or later)
-installs `cmake`, `meson`, `autoconf`/`automake`/`libtool`, `make`, and `bear`.
+and then the same `bear`-observed `make -B`; Bazel runs one offline query over
+the vendor directory the project carries. The sandbox image (0.2.0 or later)
+installs `cmake`, `meson`, `autoconf`/`automake`/`libtool`, `make`, and `bear`,
+and from 0.2.3 Bazel 8 and 9.
 Diagnosis probes each required tool and every declared dependency inside the
 pinned image and names any that is missing rather than offering a plan that
 would fail. Dependency fetching is not supported. A run whose commands all
@@ -229,8 +232,8 @@ succeed but produces no compile database is reported as a failure, because the
 database is the evidence, not the exit code.
 
 The desktop profile editor currently offers CMake and plain Make profiles;
-Meson and Autotools profiles are saved with `oxfuzz build profile set
---build-system meson|autotools` (see the
+Meson, Autotools, and Bazel profiles are saved with `oxfuzz build profile set
+--build-system meson|autotools|bazel` (see the
 [CLI Reference](CLI_REFERENCE.md#build-profiles)) and are then diagnosed and run
 the same way. **Save profile**
 retains the normalized component, compile-database path, definitions, and

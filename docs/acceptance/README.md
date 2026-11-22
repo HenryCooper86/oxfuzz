@@ -47,6 +47,9 @@ The [2026-09-27 userspace attempt record](userspace-attempts-2026-09-27.md)
 retains failed exploratory outcomes without counting them as accepted samples.
 The [2026-09-27 C userspace qualification](userspace-2026-09-27.md) records ten
 passing libFuzzer, AFL++, and honggfuzz cycles on one clean candidate and image.
+The [2026-11-22 kernel record](kernel-emulated-2026-11-22.md) is a functional
+validation of a syzkaller campaign under emulation on macOS arm64, with its
+failed and withdrawn attempts; it is not a KVM or throughput record.
 The [local isolation](isolation-2026-09-27.md) and
 [owned-container recovery](runtime-recovery-2026-09-27.md) records provide
 partial A3 evidence; they do not complete the fault-soak checklist.

@@ -529,8 +529,8 @@ impl Labels {
                            deeper program states.",
             rec_sanitizer_address_only: "This campaign used AddressSanitizer only. Also \
                                          fuzz an UndefinedBehaviorSanitizer build (and \
-                                         MemorySanitizer for C and C++): those bug classes \
-                                         are invisible to AddressSanitizer.",
+                                         MemorySanitizer for C and C++ targets): those bug \
+                                         classes are invisible to AddressSanitizer.",
             rec_sanitizer_none: "This campaign ran without a sanitizer, so memory errors \
                                  that do not crash went unreported. Fuzz AddressSanitizer \
                                  and UndefinedBehaviorSanitizer builds.",
@@ -735,7 +735,7 @@ impl Labels {
             rec_duration: "本次测试活动运行了 {duration}。短时间的测试只能发现浅层缺陷；\
                            请运行数小时到数天，或在 CI 中持续运行，以到达更深的程序状态。",
             rec_sanitizer_address_only: "本次测试活动只使用了 AddressSanitizer。请同时对 \
-                                         UndefinedBehaviorSanitizer 构建（C 和 C++ 还应包括 \
+                                         UndefinedBehaviorSanitizer 构建（C 目标还应包括 \
                                          MemorySanitizer）进行模糊测试：这些缺陷类型 \
                                          AddressSanitizer 无法发现。",
             rec_sanitizer_none: "本次测试活动未使用消毒器，未导致崩溃的内存错误不会被报告。\

@@ -1640,7 +1640,7 @@ export const [enExtra, zhExtra] = dictionaries({
   "settings.about.engines": ["Engines","引擎"],
   "settings.about.guidePost": [" in the sidebar."," 中。"],
   "settings.about.guidePre": ["An in-app guide is available under ","应用内指南位于侧边栏的 "],
-  "settings.about.discoveryOnly": ["{language} (discovery only)","{language}（仅发现目标）"],
+  "settings.about.discoveryOnly": ["{language} (discovery here, fuzzing from the CLI)","{language}（此处仅发现目标，模糊测试请使用命令行）"],
   "settings.about.languages": ["Languages","语言"],
   "settings.about.links": ["Links","链接"],
   "settings.about.website": ["Download website","下载网站"],

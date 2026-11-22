@@ -1369,3 +1369,67 @@ fn import_fails_loudly_when_the_source_is_not_a_directory() {
         "a non-directory source must be rejected: {error}"
     );
 }
+
+/// A stand-in for an engine's own corpus encoding: a one-line header.
+fn framed(data: &[u8]) -> Vec<u8> {
+    [b"v1\n".as_slice(), data].concat()
+}
+
+fn unframed(file: &[u8]) -> Option<Vec<u8>> {
+    file.strip_prefix(b"v1\n").map(<[u8]>::to_vec)
+}
+
+#[test]
+fn an_encoded_engine_cache_round_trips_through_the_flat_corpus() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = dir.path().join("corpus");
+    let cache = dir.path().join("out/cache/FuzzParse");
+    std::fs::create_dir(&corpus).unwrap();
+    std::fs::write(corpus.join("seed-a"), b"alpha").unwrap();
+    std::fs::write(corpus.join("seed-b"), b"beta").unwrap();
+
+    let written = hf_corpus::export_encoded(&corpus, &cache, &framed).unwrap();
+    assert_eq!(written, 2);
+    let mut exported: Vec<Vec<u8>> = std::fs::read_dir(&cache)
+        .unwrap()
+        .map(|entry| std::fs::read(entry.unwrap().path()).unwrap())
+        .collect();
+    exported.sort();
+    assert_eq!(exported, [b"v1\nalpha".to_vec(), b"v1\nbeta".to_vec()]);
+
+    // The engine adds one input, rewrites nothing, and leaves one file the
+    // decoder refuses and one empty value; only the new input is retained.
+    std::fs::write(cache.join("0123456789abcdef"), b"v1\ngamma").unwrap();
+    std::fs::write(cache.join("not-a-corpus-file"), b"garbage").unwrap();
+    std::fs::write(cache.join("empty-value"), b"v1\n").unwrap();
+    let grown = hf_corpus::grow_decoded(&corpus, &cache, &unframed).unwrap();
+    assert_eq!(grown.entries.len(), 3);
+    let mut contents: Vec<Vec<u8>> = std::fs::read_dir(&corpus)
+        .unwrap()
+        .map(|entry| std::fs::read(entry.unwrap().path()).unwrap())
+        .collect();
+    contents.sort();
+    assert_eq!(
+        contents,
+        [b"alpha".to_vec(), b"beta".to_vec(), b"gamma".to_vec()]
+    );
+    // A missing cache directory is an engine that kept nothing.
+    let none = hf_corpus::grow_decoded(&corpus, &dir.path().join("absent"), &unframed).unwrap();
+    assert_eq!(none.entries.len(), 3);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_engine_cache_entry_is_never_followed() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = dir.path().join("corpus");
+    let cache = dir.path().join("cache");
+    std::fs::create_dir(&corpus).unwrap();
+    std::fs::create_dir(&cache).unwrap();
+    let secret = dir.path().join("secret");
+    std::fs::write(&secret, b"v1\nhost data").unwrap();
+    std::os::unix::fs::symlink(&secret, cache.join("link")).unwrap();
+    let grown = hf_corpus::grow_decoded(&corpus, &cache, &unframed).unwrap();
+    assert!(grown.entries.is_empty());
+    assert_eq!(std::fs::read_dir(&corpus).unwrap().count(), 0);
+}

@@ -265,6 +265,43 @@ async fn ubsan_runs_set_print_stacktrace_for_libfuzzer_only() {
 /// `AFL_AUTORESUME=1` so afl-fuzz continues a copied-forward output tree, and
 /// a hand-set `AFL_AUTORESUME` in `cfg.env` is a second source of resume truth
 /// and rejected.
+/// Without `halt_on_error=1` a `TSan` report does not stop the process, and
+/// the artifact libFuzzer later writes is not the racing input (verified in
+/// sandbox image 0.2.2: the artifact was the empty input).
+#[test]
+fn tsan_runs_halt_on_the_first_report() {
+    let mut cfg = run_config(EngineKind::LibFuzzer, 10);
+    cfg.sanitizer = Sanitizer::Thread;
+    let env = hf_engine::runner::run_env(EngineKind::LibFuzzer, &cfg).expect("env resolves");
+    assert_eq!(
+        env.get("TSAN_OPTIONS").map(String::as_str),
+        Some("halt_on_error=1")
+    );
+
+    // An operator-provided TSAN_OPTIONS wins outright.
+    cfg.env
+        .push(("TSAN_OPTIONS".to_owned(), "history_size=7".to_owned()));
+    let env = hf_engine::runner::run_env(EngineKind::LibFuzzer, &cfg).expect("env resolves");
+    assert_eq!(
+        env.get("TSAN_OPTIONS").map(String::as_str),
+        Some("history_size=7")
+    );
+
+    // honggfuzz records a crash by signal, so its TSan runs also abort.
+    let mut cfg = run_config(EngineKind::Honggfuzz, 10);
+    cfg.sanitizer = Sanitizer::Thread;
+    let env = hf_engine::runner::run_env(EngineKind::Honggfuzz, &cfg).expect("env resolves");
+    assert_eq!(
+        env.get("TSAN_OPTIONS").map(String::as_str),
+        Some("halt_on_error=1:abort_on_error=1")
+    );
+
+    // Other sanitizers get no TSan environment.
+    let cfg = run_config(EngineKind::LibFuzzer, 10);
+    let env = hf_engine::runner::run_env(EngineKind::LibFuzzer, &cfg).expect("env resolves");
+    assert!(!env.contains_key("TSAN_OPTIONS"), "{env:?}");
+}
+
 #[tokio::test]
 async fn afl_resume_injects_autoresume_and_rejects_a_hand_set_one() {
     async fn captured_env(
@@ -670,6 +707,70 @@ async fn runner_accepts_libfuzzer_timeout_exit_without_a_summary_line() {
 }
 
 #[tokio::test]
+async fn a_go_failure_is_a_finding_only_when_go_saved_the_failing_input() {
+    // A Go test binary exits 1 for a fuzz failure and for every setup error.
+    let run = |stdout: &str| {
+        let rt = MockRuntime {
+            exit_code: 1,
+            stdout: stdout.to_owned(),
+            termination: CommandTermination::Completed,
+        };
+        async move {
+            EngineRunner::new()
+                .run(
+                    EngineKind::GoNative,
+                    &run_config(EngineKind::GoNative, 60),
+                    "/work/runs/r/input/harness",
+                    "/work/runs/r/corpus",
+                    "/work/runs/r/out",
+                    &rt,
+                    &PathBuf::from("/work"),
+                )
+                .await
+        }
+    };
+    let finding = run("\
+fuzz: elapsed: 1s, execs: 75889 (140728/sec), new interesting: 3 (total: 4)
+--- FAIL: FuzzParse (0.54s)
+        testing.go:1927: panic: runtime error: index out of range [235] with length 21
+    Failing input written to testdata/fuzz/FuzzParse/4f85edf10c3c3e2c
+FAIL
+")
+    .await
+    .expect("a saved failing input is a finding, not an engine error");
+    assert!(
+        finding.progress.iter().any(
+            |e| matches!(e, hf_core::engine::FuzzProgress::ExecsPerSec(rate) if *rate > 140_000.0)
+        ),
+        "the run keeps its measured rate: {:?}",
+        finding.progress
+    );
+    let setup = run("testing: -test.fuzzcachedir must be set if -test.fuzz is set\nFAIL\n").await;
+    assert!(
+        setup.is_err(),
+        "a setup failure must not be recorded as a finished run"
+    );
+    let no_test = run("testing: warning: no fuzz tests to fuzz\nFAIL\n").await;
+    assert!(no_test.is_err());
+}
+
+#[test]
+fn go_runs_stay_offline_on_the_pinned_toolchain() {
+    let env =
+        hf_engine::runner::run_env(EngineKind::GoNative, &run_config(EngineKind::GoNative, 60))
+            .unwrap();
+    assert_eq!(env.get("GOPROXY").map(String::as_str), Some("off"));
+    assert_eq!(env.get("GOSUMDB").map(String::as_str), Some("off"));
+    assert_eq!(env.get("GOTOOLCHAIN").map(String::as_str), Some("local"));
+    let other = hf_engine::runner::run_env(
+        EngineKind::LibFuzzer,
+        &run_config(EngineKind::LibFuzzer, 60),
+    )
+    .unwrap();
+    assert!(!other.contains_key("GOPROXY"));
+}
+
+#[tokio::test]
 async fn runner_rejects_target_noise_lines_on_a_failed_exit() {
     // The sandbox interleaves the target binary's own stdout with the
     // engine's. A harness that prints "done", "summary", or "finished" (or
@@ -962,4 +1063,20 @@ async fn runner_forwards_the_read_only_execution_profile() {
         .unwrap();
 
     assert!(runtime.saw_read_only.load(Ordering::SeqCst));
+}
+
+#[test]
+fn the_run_file_limit_admits_each_engines_shared_memory_file() {
+    use hf_engine::runner::run_file_size_limit_bytes;
+    assert_eq!(
+        run_file_size_limit_bytes(EngineKind::LibFuzzer),
+        64 * 1024 * 1024
+    );
+    assert_eq!(
+        run_file_size_limit_bytes(EngineKind::Honggfuzz),
+        hf_engine::honggfuzz::SHARED_MEMORY_BYTES
+    );
+    // Go's fuzz coordinator truncates a 100 MiB shared-memory file per
+    // worker; the default 64 MiB limit fails the run before its first input.
+    assert!(run_file_size_limit_bytes(EngineKind::GoNative) >= 100 * 1024 * 1024);
 }

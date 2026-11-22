@@ -133,9 +133,12 @@ describe("fuzzing settings", () => {
       .toEqual(["libfuzzer"]);
     expect(enabledEngineOptions(settings, { language: "rust", includeSyzkaller: true })
       .map((item) => item.value)).toEqual(["libfuzzer"]);
-    // Go/Python are discoverable but have no harness-building engine yet.
+    // Go, Python, Java, and JavaScript are discoverable here; their engines
+    // are driven from the CLI only.
     expect(enabledEngineOptions(settings, { language: "go" })).toEqual([]);
     expect(enabledEngineOptions(settings, { language: "python" })).toEqual([]);
+    expect(enabledEngineOptions(settings, { language: "java" })).toEqual([]);
+    expect(enabledEngineOptions(settings, { language: "javascript" })).toEqual([]);
   });
 
   it("keeps every fuzzing action disabled until a validated policy exists", () => {

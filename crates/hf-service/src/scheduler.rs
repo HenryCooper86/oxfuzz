@@ -1604,7 +1604,8 @@ impl FuzzCampaignDispatcher {
     }
 
     /// Best-effort follow-up when a scheduled run finds crashes: save a report
-    /// draft, push to `DefectDojo` if configured, and notify the UI. Failures are
+    /// draft, push to `DefectDojo` if configured, alert the configured webhook,
+    /// and notify the UI. Failures are
     /// logged, never propagated -- the campaign already did its job.
     async fn on_crashes(&self, params: &CampaignParams, target: &str, crashes: usize) {
         let project = Path::new(&params.project);
@@ -1625,6 +1626,18 @@ impl FuzzCampaignDispatcher {
         } else {
             false
         };
+
+        #[cfg(feature = "crash-alerts")]
+        if self.container.notifications_configured() {
+            let schedule = Some(params.schedule_id.as_str()).filter(|id| !id.is_empty());
+            if let Err(e) = self
+                .container
+                .notify_crashes(project, target, crashes, schedule)
+                .await
+            {
+                tracing::warn!("scheduled campaign crash alert failed: {e}");
+            }
+        }
 
         // Clone the callback out of the lock, then call it unlocked.
         let notifier = self.notifier.lock().ok().and_then(|slot| slot.clone());

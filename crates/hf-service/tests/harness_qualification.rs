@@ -782,9 +782,13 @@ async fn corpus_records_keep_the_persisted_rust_target_identity() {
 }
 
 #[tokio::test]
-async fn unsupported_harness_languages_fail_before_the_compiler() {
+async fn a_language_the_engine_does_not_run_fails_before_the_compiler() {
     let (project, _store, container) = qualified_fixture().await;
-    for language in [TargetLanguage::Go, TargetLanguage::Python] {
+    for (language, name) in [
+        (TargetLanguage::Go, "Go"),
+        (TargetLanguage::Python, "Python"),
+        (TargetLanguage::Java, "Java"),
+    ] {
         let error = container
             .harness_compile(
                 "unsupported harness".to_owned(),
@@ -796,18 +800,14 @@ async fn unsupported_harness_languages_fail_before_the_compiler() {
                 false,
             )
             .await
-            .expect_err("unsupported harness language must fail closed");
-        // The denial names the language and the harnessable set (the single
-        // `TargetLanguage::harnessable` predicate), not just "not supported".
+            .expect_err("libFuzzer does not build this harness language");
         let message = error.to_string();
         assert!(
             message.contains(&format!(
-                "harness generation is not yet available for {} targets",
-                language.as_str()
+                "{name} harnesses are not supported by fuzzing engine 'libfuzzer'"
             )),
             "{message}"
         );
-        assert!(message.contains("c, cpp, rust"), "{message}");
     }
 }
 

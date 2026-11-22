@@ -326,6 +326,111 @@ pub fn grow(corpus_root: &Path, engine_out: &Path) -> Result<Corpus, ClassifiedE
     })
 }
 
+/// How much larger than its raw bytes an engine-encoded corpus file may be:
+/// a text encoding that escapes every byte (`\xNN`) is four times the input.
+const ENCODED_EXPANSION: u64 = 4;
+/// Fixed room for an encoding's header and delimiters.
+const ENCODED_OVERHEAD_BYTES: u64 = 256;
+
+/// The read budget for engine-encoded files whose decoded bytes must fit
+/// `limits`.
+fn encoded_limits(limits: CorpusLimits) -> CorpusLimits {
+    CorpusLimits {
+        max_input_bytes: limits
+            .max_input_bytes
+            .saturating_mul(ENCODED_EXPANSION)
+            .saturating_add(ENCODED_OVERHEAD_BYTES),
+        ..limits
+    }
+}
+
+/// Write every input of a flat corpus into `destination` in an engine's own
+/// corpus encoding, for an engine that does not read raw input files (Go's
+/// native fuzzer). Each file is named by the SHA-256 of its raw bytes, so the
+/// same corpus always produces the same directory. Returns the number of
+/// files written.
+///
+/// # Errors
+/// Returns `ClassifiedError` when the corpus is not a safe flat directory
+/// within the default limits, `destination` cannot be created as a regular
+/// directory, or a file cannot be written.
+pub fn export_encoded(
+    corpus_root: &Path,
+    destination: &Path,
+    encode: &dyn Fn(&[u8]) -> Vec<u8>,
+) -> Result<usize, ClassifiedError> {
+    let prepared = prepare_flat_directory(corpus_root, DEFAULT_CORPUS_LIMITS)?;
+    ensure_regular_directory(destination)?;
+    ensure_distinct_directories(corpus_root, destination)?;
+    for input in &prepared {
+        atomic_write(&destination.join(&input.sha256), &encode(&input.data))?;
+    }
+    Ok(prepared.len())
+}
+
+/// Grow the corpus from a directory of engine-encoded inputs (the
+/// counterpart of [`export_encoded`]).
+///
+/// Only regular files directly inside `encoded_dir` are read, under a size
+/// budget derived from the corpus limits; symlinks and directories are
+/// skipped. A file `decode` refuses, or one that decodes to no bytes, is
+/// skipped. Decoded inputs already present (by SHA-256) are skipped; new ones
+/// are written under their hash and tagged [`CorpusSource::Fuzzer`]. A missing
+/// `encoded_dir` means the engine kept nothing.
+///
+/// # Errors
+/// Returns `ClassifiedError` when the corpus cannot be listed, a limit is
+/// exceeded, or a decoded input cannot be written.
+pub fn grow_decoded(
+    corpus_root: &Path,
+    encoded_dir: &Path,
+    decode: &dyn Fn(&[u8]) -> Option<Vec<u8>>,
+) -> Result<Corpus, ClassifiedError> {
+    let limits = DEFAULT_CORPUS_LIMITS;
+    ensure_regular_directory(corpus_root)?;
+    let existing = list_with_limits(corpus_root, limits)?;
+    let mut seen: HashSet<String> = existing.entries.iter().map(|e| e.sha256.clone()).collect();
+    let mut entries = existing.entries;
+    let mut reserved_names = HashSet::new();
+    let mut total_bytes = corpus_size(&entries, limits)?;
+
+    if is_regular_directory(encoded_dir) {
+        let mut inspected = 0_usize;
+        for entry in sorted_directory_entries(encoded_dir, &mut inspected, limits)? {
+            let path = entry.path();
+            let Some(encoded) = read_regular_file_bounded(&path, encoded_limits(limits))? else {
+                continue;
+            };
+            let Some(data) = decode(&encoded).filter(|data| !data.is_empty()) else {
+                continue;
+            };
+            let size = data_len_u64(&data)?;
+            enforce_input_size(size, limits, &path.display().to_string())?;
+            let hash = sha256_hex(&data);
+            if !seen.insert(hash.clone()) {
+                continue;
+            }
+            enforce_entry_limit(entries.len().saturating_add(1), limits)?;
+            total_bytes = checked_total(total_bytes, size, limits)?;
+            let name = unique_destination_name(
+                corpus_root,
+                std::ffi::OsStr::new(&hash),
+                &hash,
+                &mut reserved_names,
+            )?;
+            let dest = corpus_root.join(name);
+            atomic_write(&dest, &data)?;
+            entries.push(make_entry(&dest, &data, CorpusSource::Fuzzer));
+        }
+    }
+    Ok(Corpus {
+        id: Uuid::new_v4(),
+        target_id: Uuid::nil(),
+        root: corpus_root.to_path_buf(),
+        entries,
+    })
+}
+
 /// Copy a retained flat corpus into an empty run-local directory.
 ///
 /// The source is fully preflighted before the first destination write. Any

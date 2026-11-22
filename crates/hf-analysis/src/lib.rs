@@ -138,7 +138,11 @@ fn language_rules(lang: TargetLanguage) -> Option<(Language, [&'static [Rule]; 2
             tree_sitter_cpp::LANGUAGE.into(),
             [SHARED_RULES, CPP_ONLY_RULES],
         )),
-        TargetLanguage::Rust | TargetLanguage::Go | TargetLanguage::Python => None,
+        TargetLanguage::Rust
+        | TargetLanguage::Go
+        | TargetLanguage::Python
+        | TargetLanguage::Java
+        | TargetLanguage::JavaScript => None,
     }
 }
 

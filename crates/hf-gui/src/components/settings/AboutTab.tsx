@@ -107,6 +107,7 @@ export function AboutTab() {
           <Badge>Rust</Badge>
           <Badge>{t("settings.about.discoveryOnly", { language: "Go" })}</Badge>
           <Badge>{t("settings.about.discoveryOnly", { language: "Python" })}</Badge>
+          <Badge>{t("settings.about.discoveryOnly", { language: "Java" })}</Badge>
         </div>
       </div>
 

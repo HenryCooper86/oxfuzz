@@ -7,6 +7,10 @@ description = "Harness generation, compile validation, smoke fuzz"
 
 [features]
 managed-mutators = ["hf-engine/managed-mutators"]
+go-native-fuzzing = []
+python-atheris = []
+jvm-jazzer = []
+js-jazzer = []
 
 [dependencies]
 hf-core = { workspace = true }

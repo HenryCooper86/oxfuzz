@@ -51,7 +51,7 @@ a build or run fails with Docker output such as `pull access denied`.
 
 Cause: the runtime always uses the image tag compiled into oxfuzz
 (`SANDBOX_IMAGE` in `crates/hf-runtime/src/config.rs`, currently
-`oxfuzz/fuzz-sandbox:0.2.2`), and it is not present locally. The runtime
+`oxfuzz/fuzz-sandbox:0.2.3`), and it is not present locally. The runtime
 never pulls it on its own.
 
 Fix: from an oxfuzz source checkout run
@@ -65,7 +65,7 @@ skips the script's post-build toolchain and Semgrep verification). Expect a
 long first build and a large image: it compiles honggfuzz, syzkaller (with
 its Go toolchain), and SymCC from source, installs Rust nightly and
 cargo-fuzz, and needs network access while building. The local
-`oxfuzz/fuzz-sandbox:0.2.2` image is about 7 GB on disk.
+`oxfuzz/fuzz-sandbox:0.2.3` image is about 7 GB on disk.
 
 If a prebuilt image has been published for your version,
 `./scripts/pull-sandbox.sh` downloads and verifies it instead; when none is
@@ -101,7 +101,7 @@ checkout, rebuilds on a mismatch; the CLI `doctor` only checks that the tag
 exists.
 
 Fix: check with
-`docker image inspect --format '{{.Architecture}}' oxfuzz/fuzz-sandbox:0.2.2`.
+`docker image inspect --format '{{.Architecture}}' oxfuzz/fuzz-sandbox:0.2.3`.
 For userspace fuzzing, build for the native architecture: run
 `./scripts/build-sandbox.sh` without `OXFUZZ_SANDBOX_PLATFORM`, or with
 `OXFUZZ_SANDBOX_PLATFORM=linux/arm64` on Apple Silicon. Building a foreign
@@ -118,7 +118,7 @@ The runtime, `doctor`, and Build Doctor always use the fixed
 overrides it.
 
 Fix: build with the default tag, or retag your image:
-`docker tag myorg/sandbox:1 oxfuzz/fuzz-sandbox:0.2.2`.
+`docker tag myorg/sandbox:1 oxfuzz/fuzz-sandbox:0.2.3`.
 
 ## Building oxfuzz
 
@@ -322,18 +322,193 @@ Common causes, all explained in
 feeds compiler output back to the model; it cannot fix the project-level
 causes above.
 
+### A Bazel project build stops
+
+`oxfuzz build history <project>` shows the message of the step.
+
+- `this workspace carries no Bazel vendor directory`: the sandbox is offline
+  and never downloads. Run
+  `bazel vendor --vendor_dir=third_party/bazel //...` in the workspace on
+  your machine and keep that directory with the project.
+- `bazel aquery exited` after lines about a repository that could not be
+  fetched: the vendor directory does not hold everything the targets need.
+  Vendor again for `//...` after changing `MODULE.bazel`, and with the same
+  Bazel major version that `.bazelversion` selects. A directory vendored on
+  a different operating system or CPU is accepted; a repository that is
+  missing from it is not.
+- `the sandbox image carries Bazel 8 and Bazel 9`: `.bazelversion` asks for
+  another version. Only those two major versions are available.
+- `a Bazel profile needs MODULE.bazel`: the workspace uses `WORKSPACE` only.
+  Vendor mode needs Bzlmod, so such a project is not supported; export a
+  `compile_commands.json` yourself and place it in the project instead.
+- The run stops before any step with a file-count or size reason: the
+  project with its vendor directory is over the staging limits (20,000
+  files, 512 MiB in total, 64 MiB per file).
+- A harness then fails on a header that the Bazel build generates: the step
+  compiles nothing, so generated headers do not exist. Generate them on
+  your machine and keep them in the project, or fuzz a target that does not
+  include them.
+
 ### A Rust harness does not build
 
-Causes: a crates.io or git dependency (the sandbox is offline and vendors only
-`libfuzzer-sys`); the project path is a virtual workspace root
-(`could not find [package] name`); or the crate needs files other than `.rs`,
-`Cargo.toml`, and `Cargo.lock`. Rust builds have a 600-second limit.
+Causes: a crates.io dependency the project does not carry (the sandbox is
+offline and the image vendors only `libfuzzer-sys`); a git dependency; the
+project path is a virtual workspace root (`could not find [package] name`); or
+the crate needs files other than `.rs`, `Cargo.toml`, and `Cargo.lock`. Rust
+builds have a 600-second limit.
 
-### Go or Python targets cannot be harnessed
+For crates.io dependencies, run `cargo vendor` in the project on a machine
+with network access and keep the `vendor/` directory it writes. oxfuzz stages
+that tree whole and resolves from it together with the image's own crates;
+the project's `.cargo/config.toml` is not needed and is not read. `no matching
+package named ... found` then names a crate missing from `vendor/`, and `the
+listed checksum of ... has changed` means a vendored file was edited or is a
+symlink, which is not staged.
 
-That is current scope, not a fault: Go and Python are discovery-only, and
-harness commands name the supported set (`c, cpp, rust`). See
+### A Python target is refused or its smoke fails
+
+A Python target builds only for the `atheris` engine. Add `"atheris"` to
+`[fuzzing] enabled_engines` and pass `--engine atheris`; any other engine is
+refused before work starts. The harness path covers a top-level synchronous
+function whose required parameters each take `bytes`, `str`, `int`, `float`
+or `bool` (an unannotated parameter takes `bytes`); methods, `async`
+functions, other parameter types, a parameter list that spans lines, and
+files whose path is not importable (`my-tool/x.py`) are refused with the
+reason. A `src/` directory is treated as the import root.
+
+The harness is a generated script and is accepted only unchanged: an edited
+Python harness fails lint with `python-fixed-template`.
+
+`smoke fuzz: the Python harness exited 1 outside fuzzing` means the module
+could not be imported in the sandbox, most often a third-party package. The
+sandbox is offline and nothing is installed into it: besides the standard
+library and the project's own modules, a run can import the pure-Python
+packages the project carries under `vendor/python/` (for example
+`pip install --target vendor/python --no-compile <package>` run beforehand on
+a machine with network access). C extensions are outside the supported class.
+A syntax error in
+the selected module fails the build step instead, before anything is
+imported. See [SUPPORT_MATRIX.md](SUPPORT_MATRIX.md).
+
+### A Java target is refused or its build fails
+
+A Java target builds only for the `jazzer` engine. Add `"jazzer"` to
+`[fuzzing] enabled_engines` and pass `--engine jazzer`; any other engine is
+refused before work starts. The harness path covers a `public static` method
+of a top-level class with one to eight parameters, each a `byte[]`, a
+`String` or a primitive; instance methods, constructors, generic methods, and
+other parameter types are refused with the reason.
+
+The harness is a generated class and is accepted only unchanged: an edited
+Java harness fails lint with `java-fixed-template`.
+
+The build compiles every `.java` file of the project outside `test`
+directories with `javac`, offline, against the jars directly inside the
+project's `lib/` or `libs/` directory. `package ... does not exist` or
+`cannot find symbol` for a class the project does not define means a
+dependency jar is missing: nothing is resolved or downloaded, so copy the
+jars a Maven or Gradle build would fetch into `lib/` first (for example
+`mvn dependency:copy-dependencies -DoutputDirectory=lib`). Kotlin and Scala
+sources and annotation processors are outside the supported class.
+
+`smoke fuzz: the Java harness exited ... outside fuzzing` means the JVM or
+Jazzer failed before or instead of fuzzing; the quoted output names the
+cause. A run needs about 700 MiB of memory for the JVM. See
 [SUPPORT_MATRIX.md](SUPPORT_MATRIX.md).
+
+### A JavaScript target is refused or its module does not load
+
+A JavaScript target builds only for the `jazzer-js` engine. Add `"jazzer-js"`
+to `[fuzzing] enabled_engines` and pass `--engine jazzer-js`; any other engine
+is refused before work starts. The harness path covers a function declared at
+the top level of a `.js`, `.mjs` or `.cjs` file and exported under its own
+name. Methods, classes, default exports, generators, and TypeScript are
+outside it.
+
+`does not document the type of '<name>'` means a required parameter has no
+JSDoc type. JavaScript has no types to read, and calling the function with
+the wrong kind of value would report an error the harness caused, so each
+required parameter needs a line in the comment block directly above the
+function: `@param {Buffer} data`, with `Buffer`, `Uint8Array`, `string`,
+`number` or `boolean` as the type. Parameters with a default value and
+parameters documented as optional are left out of the call.
+
+`the project root has no package.json` means the directory given as
+`<PROJECT>` is not the package root. Point the command at the directory that
+holds `package.json`: the manifest decides whether a `.js` file is an ES
+module and whether the package tree is staged.
+
+The harness is a generated module and is accepted only unchanged: an edited
+JavaScript harness fails lint with `js-fixed-template`.
+
+`smoke fuzz: the JavaScript harness exited ... outside fuzzing` means Node.js
+or Jazzer.js failed before or instead of fuzzing, and is never recorded as a
+finding. `Cannot find module` or `Cannot find package` names a package the
+staged project does not hold: nothing is installed in the sandbox, so run
+`npm ci` (or `npm install`) in the project beforehand; `node_modules` is
+staged as it is when the manifest declares dependencies. Symlinked package
+layouts (pnpm, linked workspaces) are not staged, and a native addon built on
+the host does not load in the Linux sandbox. See
+[SUPPORT_MATRIX.md](SUPPORT_MATRIX.md).
+
+### A binary-only session does not start or confirms nothing
+
+`oxfuzz binary` refuses a file that is not a 64-bit little-endian ELF
+executable, and a binary built for another CPU than the sandbox image's own
+(both architectures are named): QEMU mode in the image emulates its own
+architecture only.
+
+`afl-fuzz -Q did not start fuzzing` quotes the fuzzer's last output. The
+usual causes are a target that needs a shared object that was not supplied
+(pass the directory with `--libs`), a target that crashes or times out on
+every seed (supply seeds it accepts with `--seeds`, or raise `--timeout-ms`),
+and the wrong input mode (the target reads standard input: pass `--stdin`;
+the target is a server that accepts a connection: pass `--socket`).
+
+With `--socket`, every seed timing out usually means the preload shim never
+took effect: the binary is statically linked, or it connects out instead of
+accepting or binding. A server that hands each connection to a forked child
+runs, but a crash in the child is not seen. A UDP server is recognized when
+it binds a datagram socket to an IPv4 or IPv6 address; one that registers the
+socket with `epoll` before binding it will wait forever.
+
+A stateful server that never reaches the interesting state with `--socket`
+usually reads one request per `recv`: the whole input arrives in one read.
+Use `--messages` and put the bytes `FF FE FD FC` between messages in the
+seeds. What the server sends is discarded, so a step that must echo a value
+the server chose (a nonce, a session id) is not reachable in either mode.
+
+A finding with `confirmed: false` was saved by the fuzzer but its replay
+ended differently. A finding with no `kind`, `signature`, or `frames` was
+replayed without a crash report: the target is statically linked, or it
+installs its own handlers for fatal signals. Such findings are never grouped
+and their minimized input is checked by signal only. A confirmed finding
+with no `minimized` entry could not be shrunk, or its shrunk form was a
+different crash and was discarded. There is no sanitizer in this mode, so
+memory errors that do not fault are not seen at all.
+
+`binary-issue` refuses a report that is not inside this project's own
+session directory, and a `--finding` prefix shorter than eight hex digits or
+matching more than one finding. See
+`docs/design/binary-only-fuzzing-design.md`.
+
+### A Go target is refused or its build fails
+
+A Go target builds only for the `go-native` engine. Add `"go-native"` to
+`[fuzzing] enabled_engines` and pass `--engine go-native`; any other engine is
+refused before work starts. The harness path covers a package-level exported
+function whose parameters are each `[]byte`, `string`, `bool`, an integer
+type or a float type; methods, generic functions, functions in package
+`main`, and parameters of any other type (structs, interfaces, slices of
+anything but bytes) are refused with the reason.
+
+The build runs offline (`GOPROXY=off`): a module that imports packages outside
+the standard library must carry a `vendor/` tree, otherwise `go test -c` fails
+naming the missing module. Project `_test.go` files are not staged, so the
+harness binary holds only the generated fuzz test.
+
+A smoke failure reading `the Go test binary exited 1 without saving a failing
+input` is a failed run, not a finding; the quoted output names the cause.
 
 ### Crash scans are slow or CASR reports have no symbols
 
@@ -344,7 +519,7 @@ when available. **Stop scan** waits for sandbox teardown and keeps completed
 findings; a stopped scan has not necessarily examined every input. Previously
 saved AI reports and confirmed minimization evidence survive a rescan.
 
-Rebuild the sandbox after upgrading to image `oxfuzz/fuzz-sandbox:0.2.2`:
+Rebuild the sandbox after upgrading to image `oxfuzz/fuzz-sandbox:0.2.3`:
 
 ```sh
 ./scripts/build-sandbox.sh

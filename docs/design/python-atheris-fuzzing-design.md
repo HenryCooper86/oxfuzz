@@ -1,9 +1,10 @@
 # Python Atheris Fuzzing Design
 
-Status: **planned, not implemented**. Owners: `hf-service` for admission and
-workflow, `hf-harness` for generated Python source, `hf-engine` for Atheris
-telemetry and artifacts, and `hf-runtime` for every process. Python remains
-discovery-only in the support matrix.
+Status: **first slice implemented, acceptance open** (2026-11-21). Owners:
+`hf-service` for admission and workflow, `hf-harness` for generated Python
+source, `hf-engine` for Atheris telemetry and artifacts, and `hf-runtime` for
+every process. The section "Implemented behaviour" at the end states what the
+first slice does and where it differs from the plan below.
 
 ## Goal and admission
 
@@ -108,3 +109,67 @@ documents Python instrumentation, `TestOneInput`, bundled libFuzzer,
 exceptions, and coverage-report limitations. Its
 [native-extension guide](https://github.com/google/atheris/blob/master/native_extension_fuzzing.md)
 explains why extension fuzzing needs a separate toolchain and sanitizer path.
+
+## Implemented behaviour (first slice)
+
+Evidence is from Atheris 3.0.0 on CPython 3.12.3 in `oxfuzz/fuzz-sandbox:0.2.3`
+(linux/arm64), 2026-11-21, through the live test
+`live_atheris_finds_replays_and_classifies_a_planted_exception`.
+
+- **Engine and admission.** `EngineKind::Atheris` (`atheris`) supports Python
+  only and stays outside the default enabled set; an operator lists it under
+  `[fuzzing] enabled_engines`. The `python-atheris` feature is part of the
+  default feature set, following the `go-native-fuzzing` precedent: the
+  runtime engine policy, not the build, is what keeps the path off until an
+  operator opts in. This differs from the "disabled-by-default feature" the
+  plan names. System status carries an `atheris` flag, true only when the
+  image's interpreter imports Atheris.
+- **Toolchain.** PyPI publishes no Atheris wheel for CPython 3.12 on
+  linux/arm64, so the image builds the hash-pinned Atheris source
+  distribution at image build time. Nothing is installed at run time and no
+  project dependency is installed at all: the supported class is the standard
+  library, the project's own modules, and the pure-Python packages the
+  project carries under `vendor/python/`, which the script puts on the import
+  path after the project root. The `vendor/python/` tree is staged and
+  retained whole, data files included, because a package reads the files it
+  ships beside its modules; elsewhere only `.py` files are staged. Files
+  under `vendor/` are not discovery candidates. The offline wheelhouse of the plan is not
+  implemented; a project that imports a package it does not carry fails
+  smoke with the import error.
+- **Harness.** `hf_harness::python_atheris` renders one fixed script from the
+  selected function (import root, dotted module, function, and the type of
+  each required parameter: `bytes`, `str`, `int`, `float` or `bool`) and
+  records them in an `# oxfuzz:python-target` line. A function of one `bytes`
+  or `str` receives the input as it is; any other list is decoded in order
+  with `atheris.FuzzedDataProvider`. There is no
+  model draft and no repair: lint accepts only the generated text for the
+  recorded target, and the service additionally requires the recorded
+  function to be the selected one. The lint rules the plan lists
+  (`subprocess`, sockets, swallowed exceptions, constant inputs) are therefore
+  enforced by equality with the template rather than rule by rule.
+- **Build.** One fixed interpreter invocation parses the script and the
+  selected module with `ast.parse` and installs the script as an executable
+  file. Nothing is imported before the smoke approval.
+- **Execution.** The script starts with `#!/usr/bin/python3 -I` and is run
+  directly, so smoke, campaign, and replay start it the way they start a
+  compiled harness. The argv is fixed libFuzzer flags built in
+  `hf_engine::atheris`; fork and job flags are refused. A run is one
+  interpreter whatever the CPU allocation.
+- **Retained sources.** Project `.py` files are staged at their relative
+  paths and captured into each run's `input/source-context`. A staged run's
+  script imports from that directory, so the run and its historical replay
+  execute the sources captured at run start even when the workspace has
+  changed since. Smoke and triage replay run the workspace copy.
+- **Findings.** An uncaught exception exits 77 and writes `crash-<sha1>`;
+  ingestion collects it like a libFuzzer artifact. Classification names the
+  exception line and signs the frames of the code under test with their
+  install location removed, so a finding signs the same from a run and from
+  a replay. An exit other than 0, 70, or 77 (an import or interpreter
+  failure) fails the smoke as such and is never a finding; libFuzzer's "no
+  interesting inputs" diagnostic fails the smoke as uninstrumented. Atheris's
+  startup notes about missing sanitizer hooks are not read as a crash.
+- **Not implemented.** Selected-function entry evidence, coverage.py reports,
+  minimization, expected-rejection predicates, CASR, methods, async
+  functions, native extensions, third-party packages, and the two-project
+  acceptance. A full review/promotion/campaign/Stop cycle through the
+  commands has not been exercised.

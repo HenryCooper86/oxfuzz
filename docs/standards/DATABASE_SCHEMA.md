@@ -1231,7 +1231,7 @@ rows reference a digest value, not this mutable row through a foreign key.
 | --- | --- | --- |
 | `project_root` | `TEXT PRIMARY KEY` | canonical project root; configuration identity |
 | `component_root` | `TEXT NOT NULL` | normalized UTF-8 project-relative component directory; `.` is the root |
-| `build_system` | `TEXT NOT NULL CHECK (build_system IN ('cmake', 'make', 'meson', 'autotools'))` | supported saved system |
+| `build_system` | `TEXT NOT NULL CHECK (build_system IN ('cmake', 'make', 'meson', 'autotools', 'bazel'))` | supported saved system |
 | `compile_database_path` | `TEXT NOT NULL` | normalized project-relative path ending in `compile_commands.json` |
 | `cmake_definitions_json` | `TEXT NOT NULL` | canonical sorted definition map; valid JSON, at most 65,536 UTF-8 bytes |
 | `dependencies_json` | `TEXT NOT NULL` | canonical sorted unique typed dependency array; valid JSON, at most 65,536 UTF-8 bytes |
@@ -1399,6 +1399,8 @@ bounded deterministic history, and both cleanup operations.
 | `0050_retire_closeout_coverage_steps.sql` | deletes `run_closeout_steps` rows for the retired `Coverage` and `Blockers` steps, and `TrustReport` rows that depended on them |
 | `0051_drop_coverage_experiments.sql` | drops `coverage_experiment_executions` and `coverage_experiments`, deleting retained experiment records |
 | `0052_chat_turn_languages.sql` | retains per-attempt response-language instructions before provider dispatch |
+| `0053_run_execution_totals.sql` | adds `runs.execs_total` and moves syzkaller's cumulative executed count there from `execs` |
+| `0054_build_profile_bazel.sql` | widens saved build profiles to Bazel by rebuilding the profile table's system check |
 
 ## 7. Read failure contract
 

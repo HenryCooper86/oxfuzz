@@ -1,7 +1,7 @@
 //! Target discovery scanner.
 //!
 //! Walks a project with the `ignore` crate, parses C/C++ source with
-//! Tree-sitter, scans Rust/Go/Python with dependency-free lexical scanners,
+//! Tree-sitter, scans Rust/Go/Python/Java with dependency-free lexical scanners,
 //! extracts function definitions, filters trivial ones, scores them with
 //! input-surface and complexity heuristics, and returns a `TargetInventory`.
 //!
@@ -68,6 +68,8 @@ fn discover_blocking(
         TargetLanguage::Rust => scan_rust(&project_root)?,
         TargetLanguage::Go => scan_go(&project_root)?,
         TargetLanguage::Python => scan_python(&project_root)?,
+        TargetLanguage::Java => scan_java(&project_root)?,
+        TargetLanguage::JavaScript => scan_javascript(&project_root)?,
     };
     // Stamp the project root onto every candidate so downstream consumers
     // (persistence dedup keyed on (project, symbol, file), reports, ranking)
@@ -202,10 +204,7 @@ fn discoverable_source_files_in_walk_order(
         )));
     }
 
-    let walker = WalkBuilder::new(canonical_root)
-        .hidden(true)
-        .git_ignore(true)
-        .build();
+    let walker = project_walker(canonical_root);
     let extensions = exts_for(lang);
     let mut relative_paths = Vec::new();
     for entry in walker {
@@ -283,7 +282,7 @@ fn scan_lexical(
     skip_file: fn(&Path) -> bool,
     extract: fn(&str, &Path, &mut Vec<TargetCandidate>),
 ) -> Result<ScanResult, ClassifiedError> {
-    let walker = WalkBuilder::new(root).hidden(true).git_ignore(true).build();
+    let walker = project_walker(root);
     let mut files = Vec::new();
     for entry in walker {
         let entry = entry.map_err(|error| ClassifiedError::Internal(error.to_string()))?;
@@ -319,6 +318,28 @@ fn scan_lexical(
         extract(&src, &path, &mut candidates);
     }
     Ok((candidates, std::collections::HashMap::new(), Vec::new()))
+}
+
+/// The file `bazel vendor` writes at the top of a vendor directory.
+const BAZEL_VENDOR_MARKER: &str = "VENDOR.bazel";
+
+/// Walk a project's files, leaving out hidden and git-ignored paths and any
+/// Bazel vendor directory.
+///
+/// A vendor directory holds the build rules and third-party repositories
+/// Bazel copied in, under whatever name the project chose, so its marker
+/// file identifies it. Those are the project's dependencies, not its own
+/// targets, in every language.
+fn project_walker(root: &Path) -> ignore::Walk {
+    WalkBuilder::new(root)
+        .hidden(true)
+        .git_ignore(true)
+        .filter_entry(|entry| {
+            entry.depth() == 0
+                || !(entry.file_type().is_some_and(|kind| kind.is_dir())
+                    && entry.path().join(BAZEL_VENDOR_MARKER).is_file())
+        })
+        .build()
 }
 
 /// Discover Rust fuzz targets with a dependency-free lexical scan.
@@ -367,9 +388,611 @@ fn scan_python(root: &Path) -> Result<ScanResult, ClassifiedError> {
     scan_lexical(
         root,
         exts_for(TargetLanguage::Python),
-        |_| false,
+        skip_python_file,
         extract_python_functions,
     )
+}
+
+/// `vendor/` holds the third-party packages a project carries with it, not
+/// the project's own targets.
+fn skip_python_file(path: &Path) -> bool {
+    path.components().any(|c| c.as_os_str() == "vendor")
+}
+
+/// Discover Java fuzz targets with a dependency-free lexical scan, in the
+/// same conservative style as the other lexical scanners: `public static`
+/// methods, with at least one parameter, of the top-level class a file is
+/// named after. That is the set a separate harness class can call without
+/// constructing an object.
+fn scan_java(root: &Path) -> Result<ScanResult, ClassifiedError> {
+    scan_lexical(
+        root,
+        exts_for(TargetLanguage::Java),
+        skip_java_file,
+        extract_java_methods,
+    )
+}
+
+/// Test sources hold tests, not fuzzable library surface, and the module and
+/// package descriptors declare no methods.
+fn skip_java_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| matches!(n, "module-info.java" | "package-info.java"))
+        || path
+            .components()
+            .any(|c| c.as_os_str() == "test" || c.as_os_str() == "tests")
+}
+
+/// The brace depth at the start of every line of Java source, counting only
+/// braces that are code: not in a comment, a string, a text block, or a
+/// character literal.
+fn java_line_depths(src: &str) -> Vec<u32> {
+    #[derive(PartialEq)]
+    enum State {
+        Code,
+        LineComment,
+        BlockComment,
+        Text,
+        TextBlock,
+        Character,
+    }
+    let mut depths = vec![0_u32];
+    let mut depth = 0_u32;
+    let mut state = State::Code;
+    let bytes = src.as_bytes();
+    let mut at = 0;
+    while at < bytes.len() {
+        let byte = bytes[at];
+        let rest = &bytes[at..];
+        if byte == b'\n' {
+            if state == State::LineComment {
+                state = State::Code;
+            }
+            depths.push(depth);
+            at += 1;
+            continue;
+        }
+        match state {
+            State::Code => {
+                if rest.starts_with(b"//") {
+                    state = State::LineComment;
+                    at += 1;
+                } else if rest.starts_with(b"/*") {
+                    state = State::BlockComment;
+                    at += 1;
+                } else if rest.starts_with(b"\"\"\"") {
+                    state = State::TextBlock;
+                    at += 2;
+                } else if byte == b'"' {
+                    state = State::Text;
+                } else if byte == b'\'' {
+                    state = State::Character;
+                } else if byte == b'{' {
+                    depth += 1;
+                } else if byte == b'}' {
+                    depth = depth.saturating_sub(1);
+                }
+            }
+            State::LineComment => {}
+            State::BlockComment => {
+                if rest.starts_with(b"*/") {
+                    state = State::Code;
+                    at += 1;
+                }
+            }
+            State::Text | State::Character => {
+                let close = if state == State::Text { b'"' } else { b'\'' };
+                if byte == b'\\' {
+                    at += 1;
+                } else if byte == close {
+                    state = State::Code;
+                }
+            }
+            State::TextBlock => {
+                if byte == b'\\' {
+                    at += 1;
+                } else if rest.starts_with(b"\"\"\"") {
+                    state = State::Code;
+                    at += 2;
+                }
+            }
+        }
+        at += 1;
+    }
+    depths
+}
+
+/// Extract `public static` methods of the top-level class a Java file is
+/// named after. Methods are named `Class.method`; of several overloads the
+/// first is kept, because a candidate is identified by its file and symbol.
+/// Conservative like the other lexical scanners: a missed declaration is a
+/// lost candidate, never a wrong one.
+fn extract_java_methods(src: &str, path: &Path, out: &mut Vec<TargetCandidate>) {
+    let Some(file_class) = path.file_stem().and_then(|stem| stem.to_str()) else {
+        return;
+    };
+    let depths = java_line_depths(src);
+    let mut in_file_class = false;
+    let mut seen: Vec<String> = Vec::new();
+    let mut byte_off = 0usize;
+    for (idx, raw) in src.split_inclusive('\n').enumerate() {
+        let line_start = byte_off;
+        byte_off += raw.len();
+        let line = raw.trim_end_matches(['\n', '\r']);
+        let trimmed = line.trim_start();
+        let depth = depths.get(idx).copied().unwrap_or(0);
+        if depth == 0 {
+            // A top-level type declaration opens or closes the scope the
+            // candidates come from.
+            let words: Vec<&str> = trimmed.split_whitespace().collect();
+            if let Some(at) = words.iter().position(|word| *word == "class") {
+                let name = words.get(at + 1).map(|word| read_ident(word));
+                in_file_class = name.as_deref() == Some(file_class);
+            }
+            continue;
+        }
+        if depth != 1 || !in_file_class || trimmed.starts_with('@') {
+            continue;
+        }
+        let Some(open) = trimmed.find('(') else {
+            continue;
+        };
+        let head = &trimmed[..open];
+        if head.contains('=') || head.contains('.') && !head.contains("java.lang.") {
+            continue; // a field initializer or a call, not a declaration
+        }
+        let words: Vec<&str> = head.split_whitespace().collect();
+        if words.len() < 4 || !words.contains(&"public") || !words.contains(&"static") {
+            continue;
+        }
+        let name = (*words.last().unwrap_or(&"")).to_owned();
+        if name != read_ident(&name) || name == "main" || seen.contains(&name) {
+            continue;
+        }
+        let name_off = line_start + (line.len() - trimmed.len()) + (open - name.len());
+        let decl = &src[name_off..];
+        let Some(params) = extract_paren_group(decl) else {
+            continue;
+        };
+        let param_count = if params.trim().is_empty() {
+            0
+        } else {
+            params.split(',').filter(|p| !p.trim().is_empty()).count()
+        };
+        if param_count == 0 {
+            continue; // no untrusted input to feed
+        }
+        let byte_like = [
+            "byte[]",
+            "String",
+            "InputStream",
+            "ByteBuffer",
+            "Reader",
+            "CharSequence",
+        ];
+        let input_surface = if byte_like.iter().any(|kind| params.contains(kind)) {
+            InputSurface::Bytes
+        } else {
+            InputSurface::Structured
+        };
+        let lower = name.to_ascii_lowercase();
+        let kind = if [
+            "parse",
+            "decode",
+            "deserialize",
+            "read",
+            "load",
+            "unmarshal",
+            "frombytes",
+        ]
+        .iter()
+        .any(|k| lower.contains(k))
+        {
+            TargetKind::Parser
+        } else {
+            TargetKind::Function
+        };
+        let complexity = brace_body_complexity(
+            decl,
+            &[
+                "if (", "if(", "for (", "for(", "while (", "while(", "case ", "catch ", "&&", "||",
+            ],
+        );
+        let fit_score = compute_fit_score(
+            kind,
+            input_surface,
+            complexity,
+            param_count,
+            // An array or string carries its own length.
+            input_surface == InputSurface::Bytes,
+        );
+        seen.push(name.clone());
+        out.push(TargetCandidate {
+            id: Uuid::new_v4(),
+            project_root: PathBuf::new(),
+            language: TargetLanguage::Java,
+            symbol: format!("{file_class}.{name}"),
+            kind,
+            location: SourceLocation {
+                file: path.to_path_buf(),
+                line: (idx + 1) as u32,
+                col: (line.len() - trimmed.len() + 1) as u32,
+                end_line: None,
+                end_col: None,
+            },
+            signature: Some(trimmed.trim_end_matches('{').trim().to_owned()),
+            input_surface,
+            complexity,
+            fit_score,
+            sanitizers: vec![Sanitizer::Address],
+            rationale: String::new(),
+            reachable_functions: Vec::new(),
+            accumulated_complexity: 0,
+        });
+    }
+}
+
+/// Discover JavaScript fuzz targets with a dependency-free lexical scan, in
+/// the same conservative style as the other lexical scanners: functions a
+/// module declares at its top level and exports under their own name. That
+/// is the set a separate harness module can load and call without
+/// constructing an object.
+fn scan_javascript(root: &Path) -> Result<ScanResult, ClassifiedError> {
+    scan_lexical(
+        root,
+        exts_for(TargetLanguage::JavaScript),
+        skip_javascript_file,
+        extract_javascript_functions,
+    )
+}
+
+/// The packages a project carries are not its own targets, and neither are
+/// its tests, its minified bundles, or its tool configuration.
+fn skip_javascript_file(path: &Path) -> bool {
+    path.components().any(|c| {
+        ["node_modules", "test", "tests", "__tests__", "__mocks__"]
+            .iter()
+            .any(|skipped| c.as_os_str() == *skipped)
+    }) || path.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+        [".test.", ".spec.", ".min.", ".config."]
+            .iter()
+            .any(|marker| n.contains(marker))
+    })
+}
+
+/// The names a JavaScript module exports as themselves, read from its
+/// column-zero export statements: `exports.name = name`, `module.exports =
+/// { name }`, and `export { name }`. A renamed export is left out, because
+/// the candidate is called by the name it is declared under.
+fn javascript_exported_names(src: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut byte_off = 0usize;
+    for raw in src.split_inclusive('\n') {
+        let line_start = byte_off;
+        byte_off += raw.len();
+        let line = raw.trim_end();
+        let member = line
+            .strip_prefix("module.exports.")
+            .or_else(|| line.strip_prefix("exports."));
+        if let Some(member) = member {
+            let name = javascript_ident(member);
+            let value = member[name.len()..].trim_start().strip_prefix('=');
+            if value.is_some_and(|value| javascript_ident(value.trim_start()) == name) {
+                names.push(name);
+            }
+            continue;
+        }
+        let list = line
+            .strip_prefix("module.exports")
+            .map(str::trim_start)
+            .and_then(|rest| rest.strip_prefix('='))
+            .or_else(|| line.strip_prefix("export"))
+            .map(str::trim_start)
+            .filter(|rest| rest.starts_with('{'));
+        if list.is_none() {
+            continue;
+        }
+        let Some(open) = src[line_start..].find('{') else {
+            continue;
+        };
+        let Some(body) = brace_group(&src[line_start + open..]) else {
+            continue;
+        };
+        for entry in split_top_level(&body) {
+            let entry = entry.trim();
+            let name = javascript_ident(entry);
+            let rest = entry[name.len()..].trim();
+            let same = rest.is_empty()
+                || rest
+                    .strip_prefix(':')
+                    .is_some_and(|value| value.trim() == name);
+            if !name.is_empty() && same {
+                names.push(name);
+            }
+        }
+    }
+    names
+}
+
+/// Read a leading JavaScript identifier (ASCII letters, digits, `_`, `$`).
+fn javascript_ident(s: &str) -> String {
+    s.chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '$')
+        .collect()
+}
+
+/// The contents of the balanced `{...}` group `s` starts with.
+fn brace_group(s: &str) -> Option<String> {
+    let mut depth = 0i32;
+    let mut out = String::new();
+    for ch in s.chars() {
+        match ch {
+            '{' => {
+                depth += 1;
+                if depth == 1 {
+                    continue;
+                }
+            }
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(out);
+                }
+            }
+            _ => {}
+        }
+        out.push(ch);
+    }
+    None
+}
+
+/// Split `list` on the commas that are outside every bracket.
+fn split_top_level(list: &str) -> Vec<String> {
+    let mut depth = 0i32;
+    let mut current = String::new();
+    let mut out = Vec::new();
+    for ch in list.chars() {
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            ',' if depth == 0 => {
+                out.push(std::mem::take(&mut current));
+                continue;
+            }
+            _ => {}
+        }
+        current.push(ch);
+    }
+    if !current.trim().is_empty() {
+        out.push(current);
+    }
+    out
+}
+
+/// A top-level JavaScript function declaration read from one line.
+struct JavascriptDeclaration {
+    name: String,
+    is_async: bool,
+    /// Whether the line itself exports the function.
+    exported: bool,
+    /// Byte offset, within the line, where the parameters start.
+    parameters_at: usize,
+    /// Whether the parameters are one bare name (`data => ...`).
+    bare: bool,
+}
+
+/// Read the function a column-zero line declares: `function name(`, a
+/// `const`/`let`/`var` bound to a function or arrow, or an `exports.name`
+/// assignment of one, each optionally `async` and optionally `export`ed.
+/// Generators and default exports are not candidates.
+fn javascript_declaration(line: &str) -> Option<JavascriptDeclaration> {
+    let (mut rest, mut exported) = match line.strip_prefix("export ") {
+        Some(rest) => (rest.trim_start(), true),
+        None => (line, false),
+    };
+    if rest.starts_with("default ") {
+        return None;
+    }
+    let offset_of = |rest: &str| line.len() - rest.len();
+    let function_parameters = |rest: &str| -> Option<(String, usize)> {
+        let after = rest.strip_prefix("function")?;
+        if after.trim_start().starts_with('*') {
+            return None;
+        }
+        let after = after.trim_start();
+        let name = javascript_ident(after);
+        let after = after[name.len()..].trim_start();
+        after.starts_with('(').then(|| (name, offset_of(after)))
+    };
+    let strip_async = |rest: &mut &str| {
+        let stripped = rest.strip_prefix("async ").map(str::trim_start);
+        if let Some(stripped) = stripped {
+            *rest = stripped;
+        }
+        stripped.is_some()
+    };
+
+    let mut declaration_async = strip_async(&mut rest);
+    if let Some((name, parameters_at)) = function_parameters(rest) {
+        return (!name.is_empty()).then_some(JavascriptDeclaration {
+            name,
+            is_async: declaration_async,
+            exported,
+            parameters_at,
+            bare: false,
+        });
+    }
+    if declaration_async {
+        return None;
+    }
+    // A binding or an export assignment whose value is a function.
+    let binding = ["const ", "let ", "var "]
+        .iter()
+        .find_map(|keyword| rest.strip_prefix(keyword));
+    let member = rest
+        .strip_prefix("module.exports.")
+        .or_else(|| rest.strip_prefix("exports."));
+    let target = match (binding, member) {
+        (Some(binding), _) => binding.trim_start(),
+        (None, Some(member)) if !exported => {
+            exported = true;
+            member
+        }
+        _ => return None,
+    };
+    let name = javascript_ident(target);
+    if name.is_empty() {
+        return None;
+    }
+    let mut value = target[name.len()..].trim_start().strip_prefix('=')?;
+    if value.starts_with('=') || value.starts_with('>') {
+        return None;
+    }
+    value = value.trim_start();
+    declaration_async = strip_async(&mut value);
+    if let Some((_, parameters_at)) = function_parameters(value) {
+        return Some(JavascriptDeclaration {
+            name,
+            is_async: declaration_async,
+            exported,
+            parameters_at,
+            bare: false,
+        });
+    }
+    // An arrow function: `(parameters) =>` or `name =>`.
+    if value.starts_with('(') {
+        let end = paren_group_end(value)?;
+        return value[end..]
+            .trim_start()
+            .starts_with("=>")
+            .then_some(JavascriptDeclaration {
+                name,
+                is_async: declaration_async,
+                exported,
+                parameters_at: offset_of(value),
+                bare: false,
+            });
+    }
+    let parameter = javascript_ident(value);
+    (!parameter.is_empty() && value[parameter.len()..].trim_start().starts_with("=>")).then_some(
+        JavascriptDeclaration {
+            name,
+            is_async: declaration_async,
+            exported,
+            parameters_at: offset_of(value),
+            bare: true,
+        },
+    )
+}
+
+/// Whether the `JSDoc` block that ends directly above line `idx` documents a
+/// parameter the fuzz input can be handed to as it is.
+fn javascript_documents_bytes(lines: &[&str], idx: usize) -> bool {
+    let mut at = idx;
+    let mut closed = false;
+    while let Some(previous) = at.checked_sub(1) {
+        at = previous;
+        let text = lines[at].trim();
+        if !closed {
+            if !text.ends_with("*/") {
+                return false;
+            }
+            closed = true;
+        }
+        if ["{Buffer}", "{Uint8Array}", "{string}", "{String}"]
+            .iter()
+            .any(|kind| text.contains(kind))
+        {
+            return true;
+        }
+        if text.starts_with("/*") {
+            return false;
+        }
+    }
+    false
+}
+
+/// Extract exported, parameter-bearing top-level function declarations from
+/// JavaScript source. The recorded signature is the declaration normalized
+/// to `[async ]function name(parameters)`, whatever form declared it.
+fn extract_javascript_functions(src: &str, path: &Path, out: &mut Vec<TargetCandidate>) {
+    let exported = javascript_exported_names(src);
+    let lines: Vec<&str> = src.lines().collect();
+    let mut seen: Vec<String> = Vec::new();
+    let mut byte_off = 0usize;
+    for (idx, raw) in src.split_inclusive('\n').enumerate() {
+        let line_start = byte_off;
+        byte_off += raw.len();
+        let line = raw.trim_end_matches(['\n', '\r']);
+        let Some(declaration) = javascript_declaration(line) else {
+            continue;
+        };
+        let name = declaration.name;
+        if !(declaration.exported || exported.contains(&name)) || seen.contains(&name) {
+            continue;
+        }
+        let decl = &src[line_start + declaration.parameters_at..];
+        let params = if declaration.bare {
+            javascript_ident(decl)
+        } else {
+            let Some(params) = extract_paren_group(decl) else {
+                continue;
+            };
+            params.split_whitespace().collect::<Vec<_>>().join(" ")
+        };
+        let param_count = split_top_level(&params)
+            .iter()
+            .filter(|p| !p.trim().is_empty())
+            .count();
+        if param_count == 0 {
+            continue; // no untrusted input to feed
+        }
+        let input_surface = if javascript_documents_bytes(&lines, idx) {
+            InputSurface::Bytes
+        } else {
+            InputSurface::Structured
+        };
+        let kind = classify(&name);
+        let complexity = brace_body_complexity(
+            decl,
+            &[
+                "if (", "if(", "for (", "for(", "while (", "while(", "case ", "catch ", "&&", "||",
+            ],
+        );
+        let fit_score = compute_fit_score(
+            kind,
+            input_surface,
+            complexity,
+            param_count,
+            // A buffer or a string carries its own length.
+            input_surface == InputSurface::Bytes,
+        );
+        let prefix = if declaration.is_async { "async " } else { "" };
+        seen.push(name.clone());
+        out.push(TargetCandidate {
+            id: Uuid::new_v4(),
+            project_root: PathBuf::new(),
+            language: TargetLanguage::JavaScript,
+            symbol: name.clone(),
+            kind,
+            location: SourceLocation {
+                file: path.to_path_buf(),
+                line: (idx + 1) as u32,
+                col: 1,
+                end_line: None,
+                end_col: None,
+            },
+            signature: Some(format!("{prefix}function {name}({params})")),
+            input_surface,
+            complexity,
+            fit_score,
+            sanitizers: vec![Sanitizer::Address],
+            rationale: String::new(),
+            reachable_functions: Vec::new(),
+            accumulated_complexity: 0,
+        });
+    }
 }
 
 /// Extract public, parameter-bearing function definitions from Rust source.
@@ -1769,6 +2392,200 @@ mod tests {
         out
     }
 
+    fn java_candidates(file: &str, src: &str) -> Vec<TargetCandidate> {
+        let mut out = Vec::new();
+        super::extract_java_methods(src, Path::new(file), &mut out);
+        out
+    }
+
+    #[test]
+    fn java_finds_public_static_methods_of_the_class_the_file_is_named_after() {
+        let src = "package com.example;\n\
+                   \n\
+                   import java.util.List;\n\
+                   \n\
+                   /** Frames { not a brace that counts } */\n\
+                   public final class Frames {\n\
+                   \x20   private static final String OPEN = \"{\";\n\
+                   \x20   public static final Pattern P = Pattern.compile(\"a(b)\");\n\
+                   \n\
+                   \x20   @Deprecated\n\
+                   \x20   public static int parse(byte[] data) {\n\
+                   \x20       if (data.length > 2 && data[0] == '{') {\n\
+                   \x20           return helper(data);\n\
+                   \x20       }\n\
+                   \x20       return 0;\n\
+                   \x20   }\n\
+                   \n\
+                   \x20   public static int parse(String text) { return 1; }\n\
+                   \x20   public int decode(byte[] data) { return 2; }\n\
+                   \x20   static int hidden(byte[] data) { return 3; }\n\
+                   \x20   public static void main(String[] args) {}\n\
+                   \x20   public static long now() { return 4; }\n\
+                   \x20   public static Frame fromBytes(final byte[] data, int limit) throws Exception {\n\
+                   \x20       return null;\n\
+                   \x20   }\n\
+                   \n\
+                   \x20   static final class Inner {\n\
+                   \x20       public static int nested(byte[] data) { return 5; }\n\
+                   \x20   }\n\
+                   }\n\
+                   \n\
+                   class Sidecar {\n\
+                   \x20   public static int other(byte[] data) { return 6; }\n\
+                   }\n";
+        let out = java_candidates("src/main/java/com/example/Frames.java", src);
+        let symbols: Vec<&str> = out.iter().map(|c| c.symbol.as_str()).collect();
+        assert_eq!(symbols, ["Frames.parse", "Frames.fromBytes"]);
+        assert_eq!(out[0].language, TargetLanguage::Java);
+        assert_eq!(out[0].location.line, 11);
+        assert_eq!(
+            out[0].signature.as_deref(),
+            Some("public static int parse(byte[] data)")
+        );
+        assert_eq!(out[0].kind, TargetKind::Parser);
+        assert_eq!(out[0].input_surface, InputSurface::Bytes);
+        assert!(out[0].complexity >= 3, "{}", out[0].complexity);
+        assert_eq!(
+            out[1].signature.as_deref(),
+            Some("public static Frame fromBytes(final byte[] data, int limit) throws Exception")
+        );
+    }
+
+    #[test]
+    fn java_skips_test_sources_and_descriptors() {
+        assert!(super::skip_java_file(Path::new(
+            "src/test/java/com/example/FramesTest.java"
+        )));
+        assert!(super::skip_java_file(Path::new(
+            "src/main/java/module-info.java"
+        )));
+        assert!(!super::skip_java_file(Path::new(
+            "src/main/java/com/example/Frames.java"
+        )));
+        // A class that is not the one the file is named after yields nothing.
+        assert!(java_candidates(
+            "Other.java",
+            "public class Frames {\n    public static int parse(byte[] d) { return 0; }\n}\n"
+        )
+        .is_empty());
+    }
+
+    fn javascript_candidates(src: &str) -> Vec<TargetCandidate> {
+        let mut out = Vec::new();
+        super::extract_javascript_functions(src, Path::new("lib/frames.js"), &mut out);
+        out
+    }
+
+    #[test]
+    fn javascript_finds_top_level_functions_exported_under_their_own_name() {
+        let src = "'use strict';\n\
+                   \n\
+                   /**\n\
+                   \x20* @param {Buffer} data\n\
+                   \x20* @param {number} depth\n\
+                   \x20*/\n\
+                   function parse(data, depth) {\n\
+                   \x20 if (data.length > 2 && data[0] === 0x7b) {\n\
+                   \x20   return inner(data);\n\
+                   \x20 }\n\
+                   \x20 return 0;\n\
+                   }\n\
+                   \n\
+                   function inner(data) { return 1; }\n\
+                   async function decode(\n\
+                   \x20 text,\n\
+                   \x20 options = {},\n\
+                   ) {\n\
+                   \x20 return text;\n\
+                   }\n\
+                   const tokenize = (text) => text.split(' ');\n\
+                   const widen = value => value * 2;\n\
+                   const table = (1 + 2) * 3;\n\
+                   function* walk(data) {}\n\
+                   function now() { return 4; }\n\
+                   function renamed(data) { return 5; }\n\
+                   class Codec {\n\
+                   \x20 static read(data) { return 6; }\n\
+                   }\n\
+                   exports.load = async function (data) { return 7; };\n\
+                   module.exports.unpack = function unpackImpl(data) { return 8; };\n\
+                   exports.widen = widen;\n\
+                   exports.other = renamed;\n\
+                   module.exports = {\n\
+                   \x20 parse,\n\
+                   \x20 decode: decode,\n\
+                   \x20 tokenize,\n\
+                   \x20 walk,\n\
+                   \x20 now,\n\
+                   \x20 alias: inner,\n\
+                   \x20 Codec,\n\
+                   };\n";
+        let out = javascript_candidates(src);
+        let symbols: Vec<&str> = out.iter().map(|c| c.symbol.as_str()).collect();
+        assert_eq!(
+            symbols,
+            ["parse", "decode", "tokenize", "widen", "load", "unpack"]
+        );
+        assert_eq!(out[0].language, TargetLanguage::JavaScript);
+        assert_eq!(out[0].location.line, 7);
+        assert_eq!(
+            out[0].signature.as_deref(),
+            Some("function parse(data, depth)")
+        );
+        assert_eq!(out[0].kind, TargetKind::Parser);
+        assert_eq!(out[0].input_surface, InputSurface::Bytes);
+        assert!(out[0].complexity >= 3, "{}", out[0].complexity);
+        // A parameter list over several lines is read whole.
+        assert_eq!(
+            out[1].signature.as_deref(),
+            Some("async function decode(text, options = {},)")
+        );
+        assert_eq!(out[1].input_surface, InputSurface::Structured);
+        assert_eq!(out[2].signature.as_deref(), Some("function tokenize(text)"));
+        assert_eq!(out[3].signature.as_deref(), Some("function widen(value)"));
+        assert_eq!(
+            out[4].signature.as_deref(),
+            Some("async function load(data)")
+        );
+        assert_eq!(out[4].location.line, 30);
+        assert_eq!(out[5].signature.as_deref(), Some("function unpack(data)"));
+    }
+
+    #[test]
+    fn javascript_reads_es_module_exports_and_skips_what_is_not_the_projects() {
+        let src = "export function parse(data) { return 1; }\n\
+                   export async function decode(text) { return 2; }\n\
+                   export const unpack = async (data, limit) => 3;\n\
+                   export default function main(data) { return 4; }\n\
+                   function inflate(data) { return 5; }\n\
+                   function hidden(data) { return 6; }\n\
+                   function moved(data) { return 7; }\n\
+                   export { inflate, moved as shifted };\n\
+                   \x20 export function nested(data) { return 8; }\n";
+        let out = javascript_candidates(src);
+        let symbols: Vec<&str> = out.iter().map(|c| c.symbol.as_str()).collect();
+        assert_eq!(symbols, ["parse", "decode", "unpack", "inflate"]);
+        assert_eq!(
+            out[2].signature.as_deref(),
+            Some("async function unpack(data, limit)")
+        );
+
+        for skipped in [
+            "node_modules/pkg/index.js",
+            "test/frames.js",
+            "src/__tests__/frames.js",
+            "src/frames.test.js",
+            "src/frames.spec.mjs",
+            "dist/bundle.min.js",
+            "eslint.config.js",
+        ] {
+            assert!(super::skip_javascript_file(Path::new(skipped)), "{skipped}");
+        }
+        assert!(!super::skip_javascript_file(Path::new("src/frames.js")));
+        assert!(!super::skip_javascript_file(Path::new("lib/contest/a.cjs")));
+    }
+
     fn python_candidates(src: &str) -> Vec<TargetCandidate> {
         let mut out = Vec::new();
         extract_python_functions(src, Path::new("codec.py"), &mut out);
@@ -2621,6 +3438,72 @@ mod tests {
             "ScanTokens complexity {} should reflect its control flow",
             scan.complexity
         );
+    }
+
+    /// A Bazel vendor directory holds the build rules and third-party
+    /// repositories `bazel vendor` copied in, whatever the directory is
+    /// called; `VENDOR.bazel` marks it.
+    #[test]
+    fn a_bazel_vendor_directory_is_not_scanned_in_any_language() {
+        let project = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(project.path()).unwrap();
+        let vendored = root.join("third_party/bazel");
+        std::fs::create_dir_all(vendored.join("dep+/src")).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(vendored.join("VENDOR.bazel"), "").unwrap();
+        std::fs::write(
+            vendored.join("dep+/src/dep.c"),
+            "int dep_parse(const char *text, int size) { return text[0] + size; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            vendored.join("dep+/src/dep.py"),
+            "def unpack(data):\n    return data\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/frames.c"),
+            "int parse_frames(const char *text, int size) { return text[0] + size; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/frames.py"),
+            "def parse(data):\n    return data\n",
+        )
+        .unwrap();
+        assert_eq!(
+            discoverable_source_files(&root, TargetLanguage::C).unwrap(),
+            vec![PathBuf::from("src/frames.c")]
+        );
+        let (candidates, _, _) = super::scan_python(&root).unwrap();
+        let symbols: Vec<&str> = candidates
+            .iter()
+            .map(|candidate| candidate.symbol.as_str())
+            .collect();
+        assert_eq!(symbols, ["parse"]);
+    }
+
+    #[test]
+    fn python_vendored_packages_are_not_targets() {
+        let project = tempfile::tempdir().unwrap();
+        let vendored = project.path().join("vendor/python/tinycodec");
+        std::fs::create_dir_all(&vendored).unwrap();
+        std::fs::write(
+            vendored.join("__init__.py"),
+            "def unpack(data):\n    return data\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project.path().join("frames.py"),
+            "def parse(data):\n    return data\n",
+        )
+        .unwrap();
+        let (candidates, _, _) = super::scan_python(project.path()).unwrap();
+        let symbols: Vec<&str> = candidates
+            .iter()
+            .map(|candidate| candidate.symbol.as_str())
+            .collect();
+        assert_eq!(symbols, ["parse"]);
     }
 
     #[test]

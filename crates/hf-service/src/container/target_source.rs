@@ -216,6 +216,15 @@ pub(super) fn rust_crate_ident(
     Some(name.replace('-', "_"))
 }
 
+/// The text of a target's defining file, read from inside its project root,
+/// for the template drafts that take a clause from it (the Go package, the
+/// Java package). `None` for a file that is outside the project, not
+/// regular, or larger than the prompt-source bound.
+pub(super) fn target_file_text(candidate: &TargetCandidate) -> Option<String> {
+    let canonical_root = std::fs::canonicalize(&candidate.project_root).ok()?;
+    read_project_file(&canonical_root, Path::new(&candidate.relative_file())).map(|file| file.text)
+}
+
 /// Lines shown on each side of a faulting line.
 const CRASH_SITE_RADIUS: u32 = 20;
 

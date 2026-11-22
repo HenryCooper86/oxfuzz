@@ -8,10 +8,13 @@
 //! `docs/standards/ENGINE_ADAPTER_STANDARD.md`.
 
 pub mod afl;
+pub mod atheris;
 pub mod cmin;
 pub mod dict;
 pub mod go_native;
 pub mod honggfuzz;
+pub mod jazzer;
+pub mod jazzerjs;
 pub mod libfuzzer;
 pub mod managed_mutator;
 pub mod progress;

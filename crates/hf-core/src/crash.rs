@@ -21,6 +21,11 @@ pub enum CrashKind {
     /// because a leak is an availability bug (CWE-401), not a memory-safety
     /// violation, and reports map the kind straight onto a CWE and a severity.
     Leak,
+    /// A `MemorySanitizer` report: a branch, pointer, or system call depended
+    /// on memory that was never written (CWE-457). `ASan` does not detect it.
+    Msan,
+    /// A `ThreadSanitizer` report: a data race or lock misuse (CWE-362).
+    Tsan,
     Segv,
     Abort,
     Timeout,

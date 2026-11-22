@@ -13,7 +13,7 @@ managed-mutators = ["hf-service/managed-mutators", "hf-web/managed-mutators"]
 model-budgets = ["hf-service/model-budgets", "hf-web/model-budgets"]
 clang-analysis = ["hf-service/clang-analysis", "hf-web/clang-analysis"]
 campaign-allocation = ["hf-service/campaign-allocation", "hf-web/campaign-allocation"]
-default = ["managed-mutators", "model-budgets", "ai-target-ranking", "campaign-allocation", "automotive-lab", "automotive-scapy", "campaign-health", "build-context", "concolic-enrichment", "build-doctor", "campaign-trust", "change-aware", "coverage-blockers", "harness-tournament", "harness-behavior", "harness-work-order", "native-analysis", "oracle-studio", "patch-to-proof", "proof-carrying", "run-closeout", "triage-disposition", "unreached-surface"]
+default = ["managed-mutators", "model-budgets", "ai-target-ranking", "binary-only-fuzzing", "campaign-allocation", "automotive-lab", "automotive-scapy", "campaign-health", "build-context", "concolic-enrichment", "build-doctor", "campaign-trust", "change-aware", "coverage-blockers", "crash-alerts", "crash-bisection", "go-native-fuzzing", "harness-tournament", "harness-behavior", "harness-work-order", "jvm-jazzer", "js-jazzer", "native-analysis", "oracle-studio", "patch-to-proof", "proof-carrying", "python-atheris", "run-closeout", "triage-disposition", "unreached-surface"]
 ai-target-ranking = ["hf-service/ai-target-ranking", "hf-web/ai-target-ranking"]
 automotive-scapy = ["hf-service/automotive-scapy", "hf-web/automotive-scapy"]
 build-context = ["hf-service/build-context", "hf-web/build-context"]
@@ -46,6 +46,34 @@ unreached-surface = [
     "coverage-blockers",
     "hf-service/unreached-surface",
     "hf-web/unreached-surface",
+]
+jvm-jazzer = [
+    "hf-service/jvm-jazzer",
+    "hf-web/jvm-jazzer",
+]
+js-jazzer = [
+    "hf-service/js-jazzer",
+    "hf-web/js-jazzer",
+]
+python-atheris = [
+    "hf-service/python-atheris",
+    "hf-web/python-atheris",
+]
+go-native-fuzzing = [
+    "hf-service/go-native-fuzzing",
+    "hf-web/go-native-fuzzing",
+]
+binary-only-fuzzing = [
+    "hf-service/binary-only-fuzzing",
+    "hf-web/binary-only-fuzzing",
+]
+crash-bisection = [
+    "hf-service/crash-bisection",
+    "hf-web/crash-bisection",
+]
+crash-alerts = [
+    "hf-service/crash-alerts",
+    "hf-web/crash-alerts",
 ]
 campaign-health = [
     "hf-service/campaign-health",

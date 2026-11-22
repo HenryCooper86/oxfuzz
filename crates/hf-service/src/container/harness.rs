@@ -402,6 +402,59 @@ fn smoke_run_stats(
     }
 }
 
+/// Whether a draft for `language` comes from the signature template whatever
+/// the AI policy allows. A Go harness is one fuzz test whose package clause,
+/// test name, and recorded package directory the build derives from, and a
+/// Python, Java or JavaScript harness is a fixed source the lint holds to its
+/// generated text, so all four are generated rather than written by a model.
+///
+/// # Errors
+/// Returns [`ClassifiedError::Validation`] when the caller required a model
+/// draft for such a target.
+fn template_only(language: TargetLanguage, policy: AiPolicy) -> Result<bool, ClassifiedError> {
+    let name = match language {
+        TargetLanguage::Go => "Go",
+        TargetLanguage::Python => "Python",
+        TargetLanguage::Java => "Java",
+        TargetLanguage::JavaScript => "JavaScript",
+        TargetLanguage::C | TargetLanguage::Cpp | TargetLanguage::Rust => return Ok(false),
+    };
+    if policy == AiPolicy::Require {
+        return Err(ClassifiedError::Validation(format!(
+            "an AI-written harness was required, but {name} harnesses are generated from the \
+             target's signature; drop the requirement to draft this target"
+        )));
+    }
+    Ok(true)
+}
+
+/// Lint harness source before a build. A Go harness is additionally held to
+/// the selected target: its one fuzz test must be `Fuzz<Symbol>` and call
+/// that function, so a source for another function cannot be built under
+/// this target's name. A Python, Java or JavaScript harness is held to the
+/// generated template of the selected function.
+fn harness_source_lint(
+    source: &str,
+    language: TargetLanguage,
+    target: &str,
+) -> Vec<hf_harness::LintFinding> {
+    // `file.go::Symbol` selects by file; the symbol is the last part.
+    let symbol = target.rsplit("::").next().unwrap_or(target);
+    if language == TargetLanguage::Go {
+        return hf_harness::go_native::lint(source, symbol);
+    }
+    if language == TargetLanguage::Python {
+        return hf_harness::python_atheris::lint(source, symbol);
+    }
+    if language == TargetLanguage::Java {
+        return hf_harness::jvm_jazzer::lint(source, symbol);
+    }
+    if language == TargetLanguage::JavaScript {
+        return hf_harness::js_jazzer::lint(source, symbol);
+    }
+    hf_harness::lint_harness_source(source, language)
+}
+
 impl ServiceContainer {
     async fn harness_review_locked_detailed(
         &self,
@@ -797,7 +850,7 @@ impl ServiceContainer {
         persistent: bool,
         policy: AiPolicy,
     ) -> Result<String, ClassifiedError> {
-        if policy == AiPolicy::Off {
+        if policy == AiPolicy::Off || template_only(candidate.language, policy)? {
             return Ok(heuristic_draft(candidate, engine, sanitizer, persistent)?.source);
         }
         if let Some(pool) = self.provider_pool() {
@@ -1041,7 +1094,7 @@ impl ServiceContainer {
         loop {
             let attempt = repairs_used + 1;
             (observer.on_step)(HarnessStep::Compiling { attempt });
-            let lint = hf_harness::lint_harness_source(&source, lang);
+            let lint = harness_source_lint(&source, lang, target);
             if hf_harness::has_blocking_finding(&lint) {
                 // A lint error is a build failure the compiler would have
                 // accepted. Route it into the same repair path, skipping the
@@ -1329,7 +1382,7 @@ impl ServiceContainer {
             .ok_or_else(|| ClassifiedError::Validation(format!("target '{target}' not found")))?
             .clone();
 
-        if policy == AiPolicy::Off {
+        if policy == AiPolicy::Off || template_only(lang, policy)? {
             return heuristic_draft(&candidate, engine, sanitizer, persistent);
         }
         let Some(pool) = self.provider_pool() else {
@@ -1436,7 +1489,7 @@ impl ServiceContainer {
             .map_err(|error| fuzzing_policy_error(&error))?;
         // Cheapest check first: a harness that terminates the process, spawns a
         // shell, or opens a socket is rejected before a container starts.
-        let lint = hf_harness::lint_harness_source(&source, lang);
+        let lint = harness_source_lint(&source, lang, target);
         if hf_harness::has_blocking_finding(&lint) {
             return Err(ClassifiedError::Harness(format!(
                 "harness lint failed:\n{}",

@@ -78,6 +78,22 @@ pub struct RunResult {
     pub termination: CommandTermination,
 }
 
+/// Default per-file write ceiling for a fuzz run's sandbox.
+const DEFAULT_RUN_FILE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// The largest file a fuzz run of `engine` may write in its sandbox.
+///
+/// The limit bounds scratch writes by untrusted code; it is raised only for
+/// the engines whose own fixed-size shared-memory file needs more.
+#[must_use]
+pub const fn run_file_size_limit_bytes(engine: EngineKind) -> u64 {
+    match engine {
+        EngineKind::Honggfuzz => crate::honggfuzz::SHARED_MEMORY_BYTES,
+        EngineKind::GoNative => crate::go_native::SHARED_MEMORY_BYTES,
+        _ => DEFAULT_RUN_FILE_BYTES,
+    }
+}
+
 /// Assemble the sandbox environment for one engine run from the typed config.
 ///
 /// `cfg.env` passes through untouched except for the runner-owned keys:
@@ -87,6 +103,12 @@ pub struct RunResult {
 ///   adapter also passes `-detect_leaks=0`). An operator-provided `ASAN_OPTIONS`
 ///   wins outright: merging sanitizer options we cannot interpret would
 ///   silently change what the operator asked to measure.
+/// - A run over a `TSan` build gets `TSAN_OPTIONS=halt_on_error=1` (unless the
+///   operator set `TSAN_OPTIONS`): by default a report does not stop the
+///   process, and the artifact libFuzzer writes later is not the racing input.
+///   honggfuzz also gets `abort_on_error=1`, because it records a crash by
+///   signal and a `TSan` exit carries none. libFuzzer must not get it: the
+///   abort hangs a libFuzzer binary in the pinned sandbox image.
 /// - A libFuzzer run over a `UBSan` build gets `UBSAN_OPTIONS=print_stacktrace=1`
 ///   (unless the operator set `UBSAN_OPTIONS`): the binary already aborts on a
 ///   finding (`-fno-sanitize-recover=undefined` at compile time), and the
@@ -130,6 +152,21 @@ pub fn run_env(
     {
         env.insert("UBSAN_OPTIONS".to_owned(), "print_stacktrace=1".to_owned());
     }
+    if cfg.sanitizer == hf_core::target::Sanitizer::Thread && !env.contains_key("TSAN_OPTIONS") {
+        let options = match engine {
+            EngineKind::LibFuzzer => Some("halt_on_error=1"),
+            EngineKind::Honggfuzz => Some("halt_on_error=1:abort_on_error=1"),
+            EngineKind::AflPlusPlus
+            | EngineKind::Syzkaller
+            | EngineKind::GoNative
+            | EngineKind::Atheris
+            | EngineKind::Jazzer
+            | EngineKind::JazzerJs => None,
+        };
+        if let Some(options) = options {
+            env.insert("TSAN_OPTIONS".to_owned(), options.to_owned());
+        }
+    }
     if engine == EngineKind::AflPlusPlus {
         if env.contains_key("AFL_AUTORESUME") {
             return Err(ClassifiedError::Validation(
@@ -146,6 +183,18 @@ pub fn run_env(
             .or_insert_with(|| "1".to_owned());
         env.entry("AFL_FUZZER_STATS_UPDATE_INTERVAL".to_owned())
             .or_insert_with(|| "1".to_owned());
+    }
+    if engine == EngineKind::GoNative {
+        // A compiled Go test binary downloads nothing, but it can start `go`
+        // subprocesses if the code under test does; keep those offline and
+        // on the pinned toolchain, exactly as the build was.
+        for (name, value) in [
+            ("GOPROXY", "off"),
+            ("GOSUMDB", "off"),
+            ("GOTOOLCHAIN", "local"),
+        ] {
+            env.insert(name.to_owned(), value.to_owned());
+        }
     }
     Ok(env)
 }
@@ -306,11 +355,19 @@ impl EngineRunner {
         let aggregate = std::sync::Mutex::new(ProgressAggregate::default());
         let saw_line = std::sync::atomic::AtomicBool::new(false);
         let saw_completion = std::sync::atomic::AtomicBool::new(false);
+        let saw_go_failing_input = std::sync::atomic::AtomicBool::new(false);
 
         let on_line = |line: &str| {
             use std::sync::atomic::Ordering::Relaxed;
 
             saw_line.store(true, Relaxed);
+            if engine == EngineKind::GoNative
+                && line
+                    .trim_start()
+                    .starts_with(crate::go_native::FAILING_INPUT_LINE)
+            {
+                saw_go_failing_input.store(true, Relaxed);
+            }
             if line_signals_completion(line) {
                 saw_completion.store(true, Relaxed);
             }
@@ -384,9 +441,18 @@ impl EngineRunner {
         // coverage). `saw_completion` stays as a fallback for an engine that
         // exits with some other code but printed an anchored terminal line
         // (see [`line_signals_completion`]).
+        //
+        // A Go test binary exits 1 for every failure, including one that has
+        // nothing to do with a finding (a missing cache directory, a pattern
+        // that matches no fuzz test). It is a valid fuzzing outcome only when
+        // Go also reported the failing input it saved.
+        let go_finding = engine == EngineKind::GoNative
+            && result.exit_code == 1
+            && saw_go_failing_input.load(std::sync::atomic::Ordering::Relaxed);
         let is_valid_outcome = result.exit_code == 0
             || result.exit_code == 70
             || result.exit_code == 77
+            || go_finding
             || saw_completion.load(std::sync::atomic::Ordering::Relaxed);
         if !is_valid_outcome {
             return Err(ClassifiedError::Engine(format!(

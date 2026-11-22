@@ -381,6 +381,14 @@ fn prepare_stage_contents(
     Ok(rootfs_size)
 }
 
+/// Kernel command line a synthesized config adds to syzkaller's own.
+///
+/// The rootfs syzkaller's `create-image.sh` builds configures `eth0`. On
+/// amd64 syzkaller already boots with this option; on arm64 it does not, the
+/// guest's udev renames the interface, no address is configured, and the
+/// campaign cannot reach the guest over SSH.
+const GUEST_KERNEL_CMDLINE: &str = "net.ifnames=0";
+
 /// Build the manager.cfg skeleton for a campaign without a supplied config.
 ///
 /// VM sizing fields (`procs`, `vm.count`, `vm.mem`, `vm.cpu`) are intentionally
@@ -392,6 +400,12 @@ fn synthesized_config(request: &SyzkallerStageRequest) -> Value {
     } else {
         "pc"
     };
+    // The accelerator is written as a machine property on purpose.
+    // syz-manager multiplies its timeouts by ten when the VM section contains
+    // the text `-accel tcg`. Measured on an arm64 host emulating a KASAN
+    // guest (2026-11-22), that spelling recorded no coverage in a 30-minute
+    // campaign, with six test processes and with two, where this one
+    // reached 1,670 edges in 20 minutes. The cause was not isolated.
     let accel = if request.use_kvm { "kvm" } else { "tcg" };
     let cpu = if request.use_kvm { "host" } else { "max" };
     json!({
@@ -403,7 +417,8 @@ fn synthesized_config(request: &SyzkallerStageRequest) -> Value {
         "type": "qemu",
         "vm": {
             "kernel": format!("{CONTAINER_INPUTS}/kernel"),
-            "qemu_args": format!("-machine {machine},accel={accel} -cpu {cpu}")
+            "qemu_args": format!("-machine {machine},accel={accel} -cpu {cpu}"),
+            "cmdline": GUEST_KERNEL_CMDLINE
         }
     })
 }
@@ -1318,6 +1333,10 @@ mod tests {
         assert_eq!(
             staged["vm"]["qemu_args"],
             "-machine virt,accel=tcg -cpu max"
+        );
+        assert_eq!(
+            staged["vm"]["cmdline"], "net.ifnames=0",
+            "the rootfs configures eth0, which arm64 guests rename without this"
         );
         assert!(!serde_json::to_string(&staged)
             .unwrap()

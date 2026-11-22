@@ -202,11 +202,19 @@ pub fn generate_target_seeds(target: &str) -> Vec<(Vec<u8>, String)> {
 /// The literals a target compares against (magic bytes, format keywords) are
 /// among the cheapest ways to get a fuzzer past shallow `memcmp`/keyword gates,
 /// so seeding the engine dictionary with them measurably deepens coverage.
-/// Returns `None` when no usable literals were found (so the caller adds no
+/// The operator's own tokens (stored by `set_user_dictionary`) come first, so
+/// an engine that caps its dictionary keeps them, and are enough on their own
+/// to produce a dictionary.
+/// Returns `None` when no usable tokens were found (so the caller adds no
 /// dictionary flag) or the file cannot be written.
 pub(super) fn build_workspace_dictionary(workspace: &Path, dict_name: &str) -> Option<PathBuf> {
     let mut tokens: Vec<Vec<u8>> = Vec::new();
     let mut seen = std::collections::HashSet::new();
+    for token in user_dictionary_tokens(workspace) {
+        if seen.insert(token.clone()) {
+            tokens.push(token);
+        }
+    }
     let mut remaining = MAX_DICTIONARY_SOURCE_BYTES;
     for path in dictionary_source_paths(workspace) {
         if remaining == 0 {
@@ -232,6 +240,40 @@ pub(super) fn build_workspace_dictionary(workspace: &Path, dict_name: &str) -> O
         None,
     )
     .ok()
+}
+
+/// The operator-supplied dictionary of a target workspace.
+pub(super) const USER_DICTIONARY_FILE: &str = "user.dict";
+
+/// Bytes read from a stored user dictionary: the token and length limits of
+/// `parse_user_dict` keep a valid one far below this.
+const MAX_USER_DICTIONARY_BYTES: usize = 4 * 1024 * 1024;
+
+/// The stored user dictionary text, or `None` when none is set.
+pub(super) fn read_user_dictionary(workspace: &Path) -> Option<String> {
+    let (text, _) = read_dictionary_source(
+        workspace,
+        Path::new(USER_DICTIONARY_FILE),
+        MAX_USER_DICTIONARY_BYTES,
+    )
+    .ok()?;
+    (!text.trim().is_empty()).then_some(text)
+}
+
+/// Tokens of the stored user dictionary. The workspace is writable by the
+/// sandbox, so the file is re-validated here: one that no longer parses is
+/// reported and left out rather than handed to the engine.
+fn user_dictionary_tokens(workspace: &Path) -> Vec<Vec<u8>> {
+    let Some(text) = read_user_dictionary(workspace) else {
+        return Vec::new();
+    };
+    match hf_engine::dict::parse_user_dict(&text) {
+        Ok(tokens) => tokens,
+        Err(error) => {
+            tracing::warn!(%error, "stored user dictionary no longer parses; not using it");
+            Vec::new()
+        }
+    }
 }
 
 /// Aggregate safety ceiling for optional dictionary source inspection.
@@ -559,12 +601,20 @@ pub fn copy_project_sources(project: &Path, workspace: &Path) {
         &mut staged,
     );
     stage_rust_crate(project, workspace, &mut staged);
+    stage_go_module(project, workspace, &mut staged);
+    stage_python_modules(project, workspace, &mut staged);
+    stage_java_sources(project, workspace, &mut staged);
+    stage_javascript_project(project, workspace, &mut staged);
 }
 
 /// Source and header extensions staged for a C/C++ build. Headers are only
 /// copied (the compile links `.c`/`.cc`/`.cpp`/`.cxx` files), so every common
-/// C++ header suffix is staged, including the `.hh` that discovery scans.
-const STAGED_SOURCE_EXTENSIONS: [&str; 8] = ["c", "h", "cc", "cpp", "cxx", "hpp", "hh", "hxx"];
+/// C++ header suffix is staged, including the `.hh` that discovery scans,
+/// and so are the files sources include as text under other suffixes:
+/// `.inc`, `.inl`, `.ipp`, `.tcc` and `.def`.
+const STAGED_SOURCE_EXTENSIONS: [&str; 13] = [
+    "c", "h", "cc", "cpp", "cxx", "hpp", "hh", "hxx", "inc", "inl", "ipp", "tcc", "def",
+];
 
 /// Header suffixes accepted from the configured build directory. Generated
 /// sources are staged only when the compile database references them (see
@@ -826,11 +876,136 @@ fn stage_file(root: &Path, path: &Path, workspace: &Path, staged: &mut usize) {
     *staged += 1;
 }
 
-/// Stage Rust manifests and source files, including local workspace members,
-/// so cargo-fuzz path dependencies resolve inside the sandbox. A no-op when
-/// the project has no `Cargo.toml` (i.e. is not a Rust crate).
-fn stage_rust_crate(project: &Path, workspace: &Path, staged: &mut usize) {
-    if !project.join("Cargo.toml").is_file() {
+/// Whether `path` is part of a Go module's build: the module files, Go and
+/// Go assembly sources, and the vendor manifest. A module's own `_test.go`
+/// files are left out: `go test -c` would compile them into the harness
+/// binary, where a `TestMain` or a test `init` would run project code outside
+/// the fuzz callback and a second fuzz test would make the run ambiguous.
+fn is_go_module_input(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    if matches!(name, "go.mod" | "go.sum" | "modules.txt") {
+        return true;
+    }
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some("go") => !name.ends_with("_test.go"),
+        Some("s") => true,
+        _ => false,
+    }
+}
+
+/// Stage a Go module -- `go.mod`, `go.sum`, its Go sources, and a vendored
+/// dependency tree when the project has one -- so `go test -c` builds offline
+/// inside the sandbox. A no-op when the project root has no `go.mod` (the
+/// project root must be the module root).
+fn stage_go_module(project: &Path, workspace: &Path, staged: &mut usize) {
+    if !project.join("go.mod").is_file() {
+        return;
+    }
+    stage_tree(project, project, workspace, &is_go_module_input, staged);
+}
+
+/// Stage a project's Python modules at their project-relative paths, which is
+/// what makes them importable from the workspace root, and the packages it
+/// carries under `vendor/python` as they are: a package reads the data files
+/// it ships, so that tree is not filtered by extension. The generated
+/// harness script is written by the build, never taken from the project.
+fn stage_python_modules(project: &Path, workspace: &Path, staged: &mut usize) {
+    let vendored = project.join(hf_harness::python_atheris::VENDORED_PACKAGES_DIR);
+    stage_tree(
+        project,
+        project,
+        workspace,
+        &|path| {
+            !path.starts_with(&vendored)
+                && path.extension().and_then(|extension| extension.to_str()) == Some("py")
+                && path.file_name().and_then(|name| name.to_str())
+                    != Some(hf_harness::python_atheris::HARNESS_FILE)
+        },
+        staged,
+    );
+    let is_directory =
+        std::fs::symlink_metadata(&vendored).is_ok_and(|metadata| metadata.file_type().is_dir());
+    if is_directory {
+        let mut carried = 0;
+        if !stage_whole_tree(project, &vendored, workspace, &mut carried) {
+            tracing::warn!(
+                "stopped staging {} at the {MAX_VENDORED_FILES} file limit; a module that \
+                 imports a package past it will fail to import",
+                vendored.display()
+            );
+        }
+    }
+}
+
+/// Stage a project's Java sources, and the jars directly inside its `lib` or
+/// `libs` directory, at their project-relative paths. The build decides
+/// which sources it compiles (it leaves test directories out); the generated
+/// harness class is written by the build, never taken from the project.
+fn stage_java_sources(project: &Path, workspace: &Path, staged: &mut usize) {
+    stage_tree(
+        project,
+        project,
+        workspace,
+        &|path| {
+            let is_source = path.extension().and_then(|extension| extension.to_str())
+                == Some("java")
+                && path.file_name().and_then(|name| name.to_str())
+                    != Some(hf_harness::jvm_jazzer::HARNESS_FILE);
+            // The jars a project carries with it are build inputs too.
+            is_source
+                || path
+                    .strip_prefix(project)
+                    .is_ok_and(hf_harness::jvm_jazzer::is_vendored_library)
+        },
+        staged,
+    );
+}
+
+/// Cap on the manifest read to decide whether a Node.js project carries
+/// packages. A manifest past it is treated as declaring none.
+const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
+
+/// Whether a Node.js manifest declares packages the project's modules load
+/// when they run. Development-only packages are not among them: a test
+/// runner and a bundler are not what the fuzzed function calls.
+fn manifest_declares_packages(manifest: &Path) -> bool {
+    use std::io::Read as _;
+    let Ok(file) = std::fs::File::open(manifest) else {
+        return false;
+    };
+    let mut bytes = Vec::new();
+    if file
+        .take(MAX_MANIFEST_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .is_err()
+        || u64::try_from(bytes.len()).map_or(true, |length| length > MAX_MANIFEST_BYTES)
+    {
+        return false;
+    }
+    let Ok(serde_json::Value::Object(fields)) = serde_json::from_slice(&bytes) else {
+        return false;
+    };
+    ["dependencies", "optionalDependencies", "peerDependencies"]
+        .iter()
+        .any(|key| {
+            fields
+                .get(*key)
+                .and_then(serde_json::Value::as_object)
+                .is_some_and(|packages| !packages.is_empty())
+        })
+}
+
+/// Stage a Node.js project -- its manifest, its JavaScript modules, and the
+/// JSON files they read -- at their project-relative paths, and the packages
+/// it carries in `node_modules` when its manifest declares any, so its
+/// modules load offline inside the sandbox. A no-op when the project root
+/// has no `package.json` (the project root must be the package root). The
+/// generated harness is written by the build, never taken from the project.
+fn stage_javascript_project(project: &Path, workspace: &Path, staged: &mut usize) {
+    let manifest = project.join(hf_harness::js_jazzer::MANIFEST_FILE);
+    if !is_regular_file(&manifest) {
         return;
     }
     stage_tree(
@@ -838,13 +1013,108 @@ fn stage_rust_crate(project: &Path, workspace: &Path, staged: &mut usize) {
         project,
         workspace,
         &|path| {
-            matches!(
-                path.file_name().and_then(|name| name.to_str()),
-                Some("Cargo.toml" | "Cargo.lock")
-            ) || path.extension().and_then(|extension| extension.to_str()) == Some("rs")
+            path.extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| {
+                    extension == "json"
+                        || hf_harness::js_jazzer::MODULE_EXTENSIONS.contains(&extension)
+                })
+                && path.file_name().and_then(|name| name.to_str())
+                    != Some(hf_harness::js_jazzer::HARNESS_FILE)
         },
         staged,
     );
+    let packages = project.join(hf_harness::js_jazzer::DEPENDENCIES_DIR);
+    let is_directory =
+        std::fs::symlink_metadata(&packages).is_ok_and(|metadata| metadata.file_type().is_dir());
+    if is_directory && manifest_declares_packages(&manifest) {
+        let mut carried = 0;
+        if !stage_whole_tree(project, &packages, workspace, &mut carried) {
+            tracing::warn!(
+                "stopped staging {} at the {MAX_VENDORED_FILES} file limit; a module that \
+                 loads a package past it will fail to load",
+                packages.display()
+            );
+        }
+    }
+}
+
+/// Cap on the files of a dependency tree a project carries. `cargo vendor`
+/// and `node_modules` trees are large; cargo verifies every file of a
+/// vendored crate, so such a tree is staged whole or the build fails. The
+/// cap only bounds the host traversal.
+const MAX_VENDORED_FILES: usize = 100_000;
+
+/// Stage Rust manifests and source files, including local workspace members,
+/// so cargo-fuzz path dependencies resolve inside the sandbox, and the
+/// project's `vendor/` tree when it has one, so its crates.io dependencies
+/// do too. A no-op when the project has no `Cargo.toml` (i.e. is not a Rust
+/// crate).
+fn stage_rust_crate(project: &Path, workspace: &Path, staged: &mut usize) {
+    if !project.join("Cargo.toml").is_file() {
+        return;
+    }
+    let vendor = project.join(hf_harness::cargo_fuzz::VENDOR_DIR);
+    stage_tree(
+        project,
+        project,
+        workspace,
+        &|path| {
+            !path.starts_with(&vendor)
+                && (matches!(
+                    path.file_name().and_then(|name| name.to_str()),
+                    Some("Cargo.toml" | "Cargo.lock")
+                ) || path.extension().and_then(|extension| extension.to_str()) == Some("rs"))
+        },
+        staged,
+    );
+    let is_directory =
+        std::fs::symlink_metadata(&vendor).is_ok_and(|metadata| metadata.file_type().is_dir());
+    if is_directory {
+        let mut vendored = 0;
+        if !stage_whole_tree(project, &vendor, workspace, &mut vendored) {
+            tracing::warn!(
+                "stopped staging {} at the {MAX_VENDORED_FILES} file limit; the build \
+                 will reject the incomplete crates",
+                vendor.display()
+            );
+        }
+    }
+}
+
+/// Copy a carried dependency tree as it is: every regular file, in every
+/// directory. Cargo checks each vendored crate against its recorded file
+/// checksums, and a Node.js package loads whatever files it ships, so the
+/// name-based skips of [`stage_tree`] would break a crate or a package that
+/// has a `build` or `target` directory. Symlinks are refused here too.
+/// Returns `false` when [`MAX_VENDORED_FILES`] stopped the walk.
+fn stage_whole_tree(root: &Path, directory: &Path, workspace: &Path, staged: &mut usize) -> bool {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        tracing::warn!("failed to read vendored directory {}", directory.display());
+        return true;
+    };
+    let mut entries: Vec<_> = entries.flatten().collect();
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for entry in entries {
+        if *staged >= MAX_VENDORED_FILES {
+            return false;
+        }
+        let path = entry.path();
+        let Ok(kind) = entry.file_type() else {
+            tracing::warn!("failed to inspect {}", path.display());
+            continue;
+        };
+        if kind.is_symlink() {
+            tracing::warn!("refusing to stage symlink {}", path.display());
+        } else if kind.is_dir() {
+            if !stage_whole_tree(root, &path, workspace, staged) {
+                return false;
+            }
+        } else if kind.is_file() {
+            stage_file(root, &path, workspace, staged);
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -1153,6 +1423,45 @@ mod dictionary_tests {
     }
 
     #[test]
+    fn user_tokens_come_first_and_are_enough_on_their_own() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("empty.c"), "int f(){ return 0; }").unwrap();
+        std::fs::write(
+            dir.path().join(super::USER_DICTIONARY_FILE),
+            "\"USER_TOKEN\"\n",
+        )
+        .unwrap();
+        let path = build_workspace_dictionary(dir.path(), "t.dict").expect("user tokens suffice");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "\"USER_TOKEN\"\n");
+
+        std::fs::write(
+            dir.path().join("parse.c"),
+            "int g(){ return strcmp(s, \"MAGIC\") + strcmp(s, \"USER_TOKEN\"); }",
+        )
+        .unwrap();
+        let path = build_workspace_dictionary(dir.path(), "t.dict").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "\"USER_TOKEN\"\n\"MAGIC\"\n",
+            "user tokens lead and a token both sources hold appears once"
+        );
+    }
+
+    #[test]
+    fn a_stored_user_dictionary_that_no_longer_parses_is_left_out() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(super::USER_DICTIONARY_FILE),
+            "not a dictionary line\n",
+        )
+        .unwrap();
+        assert!(build_workspace_dictionary(dir.path(), "t.dict").is_none());
+        // An emptied file means no user dictionary.
+        std::fs::write(dir.path().join(super::USER_DICTIONARY_FILE), "\n").unwrap();
+        assert!(super::read_user_dictionary(dir.path()).is_none());
+    }
+
+    #[test]
     fn returns_none_when_no_literals() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("empty.c"), "int f(){ return 0; }").unwrap();
@@ -1163,6 +1472,50 @@ mod dictionary_tests {
 #[cfg(test)]
 mod rust_staging_tests {
     use super::copy_project_sources;
+
+    /// C and C++ libraries include files that are neither sources nor
+    /// conventional headers: abseil's `.inc`, inline definitions in `.inl`
+    /// and `.ipp`, template bodies in `.tcc`, X-macro tables in `.def`. A
+    /// compile that cannot open one fails before the harness is linked.
+    #[test]
+    fn stages_the_textual_includes_c_and_cpp_sources_depend_on() {
+        let project = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join("lib")).unwrap();
+        for name in [
+            "table.c",
+            "table.h",
+            "table.inc",
+            "impl.inl",
+            "impl.ipp",
+            "body.tcc",
+            "opcodes.def",
+            "notes.txt",
+            "data.bin",
+        ] {
+            std::fs::write(project.path().join("lib").join(name), "/* text */\n").unwrap();
+        }
+
+        copy_project_sources(project.path(), workspace.path());
+
+        for staged in [
+            "table.c",
+            "table.h",
+            "table.inc",
+            "impl.inl",
+            "impl.ipp",
+            "body.tcc",
+            "opcodes.def",
+        ] {
+            assert!(
+                workspace.path().join("lib").join(staged).is_file(),
+                "{staged} is staged"
+            );
+        }
+        for left_out in ["notes.txt", "data.bin"] {
+            assert!(!workspace.path().join("lib").join(left_out).exists());
+        }
+    }
 
     #[test]
     fn stages_rust_crate_manifest_and_src_tree() {
@@ -1192,6 +1545,48 @@ mod rust_staging_tests {
             .join("inner")
             .join("mod.rs")
             .is_file());
+    }
+
+    #[test]
+    fn stages_a_go_module_without_its_own_tests() {
+        let project = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let write = |relative: &str, text: &str| {
+            let path = project.path().join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        write("go.mod", "module example.com/m\n\ngo 1.22\n");
+        write("go.sum", "");
+        write("wire/parse.go", "package wire\n");
+        write("wire/parse_test.go", "package wire\nfunc TestMain() {}\n");
+        write("wire/asm_arm64.s", "// asm\n");
+        write("vendor/modules.txt", "# example.com/dep v1.0.0\n");
+        write("vendor/example.com/dep/dep.go", "package dep\n");
+        write("README.md", "docs\n");
+        write(".git/config", "x\n");
+
+        copy_project_sources(project.path(), workspace.path());
+
+        for staged in [
+            "go.mod",
+            "go.sum",
+            "wire/parse.go",
+            "wire/asm_arm64.s",
+            "vendor/modules.txt",
+            "vendor/example.com/dep/dep.go",
+        ] {
+            assert!(workspace.path().join(staged).is_file(), "{staged}");
+        }
+        for left_out in ["wire/parse_test.go", "README.md", ".git/config"] {
+            assert!(!workspace.path().join(left_out).exists(), "{left_out}");
+        }
+        // Without go.mod at the root, Go sources are not staged at all.
+        let bare = tempfile::tempdir().unwrap();
+        let bare_workspace = tempfile::tempdir().unwrap();
+        std::fs::write(bare.path().join("parse.go"), "package p\n").unwrap();
+        copy_project_sources(bare.path(), bare_workspace.path());
+        assert!(!bare_workspace.path().join("parse.go").exists());
     }
 
     #[test]
@@ -1226,6 +1621,57 @@ mod rust_staging_tests {
         assert!(workspace.path().join("crates/codec/Cargo.toml").is_file());
         assert!(workspace.path().join("crates/codec/src/lib.rs").is_file());
         assert!(!workspace.path().join("crates/codec/target").exists());
+    }
+
+    #[test]
+    fn a_vendored_crate_tree_is_staged_whole() {
+        let project = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let write = |relative: &str, text: &str| {
+            let path = project.path().join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        write("Cargo.toml", "[package]\nname = \"root\"\n");
+        write("src/lib.rs", "pub fn root() {}");
+        // Cargo verifies every file of a vendored crate, so nothing in the
+        // tree is filtered: not by extension, not by directory name.
+        let vendored = [
+            "vendor/dep/Cargo.toml",
+            "vendor/dep/.cargo-checksum.json",
+            "vendor/dep/src/lib.rs",
+            "vendor/dep/src/target/parser.rs",
+            "vendor/dep/build/probe.c",
+            "vendor/dep/LICENSE",
+        ];
+        for relative in vendored {
+            write(relative, "x");
+        }
+        // Outside the vendor tree the usual filter still applies.
+        write("notes/LICENSE", "x");
+        write("target/debug/stale.rs", "x");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("/etc/hosts", project.path().join("vendor/dep/hosts")).unwrap();
+
+        copy_project_sources(project.path(), workspace.path());
+
+        for relative in vendored {
+            assert!(workspace.path().join(relative).is_file(), "{relative}");
+        }
+        assert!(workspace.path().join("src/lib.rs").is_file());
+        assert!(!workspace.path().join("notes/LICENSE").exists());
+        assert!(!workspace.path().join("target").exists());
+        assert!(!workspace.path().join("vendor/dep/hosts").exists());
+    }
+
+    #[test]
+    fn a_vendor_directory_without_a_crate_manifest_is_not_staged_as_rust() {
+        let project = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join("vendor/dep")).unwrap();
+        std::fs::write(project.path().join("vendor/dep/LICENSE"), "x").unwrap();
+        copy_project_sources(project.path(), workspace.path());
+        assert!(!workspace.path().join("vendor/dep/LICENSE").exists());
     }
 
     #[test]

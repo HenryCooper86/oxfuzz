@@ -85,6 +85,11 @@ pub fn kind_from_short(short: &str) -> CrashKind {
         // Before the `sanitizer` catch-all below: a CASR leak description names
         // `LeakSanitizer`, which would otherwise be read as an `ASan` finding.
         CrashKind::Leak
+    } else if s.contains("uninitialized") || s.contains("memorysanitizer") {
+        // Also ahead of the catch-all, for the same reason.
+        CrashKind::Msan
+    } else if s.contains("data race") || s.contains("threadsanitizer") {
+        CrashKind::Tsan
     } else if s.contains("overflow")
         || s.contains("use-after")
         || s.contains("asan")
@@ -267,6 +272,14 @@ mod tests {
         assert_eq!(
             kind_from_short("LeakSanitizer: detected memory leaks"),
             CrashKind::Leak
+        );
+        assert_eq!(
+            kind_from_short("use-of-uninitialized-value"),
+            CrashKind::Msan
+        );
+        assert_eq!(
+            kind_from_short("ThreadSanitizer: data race"),
+            CrashKind::Tsan
         );
     }
 

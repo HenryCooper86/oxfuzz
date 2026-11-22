@@ -50,10 +50,11 @@ validate every existing parent with `symlink_metadata` before accepting a
 cold-start output path, then repeat containment checks when accessing it.
 Include paths may refer to safe sibling directories inside the complete project.
 
-Supported saved build systems are CMake, plain Make, Meson, and Autotools.
-Bazel, custom Make targets, arbitrary environment variables, and dependency
+Supported saved build systems are CMake, plain Make, Meson, Autotools, and
+Bazel (Bzlmod workspaces that carry a vendor directory; see "Bazel" below).
+Custom Make targets, arbitrary environment variables, and dependency
 installation are unsupported; Cargo needs no profile. Profiles for plain
-Make, Meson, and Autotools cannot carry definitions (the definition field,
+Make, Meson, Autotools, and Bazel cannot carry definitions (the definition field,
 allowlist, and validation are CMake's `-D` model). Reject CMake definitions
 on those profiles rather than saving ignored settings. Definitions are
 sorted by name and validated:
@@ -102,6 +103,10 @@ Makefile and Autotools above plain Make. For several Make markers use GNU Make's
 selection order: `GNUmakefile`, `makefile`, `Makefile`. The selected marker is
 part of saved identity; adding a higher-priority marker makes it stale. An
 unsupported higher-level system is not silently downgraded to plain Make.
+Bazel is reported as supported only when `MODULE.bazel` is among its markers,
+and that file is the selected marker of a Bazel profile: a workspace that
+has only `WORKSPACE` or `BUILD.bazel` cannot be vendored, so it is reported
+as unsupported and a profile for it is refused with that reason.
 No markers gives `unknown`; source extensions are not build-system evidence.
 Cargo retains `not_needed` because Rust harnesses use cargo-fuzz.
 
@@ -130,13 +135,16 @@ the script is constant, the validated name is a positional argument, and the
 command being located is not executed. Do not interpolate a name into shell
 source. CMake requires `cmake`; Make requires `mkdir`, `make`, and `bear`;
 Meson requires `meson`; Autotools requires `autoreconf`, `make`, and `bear`;
-module probes additionally require `pkg-config`.
+Bazel requires `bazel` and `oxfuzz-bazel-compdb`; module probes additionally
+require `pkg-config`.
 
 Phase 6 added Bear to the pinned sandbox image alongside existing Make, CMake,
 Ninja, and pkg-config; Meson and Autotools toolchains (`meson`, `autoconf`,
 `automake`, `libtool`) joined at image 0.2.0. Release image checks cover
 `bear --version`, `cmake --version`, `make --version`, and
-`pkg-config --version`. CMake, plain Make, Meson, and Autotools plans are
+`pkg-config --version`. Bazel 8.9.0 and 9.3.3, each verified against its
+published SHA-256, the `bazel` launcher and `oxfuzz-bazel-compdb` joined at
+image 0.2.3. CMake, plain Make, Meson, Autotools, and Bazel plans are
 supported only when those required tools are available; other
 build systems remain unsupported even if a particular image contains a tool.
 
@@ -241,16 +249,81 @@ autoreconf -i
 bear --output ../../build/parser/compile_commands.json -- make -B
 ```
 
+or, for Bazel (one query; no action of the project's build graph executes):
+
+```text
+oxfuzz-bazel-compdb ../../build/parser/compile_commands.json
+```
+
 The CMake plan configures without compiling the whole project. The Meson
 plan configures only; Meson writes `compile_commands.json` during setup.
 Bear observes
 the forced plain Make build. `<definitions>` denotes the sorted validated
 argument tokens, never literal shell expansion. No plan step uses a shell.
 
+### Bazel
+
+A Bazel build normally downloads its rules and dependencies, and the sandbox
+has no network. The supported route is Bazel's own vendor mode: on a machine
+with network access the operator runs
+`bazel vendor --vendor_dir=third_party/bazel //...` and keeps that directory
+with the project. Nothing is fetched by oxfuzz, at any step.
+
+- **Launcher.** `/usr/local/bin/bazel` starts Bazel 9 unless the nearest
+  `.bazelversion` asks for major version 8; any other version is refused
+  with exit 64 and a message naming the two versions the image carries.
+- **Query.** `oxfuzz-bazel-compdb <output>` requires `MODULE.bazel` in the
+  component root, finds the vendor directory (the `--vendor_dir` the
+  project's `.bazelrc` names, else the one directory within three levels
+  that holds `VENDOR.bazel`), and runs
+  `bazel --output_user_root=/tmp/oxfuzz-bazel aquery --vendor_dir=<dir>
+  --experimental_convenience_symlinks=ignore --output=jsonproto
+  'mnemonic("CppCompile", deps(//...))'`: the compile actions of the
+  project's own C and C++ targets and of the C and C++ libraries they
+  depend on, whose sources are in the vendor directory. Actions of the exec
+  configuration (build tools such as a code generator) are left out.
+  Loading and analysis evaluate the project's Starlark, which is why this is
+  a project build step behind the same approval; no compile, link or
+  genrule action runs.
+- **Pins.** Before the query the tool appends `pin("@@<repository>")` to the
+  `VENDOR.bazel` of the sandbox's copy of the project, for every vendored
+  repository that file does not already name. Bazel keeps a fingerprint
+  beside each vendored repository (`@<repository>.marker`), and the
+  fingerprint differs between Bazel builds for different platforms: the same
+  project vendored with Bazel 9.3.3 on linux/arm64 and on linux/amd64 has no
+  marker in common. Without the pin, a directory vendored on the operator's
+  machine is treated as out of date in the sandbox and Bazel tries to fetch
+  it again, which fails offline. A pinned repository is used as it is. The
+  project's own files are not changed. Verified in both directions between
+  linux/arm64 and linux/amd64 with Bazel 8.9.0 and 9.3.3 (2026-11-22); a
+  directory written by Bazel on macOS or Windows has not been tried, and a
+  vendored repository whose contents were generated for the vendoring
+  machine (an interpreter or toolchain hub) is used with those contents.
+- **Database.** Each compile action becomes one entry whose directory is the
+  component root. Flags that only describe the action's output (`-o`, `-MD`,
+  `-MF`, `-frandom-seed=`) and Bazel's reproducibility redefinitions of
+  `__DATE__`, `__TIME__` and `__TIMESTAMP__` are dropped. `-I`, `-iquote` and `-isystem` paths
+  are all written as `-I`: a path under `external/<repository>` becomes the
+  vendored copy when it exists, and paths into `bazel-out` or outside the
+  workspace are dropped, because nothing was built. Headers a build would
+  generate are therefore not available to a harness.
+- **Links.** `bazel vendor` leaves one symlink, `bazel-external`, in the
+  vendor directory, and Bazel keeps `bazel-bin`, `bazel-out`,
+  `bazel-testlogs` and `bazel-<workspace>` links beside a workspace file.
+  Both point into the output base of the machine that ran Bazel. Staging
+  leaves these out without following them; any other symlink still refuses
+  the project.
+- **Limits.** The vendor directory counts against the staging limits below
+  (a two-target C project with `rules_cc` vendors 99 MiB in 7,090 files).
+  WORKSPACE-only projects, other Bazel major versions, a vendor directory
+  made with a different major version than the one selected, and generated
+  headers are outside the supported class.
+
 Execution runs untrusted project code and requires `RunProjectBuild` at High
 risk through the existing human authorization path. Hold the shared workspace
 lease from staging through validation/publication and cleanup. Stage only
-regular files, reject symlinks and special files, exclude version control and
+regular files, reject symlinks and special files (leaving out the links Bazel
+maintains, as described above), exclude version control and
 known build output, and enforce 20,000 files, 64 MiB per file, and 512 MiB total.
 All steps use `hf-runtime`, fixed argv, the captured immutable image ID, normal
 resource limits, and disabled networking. The host never executes the build.

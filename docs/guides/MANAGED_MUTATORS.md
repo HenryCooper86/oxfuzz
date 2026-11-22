@@ -34,6 +34,49 @@ there is no mutator-specific bypass. Promotion remains a human decision.
 AFL++ coverage/corpus pruning executes the target and does not load a mutation
 plugin. LibFuzzer corpus operations retain the reviewed linked target.
 
+## Grammar mutators
+
+For a nested text format, generate the mutator from a grammar instead of
+writing it by hand:
+
+```bash
+oxfuzz mutator <project> --target <sym> --engine libfuzzer grammar --grammar json.bnf --emit mutator.c
+```
+
+The grammar is a list of rules, the first being the start rule:
+
+```text
+# a small JSON subset
+value   = object | array | "true" | "null" | number ;
+object  = "{" "}" | "{" pair "}" ;
+pair    = "\"k\":" value ;
+array   = "[" "]" | "[" value "," value "]" ;
+number  = "0" | "-1" | "1e9" ;
+```
+
+A terminal is a double-quoted string (`\\`, `\"`, `\n`, `\r`, `\t`, `\0`, `\xNN`
+escapes); an alternative with no symbols produces nothing; `#` starts a
+comment. An undefined or duplicate rule, a rule that can never terminate, and a
+grammar over the size limits (256 rules, 2048 alternatives, 16 KiB of
+terminals, 40 KiB of generated source) are errors that name the line or rule.
+
+The command generates one C translation unit, valid as C and C++, that holds
+the grammar as tables and a bounded expander, and attaches it as a new
+unpromoted revision. Nothing else changes: the generated source is what the
+model review and the human reviewer see, the smoke test must observe a
+successful mutation, and promotion is still a human decision. `--emit` writes
+the same source to a file for reading outside the app.
+
+Each mutation is either a fresh sentence from the start rule or the current
+input with a generated fragment inserted or put in place of a span, so corpus
+feedback still applies. Under libFuzzer a share of calls is handed to its
+byte-level mutator; AFL++ keeps its own havoc stage unless the campaign selects
+custom-mutation-only mode. The generator makes no claim that a grammar mutator
+improves coverage on a given target; measure it with a matched-budget run.
+
+Protobuf-described inputs are not covered: the sandbox image ships neither
+`protoc` nor libprotobuf-mutator.
+
 ## Manual qualification commands
 
 These commands execute native code in hf-runtime sandboxes. They were **not run**

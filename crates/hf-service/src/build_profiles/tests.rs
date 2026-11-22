@@ -273,9 +273,79 @@ fn meson_and_autotools_plans_derive_output_from_selected_database() {
                     ]
                 );
             }
-            ProfileBuildSystem::CMake | ProfileBuildSystem::Make => unreachable!(),
+            ProfileBuildSystem::CMake | ProfileBuildSystem::Make | ProfileBuildSystem::Bazel => {
+                unreachable!()
+            }
         }
     }
+}
+
+fn bazel_fixture() -> (tempfile::TempDir, SaveBuildProfileRequest) {
+    let (project, mut request) = fixture();
+    request.component_root = ".".to_owned();
+    request.build_system = ProfileBuildSystem::Bazel;
+    std::fs::remove_file(project.path().join("components/parser/CMakeLists.txt")).unwrap();
+    (project, request)
+}
+
+#[test]
+fn bazel_profiles_need_a_module_file_and_reject_definitions() {
+    let (project, mut request) = bazel_fixture();
+    std::fs::write(project.path().join("WORKSPACE"), "").unwrap();
+    std::fs::write(project.path().join("BUILD.bazel"), "").unwrap();
+    let error = normalize(&request).unwrap_err().to_string();
+    assert!(
+        error.contains("MODULE.bazel") && error.contains("vendor"),
+        "a workspace-only project is refused with the reason: {error}"
+    );
+
+    std::fs::write(
+        project.path().join("MODULE.bazel"),
+        "module(name = \"demo\")\n",
+    )
+    .unwrap();
+    let profile = normalize(&request).unwrap();
+    assert_eq!(profile.marker_path, "MODULE.bazel");
+
+    request
+        .cmake_definitions
+        .insert("BUILD_TESTING".to_owned(), "OFF".to_owned());
+    assert!(
+        normalize(&request).is_err(),
+        "Bazel profiles cannot carry CMake definitions"
+    );
+}
+
+#[test]
+fn bazel_plan_is_one_fixed_query_step_writing_the_selected_database() {
+    let (project, request) = bazel_fixture();
+    std::fs::write(
+        project.path().join("MODULE.bazel"),
+        "module(name = \"demo\")\n",
+    )
+    .unwrap();
+    let profile = normalize(&request).unwrap();
+
+    let plan = profile_build_plan(&profile);
+    assert_eq!(plan.steps.len(), 1);
+    assert_eq!(
+        plan.steps[0].argv,
+        ["oxfuzz-bazel-compdb", "build/parser/compile_commands.json"]
+    );
+    assert_eq!(plan.steps[0].working_dir, ".");
+    assert_eq!(
+        required_build_dependencies(&profile),
+        [
+            BuildDependency {
+                kind: BuildDependencyKind::Command,
+                name: "bazel".to_owned(),
+            },
+            BuildDependency {
+                kind: BuildDependencyKind::Command,
+                name: "oxfuzz-bazel-compdb".to_owned(),
+            },
+        ]
+    );
 }
 
 #[test]

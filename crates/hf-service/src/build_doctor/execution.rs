@@ -62,6 +62,7 @@ impl crate::ServiceContainer {
                             ProfileBuildSystem::Make => "make",
                             ProfileBuildSystem::Meson => "meson",
                             ProfileBuildSystem::Autotools => "autotools",
+                            ProfileBuildSystem::Bazel => "bazel",
                         }
                         .into(),
                     },

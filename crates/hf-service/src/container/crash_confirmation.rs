@@ -83,6 +83,12 @@ fn semantic_class(kind: CrashKind, log: &str) -> Option<String> {
             })
             .map(str::to_owned)
         }
+        CrashKind::Msan if lower.contains("memorysanitizer: use-of-uninitialized-value") => {
+            Some("use-of-uninitialized-value".to_owned())
+        }
+        CrashKind::Tsan if lower.contains("threadsanitizer: data race") => {
+            Some("data-race".to_owned())
+        }
         CrashKind::Segv if lower.contains("sigsegv") || lower.contains("segv on") => {
             Some("segv".to_owned())
         }
@@ -413,5 +419,27 @@ mod tests {
             };
             assert!(failure_identity(&observation).is_none());
         }
+    }
+
+    #[test]
+    fn msan_and_tsan_reports_have_a_semantic_class() {
+        assert_eq!(
+            semantic_class(
+                CrashKind::Msan,
+                "==14==WARNING: MemorySanitizer: use-of-uninitialized-value"
+            )
+            .as_deref(),
+            Some("use-of-uninitialized-value")
+        );
+        assert_eq!(
+            semantic_class(
+                CrashKind::Tsan,
+                "WARNING: ThreadSanitizer: data race (pid=45)"
+            )
+            .as_deref(),
+            Some("data-race")
+        );
+        // A kind without its own report text has no class to compare.
+        assert_eq!(semantic_class(CrashKind::Msan, "SIGABRT"), None);
     }
 }

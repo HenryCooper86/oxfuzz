@@ -253,7 +253,11 @@ pub fn render_dict(tokens: &[Vec<u8>]) -> String {
 #[must_use]
 pub fn dict_run_args(engine: EngineKind, container_path: &str) -> Vec<String> {
     match engine {
-        EngineKind::LibFuzzer => vec![format!("-dict={container_path}")],
+        // Atheris, Jazzer and Jazzer.js hand their argv to the libFuzzer
+        // they embed.
+        EngineKind::LibFuzzer | EngineKind::Atheris | EngineKind::Jazzer | EngineKind::JazzerJs => {
+            vec![format!("-dict={container_path}")]
+        }
         // afl-fuzz takes `-x <dir-or-file>`.
         EngineKind::AflPlusPlus => vec!["-x".to_owned(), container_path.to_owned()],
         // honggfuzz takes `-w <file>`.
@@ -288,6 +292,112 @@ pub fn parse_dict(text: &str) -> Vec<Vec<u8>> {
         }
     }
     tokens
+}
+
+/// Tokens one operator-supplied dictionary may hold.
+pub const MAX_USER_TOKENS: usize = 4096;
+
+/// Why an operator-supplied dictionary was refused.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum DictError {
+    #[error("line {line}: expected a quoted token (\"token\" or name=\"token\")")]
+    NotQuoted { line: usize },
+    #[error("line {line}: the token is empty")]
+    Empty { line: usize },
+    #[error("line {line}: the token is {len} bytes; the limit is {MAX_TOKEN_LEN}")]
+    TooLong { line: usize, len: usize },
+    #[error("line {line}: unsupported escape or raw control byte; write \\\\, \\\" or \\xNN")]
+    BadEscape { line: usize },
+    #[error("the dictionary holds more than {MAX_USER_TOKENS} tokens")]
+    TooManyTokens,
+    #[error("the dictionary holds no tokens")]
+    NoTokens,
+}
+
+/// Parse an operator-supplied AFL++/libFuzzer dictionary, refusing anything
+/// an engine would reject or silently drop.
+///
+/// Blank and `#`-comment lines are skipped. Every other line must be
+/// `"token"` or `name="token"` (AFL++'s `name@level="token"` included); the
+/// token body may use `\\`, `\"` and `\xNN` and must otherwise be printable
+/// ASCII. Duplicate tokens are kept once, in first-seen order.
+///
+/// # Errors
+/// Returns the first [`DictError`], which names its line.
+pub fn parse_user_dict(text: &str) -> Result<Vec<Vec<u8>>, DictError> {
+    let mut tokens = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (index, raw) in text.lines().enumerate() {
+        let line = index + 1;
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let (Some(start), Some(end)) = (trimmed.find('"'), trimmed.rfind('"')) else {
+            return Err(DictError::NotQuoted { line });
+        };
+        if end <= start || end + 1 != trimmed.len() {
+            return Err(DictError::NotQuoted { line });
+        }
+        let token = decode_strict(&trimmed.as_bytes()[start + 1..end])
+            .ok_or(DictError::BadEscape { line })?;
+        if token.is_empty() {
+            return Err(DictError::Empty { line });
+        }
+        if token.len() > MAX_TOKEN_LEN {
+            return Err(DictError::TooLong {
+                line,
+                len: token.len(),
+            });
+        }
+        if seen.insert(token.clone()) {
+            if tokens.len() == MAX_USER_TOKENS {
+                return Err(DictError::TooManyTokens);
+            }
+            tokens.push(token);
+        }
+    }
+    if tokens.is_empty() {
+        return Err(DictError::NoTokens);
+    }
+    Ok(tokens)
+}
+
+/// Decode a token body under the strict rule: only `\\`, `\"` and `\xNN`
+/// escapes, and no raw byte outside printable ASCII or an unescaped quote.
+fn decode_strict(body: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(body.len());
+    let mut i = 0;
+    while i < body.len() {
+        match body[i] {
+            b'\\' => match *body.get(i + 1)? {
+                b'\\' => {
+                    out.push(b'\\');
+                    i += 2;
+                }
+                b'"' => {
+                    out.push(b'"');
+                    i += 2;
+                }
+                b'x' | b'X' => {
+                    let (high, low) = (*body.get(i + 2)?, *body.get(i + 3)?);
+                    if !high.is_ascii_hexdigit() || !low.is_ascii_hexdigit() {
+                        return None;
+                    }
+                    out.push(hex_val(high) * 16 + hex_val(low));
+                    i += 4;
+                }
+                _ => return None,
+            },
+            b'"' => return None,
+            byte @ 0x20..=0x7e => {
+                out.push(byte);
+                i += 1;
+            }
+            _ => return None,
+        }
+    }
+    Some(out)
 }
 
 /// Decode the escaped body of a dictionary token (`\\`, `\"`, `\xNN`).
@@ -329,6 +439,62 @@ fn decode_dict_token(body: &str) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_user_dictionary_parses_tokens_labels_and_escapes() {
+        let text =
+            "# magic\n\"PNG\"\nkw_len=\"Content-Length\"\nbin@2=\"\\x89P\\\\\\\"\"\n\n\"PNG\"\n";
+        assert_eq!(
+            super::parse_user_dict(text).unwrap(),
+            vec![
+                b"PNG".to_vec(),
+                b"Content-Length".to_vec(),
+                vec![0x89, b'P', b'\\', b'"'],
+            ]
+        );
+    }
+
+    #[test]
+    fn a_user_dictionary_line_the_engines_would_reject_fails_with_its_line() {
+        use super::DictError;
+        let parse = super::parse_user_dict;
+        assert_eq!(
+            parse("\"ok\"\nbare\n"),
+            Err(DictError::NotQuoted { line: 2 })
+        );
+        assert_eq!(
+            parse("\"ok\" trailing\n"),
+            Err(DictError::NotQuoted { line: 1 })
+        );
+        assert_eq!(parse("\"\"\n"), Err(DictError::Empty { line: 1 }));
+        assert_eq!(parse("\"a\\nb\"\n"), Err(DictError::BadEscape { line: 1 }));
+        assert_eq!(parse("\"a\\x4\"\n"), Err(DictError::BadEscape { line: 1 }));
+        assert_eq!(parse("\"a\"b\"\n"), Err(DictError::BadEscape { line: 1 }));
+        assert_eq!(
+            parse("\"caf\u{e9}\"\n"),
+            Err(DictError::BadEscape { line: 1 })
+        );
+        assert_eq!(
+            parse(&format!("\"{}\"\n", "a".repeat(129))),
+            Err(DictError::TooLong { line: 1, len: 129 })
+        );
+        assert_eq!(parse("# only a comment\n"), Err(DictError::NoTokens));
+        let mut many = String::new();
+        for n in 0..=super::MAX_USER_TOKENS {
+            use std::fmt::Write as _;
+            let _ = writeln!(many, "\"t{n}\"");
+        }
+        assert_eq!(parse(&many), Err(DictError::TooManyTokens));
+    }
+
+    #[test]
+    fn a_parsed_user_dictionary_round_trips_through_render() {
+        let tokens = super::parse_user_dict("\"\\x00\\xff\"\n\"a\\\\b\"\n").unwrap();
+        assert_eq!(
+            super::parse_user_dict(&render_dict(&tokens)).unwrap(),
+            tokens
+        );
+    }
+
     use super::*;
 
     fn b(s: &str) -> Vec<u8> {

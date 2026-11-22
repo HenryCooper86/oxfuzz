@@ -10,7 +10,7 @@ use std::time::Duration;
 ///
 /// Single source of truth -- referenced by `hf-service`, `hf-cli`, and
 /// `hf-gui` so the tag never drifts across presentation layers.
-pub const SANDBOX_IMAGE: &str = "oxfuzz/fuzz-sandbox:0.2.2";
+pub const SANDBOX_IMAGE: &str = "oxfuzz/fuzz-sandbox:0.2.3";
 
 /// Configuration for the production Docker sandbox runtime.
 #[derive(Debug, Clone)]
@@ -319,7 +319,7 @@ pub fn sandbox_image_arch() -> Option<String> {
 /// what can run.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SandboxEngines {
-    available: [bool; 4],
+    available: [bool; 7],
     /// The probe itself failed, so every `available` flag is unknown rather
     /// than measured-absent. Kept distinct so an operator can tell "the image
     /// bundles no engine" from "the probe never answered".
@@ -337,6 +337,9 @@ impl SandboxEngines {
             // syzkaller until the Go design's dedicated image candidate gives
             // it its own recorded identity and probe slot.
             EngineKind::Syzkaller | EngineKind::GoNative => 3,
+            EngineKind::Atheris => 4,
+            EngineKind::Jazzer => 5,
+            EngineKind::JazzerJs => 6,
         }]
     }
 
@@ -345,7 +348,7 @@ impl SandboxEngines {
     #[must_use]
     pub const fn probe_failed() -> Self {
         Self {
-            available: [false; 4],
+            available: [false; 7],
             probe_failed: true,
         }
     }
@@ -384,7 +387,15 @@ fn sandbox_image_id() -> Option<String> {
 /// Map the probe script's stdout (one present-binary name per line) to the
 /// per-engine availability. Each engine maps to the binary its adapter invokes
 /// inside the sandbox: libFuzzer compiles/runs via `clang`; AFL++ -> `afl-fuzz`;
-/// honggfuzz -> `honggfuzz`; syzkaller -> `syz-manager`.
+/// honggfuzz -> `honggfuzz`; syzkaller -> `syz-manager`. Atheris is a Python
+/// package, so its line is the probe's own `atheris` marker, printed only when
+/// the image's interpreter imports it.
+const ATHERIS_PROBE_MARKER: &str = "atheris";
+
+/// The image's Jazzer.js launcher, which starts the pinned Node.js on the
+/// pinned Jazzer.js command line.
+const JAZZER_JS_LAUNCHER: &str = "jazzer-js";
+
 fn engines_from_probe_output(found: &str) -> SandboxEngines {
     let has = |bin: &str| found.lines().any(|l| l.trim() == bin);
     SandboxEngines {
@@ -393,6 +404,9 @@ fn engines_from_probe_output(found: &str) -> SandboxEngines {
             has("afl-fuzz"),
             has("honggfuzz"),
             has("syz-manager"),
+            has(ATHERIS_PROBE_MARKER),
+            has("jazzer"),
+            has(JAZZER_JS_LAUNCHER),
         ],
         probe_failed: false,
     }
@@ -422,8 +436,9 @@ fn probe_sandbox_engines() -> Result<SandboxEngines, String> {
         "sh",
         SANDBOX_IMAGE,
         "-c",
-        "for b in clang afl-fuzz honggfuzz syz-manager; do \
-             command -v \"$b\" >/dev/null 2>&1 && echo \"$b\"; done",
+        "for b in clang afl-fuzz honggfuzz syz-manager jazzer jazzer-js; do \
+             command -v \"$b\" >/dev/null 2>&1 && echo \"$b\"; done; \
+             python3 -I -c 'import atheris' >/dev/null 2>&1 && echo atheris; true",
     ]);
     probe_outcome(run_bounded(command, DOCKER_PROBE_TIMEOUT))
 }
@@ -772,6 +787,31 @@ mod tests {
     }
 
     #[test]
+    fn atheris_is_ready_only_when_the_interpreter_imports_it() {
+        assert!(engines_from_probe_output("clang\natheris\n").supports(EngineKind::Atheris));
+        assert!(!engines_from_probe_output("clang\npython3\n").supports(EngineKind::Atheris));
+        assert!(!SandboxEngines::probe_failed().supports(EngineKind::Atheris));
+    }
+
+    #[test]
+    fn jazzer_js_is_ready_only_when_its_launcher_is_present() {
+        let ready = engines_from_probe_output("clang\njazzer\njazzer-js\n");
+        assert!(ready.supports(EngineKind::JazzerJs));
+        assert!(ready.supports(EngineKind::Jazzer));
+        // The JVM launcher is a different program, and Node alone is not
+        // the fuzzer.
+        assert!(!engines_from_probe_output("clang\njazzer\n").supports(EngineKind::JazzerJs));
+        assert!(!engines_from_probe_output("clang\nnode\n").supports(EngineKind::JazzerJs));
+        assert!(!SandboxEngines::probe_failed().supports(EngineKind::JazzerJs));
+    }
+
+    #[test]
+    fn jazzer_is_ready_only_when_its_launcher_is_present() {
+        assert!(engines_from_probe_output("clang\njazzer\n").supports(EngineKind::Jazzer));
+        assert!(!engines_from_probe_output("clang\njava\n").supports(EngineKind::Jazzer));
+    }
+
+    #[test]
     fn probe_output_empty_is_all_false() {
         assert_eq!(engines_from_probe_output(""), SandboxEngines::default());
     }
@@ -787,7 +827,7 @@ mod tests {
     #[test]
     fn production_sandbox_image_is_version_pinned() {
         assert!(!SANDBOX_IMAGE.ends_with(":latest"));
-        assert_eq!(SANDBOX_IMAGE, "oxfuzz/fuzz-sandbox:0.2.2");
+        assert_eq!(SANDBOX_IMAGE, "oxfuzz/fuzz-sandbox:0.2.3");
     }
 
     #[test]

@@ -386,14 +386,17 @@ async fn run_with_a_mismatched_sanitizer_request_fails_loud() {
     );
 }
 
+/// `memory` and `thread` are selectable, but only for the engine and language
+/// pairs the build constructor admits; every other pair, and `none`, is
+/// refused by the compile operation itself.
 #[tokio::test]
-async fn unselectable_sanitizers_fail_loud_at_build_resolution() {
+async fn unadmitted_sanitizer_pairs_fail_loud_at_build_resolution() {
     let (dir, _store, container, _runtime) = fixture().await;
     let project = dir.path().join("proj");
     let source =
         "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return 0; }";
 
-    let memory = container
+    container
         .harness_compile(
             source.to_owned(),
             &project,
@@ -404,23 +407,59 @@ async fn unselectable_sanitizers_fail_loud_at_build_resolution() {
             false,
         )
         .await
-        .expect_err("MSan is not selectable");
-    assert!(memory.to_string().contains("memory"), "{memory}");
-    assert!(memory.to_string().contains("instrumented libc"), "{memory}");
+        .expect("MSan builds for a C target on libFuzzer");
 
-    let thread = container
+    std::fs::write(
+        project.join("decoder.cc"),
+        "int decode_value(const unsigned char *data, unsigned long size) {\n  return size ? data[0] : 0;\n}\n",
+    )
+    .unwrap();
+    container
+        .harness_compile(
+            format!("extern \"C\" {source}"),
+            &project,
+            EngineKind::LibFuzzer,
+            "decode_value",
+            TargetLanguage::Cpp,
+            Some(Sanitizer::Memory),
+            false,
+        )
+        .await
+        .expect("MSan builds for a C++ target on libFuzzer against the instrumented libc++");
+
+    let memory_cpp_afl = container
         .harness_compile(
             source.to_owned(),
             &project,
-            EngineKind::LibFuzzer,
+            EngineKind::AflPlusPlus,
+            "parse_value",
+            TargetLanguage::Cpp,
+            Some(Sanitizer::Memory),
+            false,
+        )
+        .await
+        .expect_err("MSan is not admitted for C++ under AFL++");
+    assert!(
+        memory_cpp_afl
+            .to_string()
+            .contains("not admitted for C++ targets under AFL++"),
+        "{memory_cpp_afl}"
+    );
+
+    let thread_afl = container
+        .harness_compile(
+            source.to_owned(),
+            &project,
+            EngineKind::AflPlusPlus,
             "parse_value",
             TargetLanguage::C,
             Some(Sanitizer::Thread),
             false,
         )
         .await
-        .expect_err("TSan is not selectable");
-    assert!(thread.to_string().contains("thread"), "{thread}");
+        .expect_err("TSan is not admitted for AFL++");
+    assert!(thread_afl.to_string().contains("thread"), "{thread_afl}");
+    assert!(thread_afl.to_string().contains("AFL++"), "{thread_afl}");
 
     let none = container
         .harness_compile(

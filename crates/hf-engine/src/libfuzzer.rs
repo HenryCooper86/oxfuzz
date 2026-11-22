@@ -91,6 +91,54 @@ pub fn build_run_args(
     Ok(args)
 }
 
+/// The argument list of an engine whose launcher hands its argv to an
+/// embedded libFuzzer and runs one process per run (Atheris: one
+/// interpreter; Jazzer: one JVM; Jazzer.js: one Node.js process). `program` is the executable harness
+/// artifact. libFuzzer's fork and job modes re-execute the binary they were
+/// started as, which for these launchers is not the harness, so the flags
+/// that select them are refused and `cfg.max_cpus` adds no workers.
+///
+/// # Errors
+/// Returns [`ClassifiedError::Validation`] when `extra_args` asks for fork,
+/// job, or merge mode.
+pub(crate) fn build_single_process_args(
+    engine: &str,
+    cfg: &FuzzRunConfig,
+    program: &str,
+    corpus: &str,
+    out: &str,
+) -> Result<Vec<String>, ClassifiedError> {
+    if let Some(flag) = cfg.extra_args.iter().find(|flag| {
+        ["-fork=", "-jobs=", "-workers=", "-merge="]
+            .iter()
+            .any(|prefix| flag.starts_with(prefix))
+    }) {
+        return Err(ClassifiedError::Validation(format!(
+            "the {engine} engine runs one process per run; '{flag}' is not supported"
+        )));
+    }
+    let duration = cfg.duration.map_or(0, |d| d.as_secs());
+    let mut args = vec![program.to_owned()];
+    if duration > 0 {
+        args.push(format!("-max_total_time={duration}"));
+    }
+    // The trailing slash is required: libFuzzer concatenates
+    // `{prefix}crash-{hash}`.
+    args.push(format!("-artifact_prefix={}/", out.trim_end_matches('/')));
+    // Both launchers report comparisons to libFuzzer's value profile.
+    args.push("-use_value_profile=1".to_owned());
+    args.push("-print_final_stats=1".to_owned());
+    args.push(corpus.to_owned());
+    args.extend(cfg.extra_args.iter().cloned());
+    if let Some(seed) = cfg.seed {
+        args.push(format!("-seed={seed}"));
+    }
+    if let Some(timeout) = cfg.input_timeout {
+        args.push(format!("-timeout={}", crate::timeout_secs_ceil(timeout)));
+    }
+    Ok(args)
+}
+
 /// The libFuzzer engine adapter. See [`build_run_args`] and the
 /// [`EngineAdapter`](crate::registry::EngineAdapter) impl in `registry`.
 pub struct LibFuzzer;

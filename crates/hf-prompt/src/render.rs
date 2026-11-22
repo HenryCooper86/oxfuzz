@@ -84,6 +84,7 @@ pub fn render_harness_prompt(target: &TargetCandidate, engine: EngineKind) -> St
          - Pass the fuzzer's bytes to the target unchanged and call it once per input. Do not \
          prepend, re-frame, or filter the input to get past a check: seeds and the dictionary do \
          that, and a harness that rewrites its input hides the bytes that crash the target.\n\
+         {input_rules}\
          {source_rules}\
          - Include only necessary headers.\n\
          - Output only the harness source, in a fenced code block.\n\
@@ -93,9 +94,29 @@ pub fn render_harness_prompt(target: &TargetCandidate, engine: EngineKind) -> St
         engine_name = engine_name,
         entry_point = entry_point,
         engine_rules = engine_rules(engine, target.language),
+        input_rules = structured_input_rules(target.language),
         source_rules = c_source_rules(target.language),
         target_block = target_block(target),
     )
+}
+
+/// How a C++ harness derives several typed arguments from the fuzzer's bytes,
+/// one `- ` line, newline-terminated. Empty for other languages:
+/// `FuzzedDataProvider` is a C++ header, so a C harness cannot include it.
+///
+/// The header ships in the sandbox compilers' resource directories and
+/// compiles under all three userspace engines' C++ drivers (verified in
+/// sandbox image 0.2.2 with clang++, afl-clang-fast++ and hfuzz-clang++).
+fn structured_input_rules(language: TargetLanguage) -> &'static str {
+    if !matches!(language, TargetLanguage::Cpp) {
+        return "";
+    }
+    "- When the target takes several arguments or typed values (integers, flags, strings, more \
+     than one buffer), derive them with `FuzzedDataProvider` from \
+     `<fuzzer/FuzzedDataProvider.h>`, which the sandbox compiler ships: consume the scalar \
+     arguments first and give the main buffer `ConsumeRemainingBytes`. Do not write offset \
+     arithmetic by hand. A target that takes a single buffer still receives the bytes \
+     unchanged.\n"
 }
 
 /// Rules for a C or C++ harness source, one `- ` line each, newline-terminated.
@@ -147,7 +168,11 @@ fn engine_rules(engine: EngineKind, language: TargetLanguage) -> &'static str {
             "- Do not define `main`: the fuzzer driver supplies it.\n\
              - Always return 0 from the entry point.\n"
         }
-        EngineKind::Syzkaller | EngineKind::GoNative => "",
+        EngineKind::Syzkaller
+        | EngineKind::GoNative
+        | EngineKind::Atheris
+        | EngineKind::Jazzer
+        | EngineKind::JazzerJs => "",
     }
 }
 
@@ -1012,6 +1037,13 @@ fn engine_entry_point(engine: EngineKind) -> &'static str {
         EngineKind::GoNative => {
             "func FuzzXxx(f *testing.F) // adjacent _test.go calling the exported target"
         }
+        EngineKind::Atheris => "def TestOneInput(data: bytes) // Atheris script calling the target",
+        EngineKind::Jazzer => {
+            "public static void fuzzerTestOneInput(byte[] data) // class calling the target"
+        }
+        EngineKind::JazzerJs => {
+            "module.exports.fuzz = function (data) // script calling the exported target"
+        }
     }
 }
 
@@ -1022,6 +1054,9 @@ fn engine_name(engine: EngineKind) -> &'static str {
         EngineKind::Honggfuzz => "honggfuzz",
         EngineKind::Syzkaller => "syzkaller (kernel)",
         EngineKind::GoNative => "Go native fuzzing",
+        EngineKind::Atheris => "Atheris (Python)",
+        EngineKind::Jazzer => "Jazzer (JVM)",
+        EngineKind::JazzerJs => "Jazzer.js (Node.js)",
     }
 }
 
@@ -1330,6 +1365,34 @@ mod tests {
             assert!(prompt.contains("Pass the fuzzer's bytes to the target unchanged"));
             assert!(prompt.contains("on every path"), "{prompt}");
             assert!(prompt.contains("Initialize every output"), "{prompt}");
+        }
+    }
+
+    #[test]
+    fn only_a_cpp_harness_is_pointed_at_fuzzed_data_provider() {
+        let mut target = sample_target();
+        for engine in [
+            EngineKind::LibFuzzer,
+            EngineKind::AflPlusPlus,
+            EngineKind::Honggfuzz,
+        ] {
+            target.language = hf_core::target::TargetLanguage::Cpp;
+            let prompt = render_harness_prompt(&target, engine);
+            assert!(
+                prompt.contains("`<fuzzer/FuzzedDataProvider.h>`"),
+                "{prompt}"
+            );
+            assert!(prompt.contains("`ConsumeRemainingBytes`"), "{prompt}");
+            // The header is C++ only: a C harness that includes it does not
+            // compile.
+            for language in [
+                hf_core::target::TargetLanguage::C,
+                hf_core::target::TargetLanguage::Rust,
+            ] {
+                target.language = language;
+                let prompt = render_harness_prompt(&target, engine);
+                assert!(!prompt.contains("FuzzedDataProvider"), "{prompt}");
+            }
         }
     }
 

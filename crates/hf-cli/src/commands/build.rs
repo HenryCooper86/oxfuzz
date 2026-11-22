@@ -134,6 +134,7 @@ async fn execute_operation(
                             ProfileSystemArg::Make => ProfileBuildSystem::Make,
                             ProfileSystemArg::Meson => ProfileBuildSystem::Meson,
                             ProfileSystemArg::Autotools => ProfileBuildSystem::Autotools,
+                            ProfileSystemArg::Bazel => ProfileBuildSystem::Bazel,
                         },
                         compile_database_path,
                         cmake_definitions,

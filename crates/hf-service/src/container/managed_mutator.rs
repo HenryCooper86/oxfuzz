@@ -99,6 +99,43 @@ impl ServiceContainer {
         status(harness)
     }
 
+    /// Generate a native mutator from `grammar` and import it exactly as
+    /// hand-written source is imported: a new, unpromoted revision that still
+    /// needs review, smoke qualification and human promotion. The generated
+    /// source is the `source` of the returned status.
+    ///
+    /// # Errors
+    /// Returns [`ClassifiedError::Validation`] naming the line or rule for an
+    /// invalid grammar, plus every error of
+    /// [`Self::attach_managed_mutator`].
+    pub async fn attach_grammar_mutator(
+        &self,
+        project: &Path,
+        target: &str,
+        engine: EngineKind,
+        expected_harness_id: Uuid,
+        grammar: &str,
+    ) -> Result<ManagedMutatorStatus, ClassifiedError> {
+        let source = Self::grammar_mutator_source(grammar, engine)?;
+        self.attach_managed_mutator(project, target, engine, expected_harness_id, source)
+            .await
+    }
+
+    /// The native mutator source `grammar` generates for `engine`, without
+    /// importing it. Compiles and executes nothing.
+    ///
+    /// # Errors
+    /// Returns [`ClassifiedError::Validation`] for an invalid grammar, an
+    /// engine without a native mutator interface, or a disabled feature.
+    pub fn grammar_mutator_source(
+        grammar: &str,
+        engine: EngineKind,
+    ) -> Result<String, ClassifiedError> {
+        enabled()?;
+        let grammar = hf_harness::grammar_mutator::Grammar::parse(grammar)?;
+        hf_harness::grammar_mutator::generate(&grammar, engine)
+    }
+
     /// Read active mutator source, immutable identity and retained self-test evidence.
     pub async fn managed_mutator_status(
         &self,

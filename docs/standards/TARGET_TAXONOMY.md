@@ -5,7 +5,7 @@ Status: **active**. Scope: `hf-discovery`, `hf-core`.
 ## 1. TargetLanguage
 
 ```rust
-pub enum TargetLanguage { C, Cpp, Rust, Go, Python }
+pub enum TargetLanguage { C, Cpp, Rust, Go, Python, Java, JavaScript }
 ```
 
 | Language | Scanner | Candidate rule |
@@ -14,6 +14,8 @@ pub enum TargetLanguage { C, Cpp, Rust, Go, Python }
 | Rust | dependency-free lexical | `pub fn` (incl. `async`/`unsafe`/`const`) with at least one parameter; `main` and `test_*` excluded. |
 | Go | dependency-free lexical | Exported (capitalized) package-level functions and methods with at least one parameter; `main`, `init`, and `Test*`/`Benchmark*` excluded, as are `_test.go` files and `vendor/`. Methods are named `Receiver.Method`. |
 | Python | dependency-free lexical | Top-level `def` and direct class methods (incl. `async` and decorated definitions) with at least one parameter besides `self`/`cls`; underscore-privates, dunders, `test_*`, and closures nested in another `def` excluded. Methods are named `Class.method`. |
+| Java | dependency-free lexical | `public static` methods with at least one parameter, declared directly in the top-level class a file is named after; `main` excluded, as are `module-info.java`, `package-info.java`, and files under a `test` or `tests` directory. Methods are named `Class.method`; the first overload of a name is kept. |
+| JavaScript | dependency-free lexical | Functions declared at column zero of a `.js`, `.mjs` or `.cjs` file with at least one parameter and exported under their own name (`export`, `export { name }`, `exports.name`, `module.exports.name`, `module.exports = { name }`); function declarations, function expressions and arrow functions, `async` or not. Generators, default exports, methods and classes excluded, as are `node_modules`, test directories, and `*.test.*`, `*.spec.*`, `*.min.*` and `*.config.*` files. |
 
 The lexical scanners are intentionally conservative: a missed multi-line
 signature is a lost candidate, never a wrong one. They extract no call edges,
@@ -21,10 +23,14 @@ so their candidates carry no reachability annotation.
 
 The scan inventory deliberately covers more languages than the harness
 pipeline can build. `TargetLanguage::harnessable` (hf-core) is the single
-predicate for the latter: C, C++, and Rust today; Go and Python scan and
-persist candidates but have no harness build path until their respective
-designs land (`docs/design/go-native-fuzzing-design.md`,
-`docs/design/python-atheris-fuzzing-design.md`). Harness authoring operations
+predicate for the latter. Every scanned language is harnessable today, each
+under the engine that runs it: C and C++ under libFuzzer, AFL++ and honggfuzz,
+Rust under libFuzzer, Go under `go-native`, Python under `atheris`, Java
+under `jazzer`, and JavaScript under `jazzer-js`
+(`docs/design/go-native-fuzzing-design.md`,
+`docs/design/python-atheris-fuzzing-design.md`,
+`docs/design/jvm-jazzer-fuzzing-design.md`,
+`docs/design/javascript-jazzerjs-fuzzing-design.md`). Harness authoring operations
 and `oxfuzz fuzz` target auto-selection enforce that predicate directly.
 
 ## 2. TargetKind

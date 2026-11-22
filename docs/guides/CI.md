@@ -56,6 +56,11 @@ run in parallel:
 | Coverage report | `coverage`, with the per-crate JSON reports uploaded as an artifact |
 | Clang semantic pipeline | builds the optional `clang-analysis` CLI feature and the LLVM 18 image, then runs `clang-analysis` |
 
+`scripts/check-windows-target.sh` type-checks the workspace and its tests for
+Windows from a Linux or macOS host, so code that does not compile there is
+found before the Windows job runs. It links and runs nothing; the Windows job
+remains the only place the tests execute on Windows.
+
 Going cross-platform surfaced real bugs on the first run of each new platform,
 so compile-and-test truth is gated everywhere the desktop app ships. Style
 gates stay Linux-only.

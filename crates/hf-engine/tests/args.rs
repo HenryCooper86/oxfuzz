@@ -832,58 +832,80 @@ fn go_native_drives_the_compiled_test_binary_with_fixed_flags() {
     c.max_cpus = 4;
     let args = hf_engine::go_native::build_run_args(
         &c,
-        "/work/fuzz_ParseRecord.test",
-        "/work/corpus",
-        "/work/out",
+        "/work/runs/r/input/harness",
+        "/work/runs/r/corpus",
+        "/work/runs/r/out",
     )
     .unwrap();
     assert_eq!(
         args.iter().map(String::as_str).collect::<Vec<_>>(),
         vec![
-            "/work/fuzz_ParseRecord.test",
-            "-test.run=^FuzzParseRecord$",
-            "-test.fuzz=^FuzzParseRecord$",
-            "-test.fuzztime=300s",
+            "/work/runs/r/input/harness",
+            "-test.run=^Fuzz",
+            "-test.fuzz=^Fuzz",
+            // Go keeps its own encoded corpus; the run corpus stays flat.
+            "-test.fuzzcachedir=/work/runs/r/out/go-fuzz-cache",
+            "-test.fuzzminimizetime=0",
             "-test.parallel=4",
-            "/work/corpus",
+            "-test.fuzztime=300s",
         ],
         "{args:?}"
     );
 }
 
 #[test]
-fn go_native_single_cpu_omits_parallel_and_zero_duration_omits_fuzztime() {
+fn go_native_always_bounds_workers_and_zero_duration_omits_fuzztime() {
     let c = cfg(EngineKind::GoNative, 0);
     let args =
-        hf_engine::go_native::build_run_args(&c, "/work/fuzz_T.test", "/work/corpus", "/work/out")
-            .unwrap();
+        hf_engine::go_native::build_run_args(&c, "/work/h", "/work/corpus", "/work/out").unwrap();
     assert_eq!(
         args.iter().map(String::as_str).collect::<Vec<_>>(),
         vec![
-            "/work/fuzz_T.test",
-            "-test.run=^FuzzT$",
-            "-test.fuzz=^FuzzT$",
-            "/work/corpus",
+            "/work/h",
+            "-test.run=^Fuzz",
+            "-test.fuzz=^Fuzz",
+            "-test.fuzzcachedir=/work/out/go-fuzz-cache",
+            "-test.fuzzminimizetime=0",
+            "-test.parallel=1",
         ],
         "the sandbox wall-clock cap bounds an unbounded run: {args:?}"
     );
 }
 
 #[test]
-fn go_native_rejects_a_binary_that_breaks_the_staging_contract() {
-    // The adapter derives the fuzz test name from the staged binary's
-    // `fuzz_<Symbol>.test` name. A binary outside that contract used to
-    // silently produce `-test.run=^Fuzz$` (fuzzing a nonexistent test);
-    // it must fail at argv construction instead, naming the contract.
-    let c = cfg(EngineKind::GoNative, 300);
-    for binary in ["/work/fuzz_bin", "/work/ParseRecord.test", "/work/fuzz_"] {
-        let error = hf_engine::go_native::build_run_args(&c, binary, "/work/corpus", "/work/out")
-            .expect_err("a non-contract binary name must be rejected");
-        assert!(
-            error.to_string().contains("fuzz_<Symbol>.test"),
-            "the error must name the staging contract: {error}"
-        );
+fn go_native_refuses_extra_arguments_that_restate_its_own_flags() {
+    // A second -test.fuzz or cache directory would change what is fuzzed or
+    // where its inputs go without the run record saying so.
+    for owned in [
+        "-test.fuzz=^FuzzOther$",
+        "--test.fuzzcachedir=/tmp/x",
+        "-test.fuzzminimizetime=60s",
+        "-test.parallel=64",
+    ] {
+        let mut c = cfg(EngineKind::GoNative, 60);
+        c.extra_args = vec![owned.to_owned()];
+        let error = hf_engine::go_native::build_run_args(&c, "/work/h", "/work/c", "/work/o")
+            .expect_err("an owned flag must be refused");
+        assert!(error.to_string().contains("sets -test."), "{error}");
     }
+    let mut c = cfg(EngineKind::GoNative, 60);
+    c.extra_args = vec!["-test.v".to_owned()];
+    let args = hf_engine::go_native::build_run_args(&c, "/work/h", "/work/c", "/work/o").unwrap();
+    assert_eq!(args.last().map(String::as_str), Some("-test.v"));
+}
+
+#[test]
+fn go_native_replays_one_saved_input_without_fuzzing() {
+    let args = hf_engine::go_native::build_replay_args("/work/h", "FuzzParse", "4f85edf10c3c3e2c");
+    assert_eq!(
+        args,
+        [
+            "/work/h",
+            "-test.run=^FuzzParse$/^4f85edf10c3c3e2c$",
+            "-test.v"
+        ]
+    );
+    assert!(!args.iter().any(|argument| argument.contains("-test.fuzz")));
 }
 
 #[test]
@@ -1045,5 +1067,94 @@ fn afl_rejects_a_hand_passed_cmplog_flag_in_extra_args() {
                 "the error must name the owned CmpLog path: {error}"
             );
         }
+    }
+}
+
+#[test]
+fn a_go_exit_without_a_saved_input_is_a_failed_run_not_a_finding() {
+    use hf_engine::go_native::failed_without_finding;
+    // The run that hit the sandbox file-size limit before its first input.
+    let setup = "--- FAIL: FuzzParse (0.00s)\n    truncate /tmp/fuzz-1: file too large\nFAIL\n";
+    assert!(failed_without_finding(1, setup));
+    let finding = "--- FAIL: FuzzParse (0.69s)\n    Failing input written to \
+                   testdata/fuzz/FuzzParse/03ed8df3b537de0f\nFAIL\n";
+    assert!(!failed_without_finding(1, finding));
+    assert!(!failed_without_finding(0, "PASS\n"));
+}
+
+/// Atheris and Jazzer start one executable harness artifact with libFuzzer's
+/// own flags, as one process whatever the CPU allocation.
+#[test]
+fn atheris_and_jazzer_start_the_artifact_as_one_libfuzzer_process() {
+    type Builder = fn(
+        &FuzzRunConfig,
+        &str,
+        &str,
+        &str,
+    ) -> Result<Vec<String>, hf_core::error::ClassifiedError>;
+    let builders: [(EngineKind, &str, Builder); 3] = [
+        (
+            EngineKind::Atheris,
+            "atheris",
+            hf_engine::atheris::build_run_args,
+        ),
+        (
+            EngineKind::Jazzer,
+            "jazzer",
+            hf_engine::jazzer::build_run_args,
+        ),
+        (
+            EngineKind::JazzerJs,
+            "jazzer-js",
+            hf_engine::jazzerjs::build_run_args,
+        ),
+    ];
+    for (engine, name, build) in builders {
+        let mut c = cfg(engine, 300);
+        c.max_cpus = 4;
+        c.seed = Some(7);
+        c.input_timeout = Some(Duration::from_millis(1500));
+        c.extra_args = vec!["-max_len=64".to_owned()];
+        let args = build(
+            &c,
+            "/work/runs/r/input/harness",
+            "/work/runs/r/corpus",
+            "/work/runs/r/out/",
+        )
+        .unwrap();
+        assert_eq!(
+            args.iter().map(String::as_str).collect::<Vec<_>>(),
+            vec![
+                "/work/runs/r/input/harness",
+                "-max_total_time=300",
+                "-artifact_prefix=/work/runs/r/out/",
+                "-use_value_profile=1",
+                "-print_final_stats=1",
+                "/work/runs/r/corpus",
+                "-max_len=64",
+                "-seed=7",
+                "-timeout=2",
+            ],
+            "{name}: {args:?}"
+        );
+
+        for flag in ["-fork=2", "-jobs=4", "-workers=2", "-merge=1"] {
+            let mut refused = cfg(engine, 60);
+            refused.extra_args = vec![flag.to_owned()];
+            let error = build(&refused, "/work/h", "/work/corpus", "/work/out")
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(&format!("the {name} engine runs one process per run")),
+                "{error}"
+            );
+            assert!(error.contains(flag), "{error}");
+        }
+    }
+    assert!(hf_engine::atheris::exited_outside_fuzzing(1));
+    assert!(hf_engine::jazzer::exited_outside_fuzzing(1));
+    for finished in [0, 70, 77] {
+        assert!(!hf_engine::atheris::exited_outside_fuzzing(finished));
+        assert!(!hf_engine::jazzer::exited_outside_fuzzing(finished));
     }
 }

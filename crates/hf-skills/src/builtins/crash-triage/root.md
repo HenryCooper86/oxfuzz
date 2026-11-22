@@ -15,6 +15,8 @@ Classify a crash and draft a bug report.
    - stack-buffer-overflow -> `Asan`
    - use-after-free -> `Asan`
    - integer-overflow -> `Ubsan`
+   - use-of-uninitialized-value -> `Msan`
+   - data race -> `Tsan`
    - SIGSEGV -> `Segv`
    - SIGABRT -> `Abort`
    - timeout -> `Timeout`

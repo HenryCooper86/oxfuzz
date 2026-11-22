@@ -211,6 +211,9 @@ image: clang 18.1.3, AFL++ 4.09c wrapping clang 17.0.6, honggfuzz 2.6):
 | --- | --- | --- | --- |
 | `address` (default) | `-fsanitize=fuzzer -fsanitize=address` | same flags (afl-cc passes `-fsanitize` through to clang) | `-fsanitize=address` |
 | `undefined` | `-fsanitize=fuzzer -fsanitize=undefined -fno-sanitize-recover=undefined` | same flags | `-fsanitize=undefined -fno-sanitize-recover=undefined` |
+| `thread` (C, C++) | `-fsanitize=fuzzer -fsanitize=thread` | not admitted | `-fsanitize=thread` |
+| `memory` (C) | `-fsanitize=fuzzer -fsanitize=memory -fsanitize-memory-track-origins` | same flags | `-fsanitize=memory -fsanitize-memory-track-origins` |
+| `memory` (C++) | `-fsanitize=fuzzer-no-link`, the memory flags, the instrumented libc++ flags, and `libFuzzer-msan.a` | not admitted | the memory flags and the instrumented libc++ flags |
 
 Decisions and their evidence:
 
@@ -235,13 +238,57 @@ Decisions and their evidence:
 - **Rust is AddressSanitizer-only** on this pipeline: cargo-fuzz
   (libfuzzer-sys) has no UBSan/MSan/TSan path, so a non-`address` selection
   fails loud at the build constructor (and before any LLM drafting).
-- **`memory`, `thread`, and `none` are rejected, not ignored.** MSan needs a
-  fully instrumented libc/userspace (the sandbox's Ubuntu 24.04 runtime is
-  not MSan-instrumented, so its findings would be false positives); TSan
-  data-race reports do not map onto the crash-triage pipeline; and a
-  sanitizer-less build has no sanitizer evidence to classify. syzkaller
-  kernel builds take no userspace sanitizer (KASAN/UBSAN are kernel-image
-  configuration).
+- **`thread` runs on libFuzzer and honggfuzz, not AFL++.** A TSan report
+  ends the process with exit code 66 and no signal. libFuzzer detects that by
+  exit code. honggfuzz detects crashes by signal, so its runner environment
+  adds `abort_on_error=1`; with it honggfuzz saved the planted race for C and
+  C++ and saved nothing for a correctly locked control target. Under AFL++ a
+  one-byte seed that returns before any thread starts is reported as a data
+  race inside the forkserver runtime (with and without `die_after_fork=0`),
+  so every AFL++ finding would be suspect (sandbox image 0.2.2, linux/arm64,
+  2026-11-21).
+- **The runner sets `TSAN_OPTIONS`** unless the operator set it:
+  `halt_on_error=1` for libFuzzer and `halt_on_error=1:abort_on_error=1` for
+  honggfuzz. Without `halt_on_error=1` a report does not stop the process,
+  and the artifact libFuzzer wrote was the empty input instead of the racing
+  one. libFuzzer must not get `abort_on_error=1`: it hung a libFuzzer binary
+  in the pinned image.
+- **`memory` for C, on all three userspace engines.** MSan intercepts
+  libc, so a C target needs no instrumented system library; each engine
+  recorded a planted uninitialized heap read built with the flags above.
+  `-fsanitize-memory-track-origins` is always passed so a report names where
+  the uninitialized value was created. AFL++ compiles at `-O3` by default,
+  where the optimizer can remove an uninitialized read whose result is
+  unused; that is a property of the optimization level, not of the engine
+  (libFuzzer and honggfuzz miss the same read at `-O3`).
+- **`memory` for C++ builds against an instrumented libc++, on libFuzzer and
+  honggfuzz.** With the uninstrumented libstdc++ a target with no bug is
+  reported (`use-of-uninitialized-value ... in std::ostream::operator<<`).
+  Sandbox image 0.2.3 carries libc++ and libc++abi built with
+  `-fsanitize=memory` from a pinned LLVM commit under
+  `/opt/oxfuzz/msan-libcxx`, and a libFuzzer archive built against that
+  libc++ (`lib/libFuzzer-msan.a`). A C++ MSan build adds `-stdlib=libc++
+  -nostdinc++ -isystem <root>/include/c++/v1 -L<root>/lib
+  -Wl,-rpath,<root>/lib`. The packaged libFuzzer runtime links libstdc++, so
+  the libFuzzer build passes `-fsanitize=fuzzer-no-link` (instrumentation
+  only) and links the image's archive by path; honggfuzz's runtime is C and
+  needs only the library flags. Both engines reported a planted
+  uninitialized stack read and kept a control that uses `std::map`,
+  `std::vector`, and string streams clean, through the product's own build
+  and smoke operations (`msan_cpp_tests`, ignored live test, 2026-11-21).
+  Every C++ source the build links, the project's own included, is compiled
+  with the same flags; a prebuilt C++ library the project links is not
+  instrumented and can still produce false reports.
+- **`memory` for C++ is rejected under AFL++.** An AFL++ binary built against
+  the instrumented libc++ did not start its forkserver in image 0.2.3
+  (`Writing to forkserver failed`), with and without the planted read.
+- **`none` is rejected, not ignored.** A sanitizer-less build has no
+  sanitizer evidence to classify. syzkaller kernel builds take no userspace
+  sanitizer (KASAN/UBSAN are kernel-image configuration).
+- **Admission is enforced in `hf_harness::build_command_for_source`.** The
+  configuration layer accepts `memory` and `thread` as selectable ids; the
+  build constructor refuses the engine and language pairs above, so no caller
+  can build an unverified combination.
 
 Sanitizer is part of run identity wherever runs are compared or continued: the
 auto-revert baseline check and comparison key include it, the change-impact

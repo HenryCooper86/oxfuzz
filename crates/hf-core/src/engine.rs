@@ -26,6 +26,22 @@ pub enum EngineKind {
     /// `go test -c` binary. An admission-gated capability outside
     /// [`EngineKind::ALL`]: not enabled unless a deployment lists it.
     GoNative,
+    /// Atheris, the coverage-guided Python fuzzer built on libFuzzer. A
+    /// distinct engine rather than a libFuzzer language: its counters are
+    /// Python bytecode events and its findings are uncaught exceptions.
+    /// Admission-gated like [`EngineKind::GoNative`].
+    Atheris,
+    /// Jazzer, the coverage-guided JVM fuzzer built on libFuzzer. A distinct
+    /// engine for the same reason as Atheris: its counters are JVM bytecode
+    /// edges and its findings are uncaught exceptions and bug-detector
+    /// reports. Admission-gated like [`EngineKind::GoNative`].
+    Jazzer,
+    /// Jazzer.js, the coverage-guided fuzzer for Node.js built on libFuzzer.
+    /// A distinct engine for the same reason as Atheris and Jazzer: its
+    /// counters are edges of instrumented JavaScript and its findings are
+    /// uncaught exceptions and bug-detector reports. Admission-gated like
+    /// [`EngineKind::GoNative`].
+    JazzerJs,
 }
 
 impl Serialize for EngineKind {
@@ -106,6 +122,9 @@ impl EngineKind {
             Self::LibFuzzer => "libfuzzer",
             Self::Syzkaller => "syzkaller",
             Self::GoNative => "go-native",
+            Self::Atheris => "atheris",
+            Self::Jazzer => "jazzer",
+            Self::JazzerJs => "jazzer-js",
         }
     }
 
@@ -145,14 +164,18 @@ impl EngineKind {
                     requires_corpus_directory: false,
                 },
             },
-            Self::Syzkaller => EngineCapabilities {
+            // No external minimizer for these. Syzkaller minimizes via
+            // `syz-repro`, driven separately (`hf_crash::build_minimize_args`
+            // returns `None` for it). For Atheris, Jazzer and Jazzer.js,
+            // libFuzzer's `cov:` counter over instrumented Python, JVM
+            // bytecode or JavaScript is a proxy, not LLVM source edges, and
+            // no minimizer path is qualified for any of them.
+            Self::Syzkaller | Self::Atheris | Self::Jazzer | Self::JazzerJs => EngineCapabilities {
                 telemetry: EngineTelemetry {
                     supports_live_stats: true,
                     supports_coverage: true,
                 },
                 artifacts: EngineArtifacts {
-                    // Syzkaller minimizes via `syz-repro`, driven separately.
-                    // `hf_crash::build_minimize_args` returns `None` for it.
                     supports_crash_minimization: false,
                     requires_corpus_directory: false,
                 },
@@ -187,6 +210,9 @@ impl EngineKind {
             Self::LibFuzzer => language.libfuzzer_compatible(),
             Self::Syzkaller => false,
             Self::GoNative => matches!(language, crate::target::TargetLanguage::Go),
+            Self::Atheris => matches!(language, crate::target::TargetLanguage::Python),
+            Self::Jazzer => matches!(language, crate::target::TargetLanguage::Java),
+            Self::JazzerJs => matches!(language, crate::target::TargetLanguage::JavaScript),
         }
     }
 }
@@ -211,6 +237,9 @@ impl std::str::FromStr for EngineKind {
             "libfuzzer" | "libfuzz" | "lf" => Ok(Self::LibFuzzer),
             "syzkaller" | "syz" => Ok(Self::Syzkaller),
             "go-native" | "gonative" | "go" => Ok(Self::GoNative),
+            "atheris" | "python-atheris" => Ok(Self::Atheris),
+            "jazzer" | "jvm-jazzer" => Ok(Self::Jazzer),
+            "jazzer-js" | "jazzerjs" | "jazzer.js" => Ok(Self::JazzerJs),
             other => Err(format!(
                 "unknown fuzzing engine '{other}' (expected one of: {})",
                 Self::advertised_ids()
@@ -552,6 +581,52 @@ mod tests {
             !EngineKind::ALL.contains(&EngineKind::GoNative),
             "go-native must not be enabled by default"
         );
+    }
+
+    #[test]
+    fn atheris_parses_supports_only_python_and_is_not_a_default_engine() {
+        let parsed: EngineKind = "atheris".parse().unwrap();
+        assert_eq!(parsed, EngineKind::Atheris);
+        assert_eq!(parsed.as_str(), "atheris");
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), "\"atheris\"");
+        assert!(!EngineKind::ALL.contains(&EngineKind::Atheris));
+        assert!(!EngineKind::advertised_ids().contains("atheris"));
+        assert!(EngineKind::Atheris.supports_language(crate::target::TargetLanguage::Python));
+        assert!(!EngineKind::Atheris.supports_language(crate::target::TargetLanguage::C));
+        assert!(!EngineKind::LibFuzzer.supports_language(crate::target::TargetLanguage::Python));
+    }
+
+    #[test]
+    fn jazzer_js_parses_supports_only_javascript_and_is_not_a_default_engine() {
+        for id in ["jazzer-js", "jazzerjs", "Jazzer.js"] {
+            assert_eq!(id.parse(), Ok(EngineKind::JazzerJs), "{id}");
+        }
+        assert_eq!(EngineKind::JazzerJs.as_str(), "jazzer-js");
+        assert_eq!(
+            EngineKind::JazzerJs.as_str().parse(),
+            Ok(EngineKind::JazzerJs)
+        );
+        assert!(!EngineKind::ALL.contains(&EngineKind::JazzerJs));
+        assert!(!EngineKind::advertised_ids().contains("jazzer"));
+        assert!(EngineKind::JazzerJs.supports_language(crate::target::TargetLanguage::JavaScript));
+        assert!(!EngineKind::JazzerJs.supports_language(crate::target::TargetLanguage::Java));
+        assert!(!EngineKind::Jazzer.supports_language(crate::target::TargetLanguage::JavaScript));
+        assert!(!EngineKind::LibFuzzer.supports_language(crate::target::TargetLanguage::JavaScript));
+        let capabilities = EngineKind::JazzerJs.capabilities();
+        assert!(!capabilities.artifacts.supports_crash_minimization);
+        assert!(capabilities.telemetry.supports_live_stats);
+    }
+
+    #[test]
+    fn jazzer_parses_supports_only_java_and_is_not_a_default_engine() {
+        let parsed: EngineKind = "jazzer".parse().unwrap();
+        assert_eq!(parsed, EngineKind::Jazzer);
+        assert_eq!(parsed.as_str(), "jazzer");
+        assert!(!EngineKind::ALL.contains(&EngineKind::Jazzer));
+        assert!(!EngineKind::advertised_ids().contains("jazzer"));
+        assert!(EngineKind::Jazzer.supports_language(crate::target::TargetLanguage::Java));
+        assert!(!EngineKind::Jazzer.supports_language(crate::target::TargetLanguage::Python));
+        assert!(!EngineKind::LibFuzzer.supports_language(crate::target::TargetLanguage::Java));
     }
 
     #[test]

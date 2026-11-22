@@ -1,0 +1,32 @@
+# Crash alerts -- post a short message to a webhook when an unattended
+# (scheduled) campaign finds crashes.
+#
+# The message names the project directory, the target, and the crash count.
+# It never carries crash inputs, stack traces, source, or the project path.
+# Sending is a publish action: it passes through the same approval policy as
+# filing an issue or pushing to DefectDojo.
+
+# Where alerts are posted. Leave empty to disable alerts. Must be https;
+# plain http is accepted for localhost only.
+#   Slack / Mattermost incoming webhook: paste the webhook URL and set
+#   format = "slack".
+#   Your own service: any https endpoint that accepts a JSON POST.
+webhook_url = ""
+
+# Body format:
+#   "json"  -> {"event":"crashes_found","source":"oxfuzz","project":"...",
+#               "target":"...","crashes":3,"schedule_id":"..."}
+#   "slack" -> {"text":"oxfuzz found 3 crashes in target ... of project ..."}
+format = "json"
+
+# Optional bearer token sent as `Authorization: Bearer <token>`. Two ways:
+#   1. Paste it into `bearer_token` below.
+#   2. Set `bearer_token_env` to the NAME of an environment variable that
+#      holds it (preferred for CLI/CI so the secret stays out of this file).
+# Leave both unset for a webhook whose URL is itself the secret.
+# bearer_token = ""
+bearer_token_env = ""
+
+# Verify the server TLS certificate. Disable only for a trusted self-signed
+# endpoint.
+verify_tls = true

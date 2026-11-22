@@ -268,7 +268,103 @@ fn collect_build_inputs(
         let extension = path.extension().and_then(|value| value.to_str());
         let is_source = matches!(extension, Some("c" | "h" | "cc" | "cpp" | "cxx" | "hpp"))
             && !name.starts_with("harness.");
-        if is_source || matches!(name.as_ref(), "Cargo.toml" | "Cargo.lock") {
+        // A staged Go module: its sources and module files. The generated
+        // fuzz test is retained as the harness source, not as project input.
+        let is_go_input = matches!(extension, Some("go")) && !name.ends_with("_test.go")
+            || matches!(name.as_ref(), "go.mod" | "go.sum");
+        // A staged Python module. The generated script is the harness
+        // source, not project input.
+        let is_python_input = matches!(extension, Some("py")) && !name.starts_with("harness.");
+        // A staged Java source, likewise without the generated class, and
+        // the vendored jars the build compiles against.
+        let is_java_input = matches!(extension, Some("java"))
+            && name != hf_harness::jvm_jazzer::HARNESS_FILE
+            || path
+                .strip_prefix(root)
+                .is_ok_and(hf_harness::jvm_jazzer::is_vendored_library);
+        if is_source
+            || is_go_input
+            || is_python_input
+            || is_java_input
+            || matches!(name.as_ref(), "Cargo.toml" | "Cargo.lock")
+        {
+            paths.push(path.strip_prefix(root).unwrap_or(&path).to_path_buf());
+        }
+    }
+    Ok(())
+}
+
+/// Directories at the workspace root that oxfuzz writes: run input and
+/// output, engine state, and analysis results. A staged Node.js project is
+/// retained around them.
+const WORKSPACE_OWNED_DIRS: [&str; 9] = [
+    "corpus",
+    "out",
+    "runs",
+    "fuzz",
+    "target",
+    "semgrep",
+    "semgrep-held",
+    "journal",
+    "function-coverage",
+];
+
+/// Collect a staged Node.js project's manifest, modules, and JSON files at
+/// their workspace-relative paths. The project's own `src` and `build`-like
+/// directories are part of it, so only the workspace's own root directories
+/// are passed over, along with the generated harness, hidden root entries
+/// (workspace bookkeeping), and the package tree, which has its own pass.
+fn collect_javascript_inputs(
+    root: &Path,
+    directory: &Path,
+    paths: &mut Vec<PathBuf>,
+) -> Result<(), ClassifiedError> {
+    let at_root = directory == root;
+    let mut entries = std::fs::read_dir(directory)
+        .map_err(|error| {
+            ClassifiedError::Validation(format!(
+                "read comparison context {}: {error}",
+                directory.display()
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| {
+            ClassifiedError::Validation(format!("read comparison context entry: {error}"))
+        })?;
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for entry in entries {
+        let path = entry.path();
+        let kind = entry.file_type().map_err(|error| {
+            ClassifiedError::Validation(format!(
+                "inspect comparison context {}: {error}",
+                path.display()
+            ))
+        })?;
+        if kind.is_symlink() {
+            return Err(ClassifiedError::Validation(format!(
+                "comparison context contains a symlink: {}",
+                path.display()
+            )));
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if at_root && name.starts_with('.') {
+            continue;
+        }
+        if kind.is_dir() {
+            let owned = at_root && WORKSPACE_OWNED_DIRS.contains(&name.as_ref());
+            if !owned && name != hf_harness::js_jazzer::DEPENDENCIES_DIR {
+                collect_javascript_inputs(root, &path, paths)?;
+            }
+            continue;
+        }
+        let is_input = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|extension| {
+                extension == "json" || hf_harness::js_jazzer::MODULE_EXTENSIONS.contains(&extension)
+            });
+        if kind.is_file() && is_input && name != hf_harness::js_jazzer::HARNESS_FILE {
             paths.push(path.strip_prefix(root).unwrap_or(&path).to_path_buf());
         }
     }
@@ -348,6 +444,22 @@ fn source_context_paths(root: &Path) -> Result<Vec<PathBuf>, ClassifiedError> {
     let mut paths = Vec::new();
     collect_build_inputs(root, root, &mut paths)?;
     collect_context_paths(root, &root.join("src"), true, &mut paths)?;
+    // The Python packages a project carries, with the data files they ship.
+    collect_context_paths(
+        root,
+        &root.join(hf_harness::python_atheris::VENDORED_PACKAGES_DIR),
+        true,
+        &mut paths,
+    )?;
+    if is_regular_file(&root.join(hf_harness::js_jazzer::MANIFEST_FILE)) {
+        collect_javascript_inputs(root, root, &mut paths)?;
+        collect_context_paths(
+            root,
+            &root.join(hf_harness::js_jazzer::DEPENDENCIES_DIR),
+            true,
+            &mut paths,
+        )?;
+    }
     paths.sort();
     paths.dedup();
     if paths.len() > MAX_RUN_CONTEXT_FILES {
@@ -1134,6 +1246,11 @@ pub(super) fn run_sandbox_options(
 ) -> hf_core::runtime::SandboxOptions {
     let honggfuzz = engine == hf_core::engine::EngineKind::Honggfuzz;
     hf_core::runtime::SandboxOptions {
+        // Go writes failing inputs to `testdata/fuzz/` under its working
+        // directory; the run's output directory is the writable place the
+        // crash scan reads.
+        workdir: (engine == hf_core::engine::EngineKind::GoNative)
+            .then(|| artifacts.output_container.clone()),
         extra_mounts: vec![
             hf_core::runtime::SandboxMount::writable(
                 artifacts.corpus_host.clone(),
@@ -1145,11 +1262,7 @@ pub(super) fn run_sandbox_options(
             ),
         ],
         workspace_read_only: true,
-        max_file_size_bytes: Some(if honggfuzz {
-            hf_engine::honggfuzz::SHARED_MEMORY_BYTES
-        } else {
-            64 * 1024 * 1024
-        }),
+        max_file_size_bytes: Some(hf_engine::runner::run_file_size_limit_bytes(engine)),
         shm_size_mb: honggfuzz.then_some(hf_engine::honggfuzz::SHARED_MEMORY_MB),
         image: sandbox_image,
         ..hf_core::runtime::SandboxOptions::default()
@@ -1628,7 +1741,7 @@ mod staging_tests {
     fn comparison_context_rejects_non_digest_sandbox_identity() {
         let workspace = tempfile::tempdir().unwrap();
 
-        let error = run_context_digests(workspace.path(), "oxfuzz/fuzz-sandbox:0.2.2").unwrap_err();
+        let error = run_context_digests(workspace.path(), "oxfuzz/fuzz-sandbox:0.2.3").unwrap_err();
 
         assert!(error.to_string().contains("sandbox image digest"));
     }

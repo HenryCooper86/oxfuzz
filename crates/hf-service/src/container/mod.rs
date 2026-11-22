@@ -23,12 +23,26 @@ pub(crate) mod chat_turn;
 pub use ai_target_ranking::{RankedDiscoveryResult, RankedDiscoveryStatus, RankedInventoryAdvice};
 mod operation_registry;
 pub use operation_registry::OperationCancelOutcome;
+#[cfg(feature = "binary-only-fuzzing")]
+mod binary_issue;
+#[cfg(feature = "binary-only-fuzzing")]
+mod binary_only;
+#[cfg(feature = "crash-bisection")]
+mod bisect;
 #[cfg(feature = "clang-analysis")]
 mod clang_analysis;
 #[cfg(feature = "concolic-enrichment")]
 mod concolic;
 mod corpus;
+#[cfg(feature = "binary-only-fuzzing")]
+pub use binary_only::{
+    signal_name as binary_signal_name, BinaryFinding, BinaryFuzzOutcome, BinaryFuzzRequest,
+    BinaryInput, ElfMachine, MinimizedInput, MESSAGE_SEPARATOR as BINARY_MESSAGE_SEPARATOR,
+};
+#[cfg(feature = "crash-bisection")]
+pub use bisect::{BisectOutcome, BisectResult, BisectStep, BisectVerdict};
 mod coverage_cache;
+pub use coverage_cache::CoverageLineReport;
 mod coverage_feedback;
 use coverage_feedback::CoverageFeedback;
 pub(crate) mod crash_confirmation;
@@ -43,6 +57,7 @@ mod export;
 #[cfg(feature = "triage-disposition")]
 mod finding_review;
 mod fuzz;
+mod go_corpus;
 mod guards;
 mod harness;
 mod harness_inputs;
@@ -58,14 +73,26 @@ mod harness_workspace;
 mod history;
 pub(crate) use history::run_crash_count;
 mod engine_figures;
+#[cfg(all(test, feature = "go-native-fuzzing"))]
+mod go_native_tests;
 mod honggfuzz_stats;
+#[cfg(all(test, feature = "js-jazzer"))]
+mod js_jazzer_tests;
+#[cfg(all(test, feature = "jvm-jazzer"))]
+mod jvm_jazzer_tests;
 mod lifecycle;
 #[cfg(all(test, feature = "run-closeout"))]
 mod live_recovery_tests;
+#[cfg(test)]
+mod msan_cpp_tests;
 mod output_budget;
 mod policy;
 pub(crate) mod project_identity;
+#[cfg(all(test, feature = "python-atheris"))]
+mod python_atheris_tests;
 mod run;
+#[cfg(test)]
+mod rust_vendor_tests;
 pub(crate) use run::CampaignRunLimits;
 pub use run::{ReplayInputs, ReplayReview};
 mod function_coverage;
@@ -433,6 +460,9 @@ async fn merge_run_discoveries(
     let (corpus, _) = tokio::task::spawn_blocking(move || {
         if matches!(engine, EngineKind::AflPlusPlus | EngineKind::Honggfuzz) {
             hf_corpus::grow(&run_corpus, &run_output)?;
+        }
+        if engine == EngineKind::GoNative {
+            go_corpus::collect_discoveries(&run_corpus, &run_output)?;
         }
         hf_corpus::merge_snapshot(&retained_corpus, &run_corpus)
     })
@@ -1368,6 +1398,8 @@ impl ServiceContainer {
             TargetLanguage::Rust,
             TargetLanguage::Go,
             TargetLanguage::Python,
+            TargetLanguage::Java,
+            TargetLanguage::JavaScript,
         ] {
             match self.discover(&project, language).await {
                 Ok(inventory) => {
@@ -2818,6 +2850,18 @@ fn heuristic_draft(
     sanitizer: hf_core::target::Sanitizer,
     persistent: bool,
 ) -> Result<HarnessDraft, ClassifiedError> {
+    if candidate.language == TargetLanguage::Go {
+        return go_template_draft(candidate, engine, sanitizer, persistent);
+    }
+    if candidate.language == TargetLanguage::Python {
+        return python_template_draft(candidate, engine, sanitizer, persistent);
+    }
+    if candidate.language == TargetLanguage::Java {
+        return java_template_draft(candidate, engine, sanitizer, persistent);
+    }
+    if candidate.language == TargetLanguage::JavaScript {
+        return javascript_template_draft(candidate, engine, sanitizer, persistent);
+    }
     let includes = generate_includes(candidate);
     let forward_decl = generate_forward_decl(&candidate.symbol, candidate.signature.as_deref());
     let body = generate_harness_body(&candidate.symbol, candidate.signature.as_deref());
@@ -2905,6 +2949,151 @@ fn heuristic_draft(
     })
 }
 
+/// The Go harness draft: the signature-driven fuzz test for the supported
+/// target class, generated without a model call. The package clause is read
+/// from the target's own file inside the project.
+fn go_template_draft(
+    candidate: &TargetCandidate,
+    engine: EngineKind,
+    sanitizer: hf_core::target::Sanitizer,
+    persistent: bool,
+) -> Result<HarnessDraft, ClassifiedError> {
+    if persistent {
+        hf_harness::persistent::require_persistent_support(engine, candidate.language)?;
+    }
+    let target_source = target_source::target_file_text(candidate).ok_or_else(|| {
+        ClassifiedError::Validation(format!(
+            "could not read {} inside the project to draft a Go harness",
+            candidate.relative_file()
+        ))
+    })?;
+    let source = hf_harness::go_native::template(candidate, &target_source)?;
+    let build_cmd = hf_harness::build_command_for_source(
+        engine,
+        candidate.language,
+        &harness_binary_name(&candidate.symbol),
+        sanitizer,
+        &source,
+    )?;
+    Ok(HarnessDraft {
+        target_id: candidate.id,
+        engine,
+        source,
+        rationale: String::new(),
+        build_cmd,
+        generator: hf_core::harness::DraftGenerator::Heuristic,
+    })
+}
+
+/// The Python harness draft: the fixed Atheris script for the supported
+/// target class, generated from the candidate alone without a model call.
+fn python_template_draft(
+    candidate: &TargetCandidate,
+    engine: EngineKind,
+    sanitizer: hf_core::target::Sanitizer,
+    persistent: bool,
+) -> Result<HarnessDraft, ClassifiedError> {
+    if persistent {
+        hf_harness::persistent::require_persistent_support(engine, candidate.language)?;
+    }
+    let source = hf_harness::python_atheris::template(candidate)?;
+    let build_cmd = hf_harness::build_command_for_source(
+        engine,
+        candidate.language,
+        &harness_binary_name(&candidate.symbol),
+        sanitizer,
+        &source,
+    )?;
+    Ok(HarnessDraft {
+        target_id: candidate.id,
+        engine,
+        source,
+        rationale: String::new(),
+        build_cmd,
+        generator: hf_core::harness::DraftGenerator::Heuristic,
+    })
+}
+
+/// The JavaScript harness draft: the fixed Jazzer.js module for the supported
+/// target class, generated without a model call. The parameter types are
+/// read from the documentation in the target's own file inside the project.
+fn javascript_template_draft(
+    candidate: &TargetCandidate,
+    engine: EngineKind,
+    sanitizer: hf_core::target::Sanitizer,
+    persistent: bool,
+) -> Result<HarnessDraft, ClassifiedError> {
+    if persistent {
+        hf_harness::persistent::require_persistent_support(engine, candidate.language)?;
+    }
+    let manifest = hf_harness::js_jazzer::MANIFEST_FILE;
+    if !is_regular_file(&candidate.project_root.join(manifest)) {
+        return Err(ClassifiedError::Validation(format!(
+            "the project root has no {manifest}; a JavaScript project is staged from the \
+             directory that holds it, so select that directory as the project (a project \
+             without one needs a {manifest} naming it)"
+        )));
+    }
+    let target_source = target_source::target_file_text(candidate).ok_or_else(|| {
+        ClassifiedError::Validation(format!(
+            "could not read {} inside the project to draft a JavaScript harness",
+            candidate.relative_file()
+        ))
+    })?;
+    let source = hf_harness::js_jazzer::template(candidate, &target_source)?;
+    let build_cmd = hf_harness::build_command_for_source(
+        engine,
+        candidate.language,
+        &harness_binary_name(&candidate.symbol),
+        sanitizer,
+        &source,
+    )?;
+    Ok(HarnessDraft {
+        target_id: candidate.id,
+        engine,
+        source,
+        rationale: String::new(),
+        build_cmd,
+        generator: hf_core::harness::DraftGenerator::Heuristic,
+    })
+}
+
+/// The Java harness draft: the fixed Jazzer class for the supported target
+/// class, generated without a model call. The package clause is read from
+/// the target's own file inside the project.
+fn java_template_draft(
+    candidate: &TargetCandidate,
+    engine: EngineKind,
+    sanitizer: hf_core::target::Sanitizer,
+    persistent: bool,
+) -> Result<HarnessDraft, ClassifiedError> {
+    if persistent {
+        hf_harness::persistent::require_persistent_support(engine, candidate.language)?;
+    }
+    let target_source = target_source::target_file_text(candidate).ok_or_else(|| {
+        ClassifiedError::Validation(format!(
+            "could not read {} inside the project to draft a Java harness",
+            candidate.relative_file()
+        ))
+    })?;
+    let source = hf_harness::jvm_jazzer::template(candidate, &target_source)?;
+    let build_cmd = hf_harness::build_command_for_source(
+        engine,
+        candidate.language,
+        &harness_binary_name(&candidate.symbol),
+        sanitizer,
+        &source,
+    )?;
+    Ok(HarnessDraft {
+        target_id: candidate.id,
+        engine,
+        source,
+        rationale: String::new(),
+        build_cmd,
+        generator: hf_core::harness::DraftGenerator::Heuristic,
+    })
+}
+
 fn engine_label(engine: EngineKind) -> &'static str {
     match engine {
         EngineKind::LibFuzzer => "libFuzzer",
@@ -2912,6 +3101,9 @@ fn engine_label(engine: EngineKind) -> &'static str {
         EngineKind::Honggfuzz => "honggfuzz",
         EngineKind::Syzkaller => "syzkaller",
         EngineKind::GoNative => "Go native fuzzing",
+        EngineKind::Atheris => "Atheris",
+        EngineKind::Jazzer => "Jazzer",
+        EngineKind::JazzerJs => "Jazzer.js",
     }
 }
 

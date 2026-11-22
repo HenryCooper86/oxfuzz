@@ -86,7 +86,14 @@ pub fn build_minimize_args_with_timeout(
         // - syzkaller uses `syz-repro` on the crash log, driven separately from
         //   a harness binary.
         // - Go's native fuzzer minimizes failing inputs itself during the run.
-        EngineKind::Honggfuzz | EngineKind::Syzkaller | EngineKind::GoNative => None,
+        // - Atheris, Jazzer and Jazzer.js: no minimizer path is qualified for
+        //   them.
+        EngineKind::Honggfuzz
+        | EngineKind::Syzkaller
+        | EngineKind::GoNative
+        | EngineKind::Atheris
+        | EngineKind::Jazzer
+        | EngineKind::JazzerJs => None,
     }
 }
 
