@@ -1,0 +1,19 @@
+# oxfuzz fuzz on frames/reader.py, a sample Python module with a planted list
+# index error, using the Atheris engine. Recorded 2026-11-22 with oxfuzz 0.9.8
+# and sandbox image 0.2.3 on linux/arm64 (macOS arm64 host). Every line is what
+# the command printed. Two things are shortened: the pauses, and the
+# scratch-directory prefix of the input path, shown as "…".
+# Format: @seconds|kind|text, where kind is cmd, out, ok or hit.
+@0|cmd|$ oxfuzz fuzz . --target parse --lang python --engine atheris --duration-secs 20 --iterations 1
+@0.9|out|--- [1/5] discover: scanning . (language: python) ---
+@1.7|out|--- [2/5] harness: drafting and compiling 'parse' for atheris (auto-repair up to 2x) ---
+@2.1|out|    harness: drafting 'parse' with the model
+@2.9|out|    harness: compile attempt 1 in the sandbox
+@3.7|out|--- [3/5] smoke: qualifying 'parse' ---
+@4.3|out|[approval] High-risk action 'run harness (smoke fuzz)' requires approval [y]es/[n]o/[a]lways: y
+@4.8|ok|[approval] approved: run harness (smoke fuzz)
+@6.4|hit|--- smoke test of 'parse' already found 1 crash: likely a real bug; triaging instead of promoting ---
+@7.0|hit|[fuzz] finding: Panic IndexError: list index out of range (input: …/out/crash-8595be727d862f9b942ba3e9bbbca3e6d0050e8f)
+@7.6|out|[fuzz] no campaign ran: a harness whose smoke test crashes is never promoted automatically.
+@8.0|out|[fuzz] details:  oxfuzz triage . --target parse
+@8.4|out|[fuzz] to keep fuzzing past this bug, fix it and rerun, or approve the harness with known findings in the desktop app's Harness step.

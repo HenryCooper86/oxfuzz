@@ -354,30 +354,105 @@
       <section class="section wrap" id="whats-new">
         <h2 data-reveal>{{new_title}}</h2>
         <p class="section-intro" data-reveal>{{new_intro}}</p>
-        <div class="guarantees" data-reveal="stagger">
-          <div>
-            <h3>{{new_1_title}}</h3>
-            <p>{{new_1_text}}</p>
-          </div>
-          <div>
+
+        <div class="showcase" data-reveal>
+          <div class="showcase-copy">
             <h3>{{new_2_title}}</h3>
             <p>{{new_2_text}}</p>
+            <dl class="showcase-facts">
+              <div>
+                <dt>{{bin_fact_1}}</dt>
+                <dd>{{bin_fact_1_value}}</dd>
+              </div>
+              <div>
+                <dt>{{bin_fact_2}}</dt>
+                <dd>{{bin_fact_2_value}}</dd>
+              </div>
+              <div>
+                <dt>{{bin_fact_3}}</dt>
+                <dd>{{bin_fact_3_value}}</dd>
+              </div>
+              <div>
+                <dt>{{bin_fact_4}}</dt>
+                <dd>{{bin_fact_4_value}}</dd>
+              </div>
+            </dl>
           </div>
+          <figure class="term" data-term>
+            <div class="term-bar" aria-hidden="true">
+              <i></i><i></i><i></i><span>oxfuzz binary</span>
+            </div>
+            <pre class="term-screen"><code><!-- TERM:binary --></code></pre>
+            <figcaption>
+              <span>{{term_binary_caption}}</span>
+              <button type="button" class="fuzz-replay" data-term-replay hidden>
+                {{fuzz_replay}}
+              </button>
+            </figcaption>
+          </figure>
+        </div>
+
+        <div class="showcase flip" data-reveal>
+          <div class="showcase-copy">
+            <h3>{{new_1_title}}</h3>
+            <p>{{new_1_text}}</p>
+            <dl class="showcase-facts">
+              <div>
+                <dt>{{py_fact_1}}</dt>
+                <dd>{{py_fact_1_value}}</dd>
+              </div>
+              <div>
+                <dt>{{py_fact_2}}</dt>
+                <dd>{{py_fact_2_value}}</dd>
+              </div>
+              <div>
+                <dt>{{py_fact_3}}</dt>
+                <dd>{{py_fact_3_value}}</dd>
+              </div>
+              <div>
+                <dt>{{py_fact_4}}</dt>
+                <dd>{{py_fact_4_value}}</dd>
+              </div>
+            </dl>
+          </div>
+          <figure class="term" data-term>
+            <div class="term-bar" aria-hidden="true">
+              <i></i><i></i><i></i><span>oxfuzz fuzz --lang python</span>
+            </div>
+            <pre class="term-screen"><code><!-- TERM:python --></code></pre>
+            <figcaption>
+              <span>{{term_python_caption}}</span>
+              <button type="button" class="fuzz-replay" data-term-replay hidden>
+                {{fuzz_replay}}
+              </button>
+            </figcaption>
+          </figure>
+        </div>
+
+        <div class="guarantees more" data-reveal="stagger">
           <div>
             <h3>{{new_3_title}}</h3>
             <p>{{new_3_text}}</p>
+            <pre class="example"><code>oxfuzz fuzz . --sanitizer memory
+oxfuzz dict . --target parse --set http.dict</code></pre>
           </div>
           <div>
             <h3>{{new_4_title}}</h3>
             <p>{{new_4_text}}</p>
+            <pre class="example"><code>oxfuzz bisect . --target parse \
+  --crash &lt;id&gt; --good v1.2.0</code></pre>
           </div>
           <div>
             <h3>{{new_5_title}}</h3>
             <p>{{new_5_text}}</p>
+            <pre class="example"><code>oxfuzz coverage . --target parse \
+  --html coverage.html</code></pre>
           </div>
           <div>
             <h3>{{new_6_title}}</h3>
             <p>{{new_6_text}}</p>
+            <pre class="example"><code>oxfuzz kernel . --kernel-image Image \
+  --rootfs rootfs.img --ssh-key id_rsa</code></pre>
           </div>
         </div>
         <p class="also" data-reveal>{{new_status}}</p>

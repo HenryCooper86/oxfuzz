@@ -585,6 +585,127 @@ h3 {
   font-size: 0.96rem;
 }
 
+/* What's new: two recorded sessions beside their descriptions, then cards.
+   A recording's markup is the finished session; motion.js only replays it. */
+.showcase {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+  gap: 48px;
+  align-items: center;
+  margin-top: 48px;
+}
+.showcase.flip {
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.8fr);
+}
+.showcase.flip .showcase-copy {
+  order: 2;
+}
+.showcase-copy h3 {
+  font-size: 1.35rem;
+  letter-spacing: -0.015em;
+}
+.showcase-copy p {
+  margin: 10px 0 0;
+  color: var(--muted);
+}
+.showcase-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px 24px;
+  margin: 24px 0 0;
+  padding-left: 20px;
+  border-left: 2px solid var(--accent);
+}
+.showcase-facts dt {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+.showcase-facts dd {
+  margin: 2px 0 0;
+  font-weight: 650;
+  font-size: 0.95rem;
+}
+.term {
+  margin: 0;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+  background: #0f0f0f;
+  box-shadow: var(--shadow);
+}
+.term-bar {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 11px 14px;
+  background: #1c1c1c;
+}
+.term-bar i {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: #3a3a3a;
+}
+.term-bar span {
+  margin-left: 8px;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.76rem;
+  color: #8f8a83;
+}
+.term-screen {
+  margin: 0;
+  padding: 16px 18px;
+  background: none;
+  border-radius: 0;
+  color: #cfcbc4;
+  font-size: 0.78rem;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.term-line.cmd {
+  color: #f1eee8;
+  font-weight: 650;
+}
+.term-line.ok {
+  color: #6fcf97;
+}
+.term-line.hit {
+  color: #ef7a6a;
+}
+.term figcaption {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 18px 14px;
+  border-top: 1px solid rgba(255, 255, 255, 0.13);
+  font-size: 0.82rem;
+  color: #aaa59e;
+}
+.term .fuzz-replay {
+  color: #e8e6e1;
+  border-color: rgba(255, 255, 255, 0.2);
+}
+.motion .term-line {
+  transition: opacity 0.25s ease;
+}
+.motion .term-line.pending {
+  opacity: 0;
+}
+.guarantees.more {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 56px;
+}
+.example {
+  margin-top: 14px;
+  padding: 12px 14px;
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /* Open source */
 .open-source {
   padding-block: 80px;
@@ -768,8 +889,16 @@ a.download:hover {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .guarantees,
+  .guarantees.more,
+  .showcase,
   .download-row {
     grid-template-columns: minmax(0, 1fr);
+  }
+  .showcase {
+    gap: 28px;
+  }
+  .showcase.flip .showcase-copy {
+    order: 0;
   }
   .site-header nav a:not(.github-link):not(.lang-link) {
     display: none;

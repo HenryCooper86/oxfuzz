@@ -1,0 +1,16 @@
+# oxfuzz binary on picinfo, a sample C program with a planted null write,
+# compiled without instrumentation. Recorded 2026-11-22 with oxfuzz 0.9.8 and
+# sandbox image 0.2.3 on linux/arm64 (macOS arm64 host). Every line is what the
+# command printed. Two things are shortened: the pauses (the run itself took
+# 30 seconds) and the scratch-directory prefix of each path, shown as "…".
+# Format: @seconds|kind|text, where kind is cmd, out, ok or hit.
+@0|cmd|$ oxfuzz binary . --binary ./picinfo --seeds ./seeds --duration 30s
+@0.9|out|[approval] High-risk action 'run harness (smoke fuzz)' requires approval [y]es/[n]o/[a]lways: y
+@1.4|ok|[approval] approved: run harness (smoke fuzz)
+@3.6|out|Fuzzed aarch64 binary 90e2b610354287dd for 30s under AFL++ QEMU mode.
+@3.9|out|Executions: 41856  Edges: 28  Corpus: 2  Hangs: 0
+@4.4|hit|Crashing inputs: 1 (1 distinct by stack signature)
+@4.7|hit|  12a77ddd6173  SEGV (signal 11) at (/work/target+0x908)
+@5.0|ok|      6 bytes  replay confirmed  …/findings/crash-12a77ddd6173cd1a
+@5.6|out|Draft an issue for one: oxfuzz binary-issue <project> --report …/report.json --finding <id> --draft
+@5.9|out|Session directory: …/.binary/90e2b610354287dd/bdc9b930-8576-4930-b91a-2842d7991efc

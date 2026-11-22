@@ -113,7 +113,7 @@ export const locales = {
 
     new_title: "New in 0.9.8: more languages, and programs without source",
     new_intro:
-      "Released in November 2026. This work is driven from the command line.",
+      "Released in November 2026 and driven from the command line. The two recordings are real sessions on small sample programs with a planted bug.",
     new_1_title: "Four more languages",
     new_1_text:
       "Go with native fuzzing, Python with Atheris, Java with Jazzer and JavaScript with Jazzer.js. Each is discovered, built and run in the same sandbox.",
@@ -131,7 +131,27 @@ export const locales = {
       "Line coverage as an lcov file or a single HTML page, so you can see which lines a corpus never reached.",
     new_6_title: "Kernel and build systems",
     new_6_text:
-      "<code>oxfuzz kernel</code> runs a syzkaller campaign from the command line, checked under emulation so far. Bazel projects build offline from a vendored directory. Builds still never download anything.",
+      "<code>oxfuzz kernel</code> runs a syzkaller campaign from the command line. Our 30-minute test campaign, under emulation, ran 1,698 programs and reached 3,634 coverage edges. Bazel projects build offline from a vendored directory.",
+    bin_fact_1: "Run",
+    bin_fact_1_value: "30 seconds, AFL++ QEMU mode",
+    bin_fact_2: "Executions",
+    bin_fact_2_value: "41,856",
+    bin_fact_3: "Crashing input",
+    bin_fact_3_value: "6 bytes: <code>PIC1eX</code>",
+    bin_fact_4: "Replay",
+    bin_fact_4_value: "Confirmed, signal 11",
+    py_fact_1: "Engine",
+    py_fact_1_value: "Atheris",
+    py_fact_2: "Found",
+    py_fact_2_value: "In the first smoke run",
+    py_fact_3: "Crashing input",
+    py_fact_3_value: "4 bytes: <code>4d 5a ee 4d</code>",
+    py_fact_4: "Finding",
+    py_fact_4_value: "IndexError, list index out of range",
+    term_binary_caption:
+      "A real session on a sample C program compiled without instrumentation. Pauses and long paths are shortened; every line is what the command printed.",
+    term_python_caption:
+      "A real session on a sample Python module. Pauses and long paths are shortened; every line is what the command printed.",
     new_status:
       'These features belong to the <code>oxfuzz</code> command-line tool, which is not in the desktop packages below. <a href="https://github.com/HenryCooper86/oxfuzz/blob/main/docs/guides/INSTALL.md" rel="noopener">Install it from source</a> at the v0.9.8 tag. The <a href="https://github.com/HenryCooper86/oxfuzz/blob/main/CHANGELOG.md" rel="noopener">changelog</a> lists every change.',
 
@@ -311,7 +331,8 @@ export const locales = {
     engine_syzkaller_link: "syzkaller 配置指南",
 
     new_title: "0.9.8 新功能：更多语言，以及没有源码的程序",
-    new_intro: "2026 年 11 月发布。以下功能通过命令行使用。",
+    new_intro:
+      "2026 年 11 月发布，通过命令行使用。下面两段录屏是真实的运行过程，对象是带有预埋缺陷的小型示例程序。",
     new_1_title: "新增四种语言",
     new_1_text:
       "Go（原生模糊测试）、Python（Atheris）、Java（Jazzer）和 JavaScript（Jazzer.js）。它们都在同一个沙箱里完成目标发现、构建和运行。",
@@ -329,7 +350,27 @@ export const locales = {
       "行覆盖率可以导出为 lcov 文件或单页 HTML，一眼看出语料从未到达哪些代码行。",
     new_6_title: "内核与构建系统",
     new_6_text:
-      "<code>oxfuzz kernel</code> 从命令行运行 syzkaller 测试，目前只在模拟环境下验证过。Bazel 项目使用 vendor 目录离线构建。构建过程依然不会下载任何内容。",
+      "<code>oxfuzz kernel</code> 从命令行运行 syzkaller 测试。我们在模拟环境下做的 30 分钟测试执行了 1,698 个程序，覆盖 3,634 条边。Bazel 项目使用 vendor 目录离线构建。",
+    bin_fact_1: "运行",
+    bin_fact_1_value: "30 秒，AFL++ QEMU 模式",
+    bin_fact_2: "执行次数",
+    bin_fact_2_value: "41,856",
+    bin_fact_3: "崩溃输入",
+    bin_fact_3_value: "6 个字节：<code>PIC1eX</code>",
+    bin_fact_4: "重放",
+    bin_fact_4_value: "已确认，信号 11",
+    py_fact_1: "引擎",
+    py_fact_1_value: "Atheris",
+    py_fact_2: "发现于",
+    py_fact_2_value: "第一次冒烟运行",
+    py_fact_3: "崩溃输入",
+    py_fact_3_value: "4 个字节：<code>4d 5a ee 4d</code>",
+    py_fact_4: "发现",
+    py_fact_4_value: "IndexError，列表索引越界",
+    term_binary_caption:
+      "真实的运行过程，对象是一个未插桩编译的 C 示例程序。停顿和过长的路径做了缩短，每一行都是命令的原始输出。",
+    term_python_caption:
+      "真实的运行过程，对象是一个 Python 示例模块。停顿和过长的路径做了缩短，每一行都是命令的原始输出。",
     new_status:
       '这些功能属于 <code>oxfuzz</code> 命令行工具，下方的桌面安装包不包含它。请在 v0.9.8 标签处<a href="https://github.com/HenryCooper86/oxfuzz/blob/main/docs/guides/INSTALL.md" rel="noopener">从源码安装</a>。全部改动见<a href="https://github.com/HenryCooper86/oxfuzz/blob/main/CHANGELOG.md" rel="noopener">更新日志</a>。',
 

@@ -37,6 +37,34 @@ const dist = join(root, "dist");
 const template = await readFile(join(root, "src/index.html"), "utf8");
 const groups = ["macOS", "Linux", "Windows", "Sandbox"];
 
+// A terminal recording is a transcript file: one "@seconds|kind|text" line per
+// printed line, with "#" comment lines for where it came from. The text is
+// escaped here, so a transcript can never add markup to the page.
+const lineKinds = new Set(["cmd", "out", "ok", "hit"]);
+const escapeHtml = (text) =>
+  text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+async function recording(name) {
+  const source = await readFile(
+    join(root, "recordings", `${name}.term`),
+    "utf8",
+  );
+  const lines = [];
+  for (const raw of source.split("\n")) {
+    if (raw === "" || raw.startsWith("#")) continue;
+    const match = /^@(\d+(?:\.\d+)?)\|([a-z]+)\|(.*)$/.exec(raw);
+    if (!match || !lineKinds.has(match[2]))
+      throw new Error(`Recording "${name}" has an unreadable line: ${raw}`);
+    lines.push(
+      `<span class="term-line ${match[2]}" data-at="${match[1]}">${escapeHtml(match[3])}</span>`,
+    );
+  }
+  if (lines.length === 0) throw new Error(`Recording "${name}" is empty`);
+  return lines.join("\n");
+}
+const recordings = {};
+for (const [, name] of template.matchAll(/<!-- TERM:([a-z-]+) -->/g))
+  recordings[name] = await recording(name);
+
 // Renders one language edition. A key the template or the build asks for and
 // the locale lacks is an error, and so is a locale key nothing uses: both mean
 // the page and its translations have drifted apart.
@@ -69,6 +97,7 @@ function render(language, strings) {
   const checksums = `<a href="/downloads/v${version}/SHA256SUMS.txt">${t("verify_sums")}</a> · <a href="/release.json">${t("verify_manifest")}</a>`;
   const html = template
     .replace(/\{\{([a-z0-9_]+)\}\}/g, (_, key) => t(key))
+    .replace(/<!-- TERM:([a-z-]+) -->/g, (_, name) => recordings[name])
     .replace("<!-- DOWNLOADS -->", rows)
     .replace("<!-- PREVIEW -->", preview ? notice : "")
     .replace("<!-- CHECKSUMS -->", preview ? pending : checksums)

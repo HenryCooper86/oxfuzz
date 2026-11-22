@@ -53,6 +53,30 @@
     play();
   }
 
+  // Plays a terminal recording: its lines appear at the times the transcript
+  // gives them. The markup already holds every line, so a page without this
+  // script shows the finished session.
+  function terminal(figure, whenVisible) {
+    const lines = [...figure.querySelectorAll(".term-line")];
+    const replay = figure.querySelector("[data-term-replay]");
+    let timers = [];
+    function play() {
+      for (const timer of timers) clearTimeout(timer);
+      for (const line of lines) line.classList.add("pending");
+      timers = lines.map((line, index) =>
+        setTimeout(
+          () => {
+            line.classList.remove("pending");
+            if (index === lines.length - 1) replay.hidden = false;
+          },
+          Number(line.dataset.at) * 1000,
+        ),
+      );
+    }
+    replay.addEventListener("click", play);
+    whenVisible(figure, play);
+  }
+
   document.addEventListener("DOMContentLoaded", () => {
     const observer = new IntersectionObserver(
       (entries) => {
@@ -67,5 +91,21 @@
     for (const element of document.querySelectorAll("[data-reveal]"))
       observer.observe(element);
     for (const card of document.querySelectorAll("[data-fuzz]")) fuzz(card);
+    const starts = new Map();
+    const screens = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (!entry.isIntersecting) continue;
+          screens.unobserve(entry.target);
+          starts.get(entry.target)();
+        }
+      },
+      { threshold: 0.35 },
+    );
+    for (const figure of document.querySelectorAll("[data-term]"))
+      terminal(figure, (target, play) => {
+        starts.set(target, play);
+        screens.observe(target);
+      });
   });
 })();

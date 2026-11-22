@@ -20,7 +20,13 @@ test("publication requires a complete package set and hashes the served bytes", 
   const root = await mkdtemp(join(tmpdir(), "oxfuzz-site-"));
   try {
     const source = fileURLToPath(new URL("..", import.meta.url));
-    for (const name of ["build.mjs", "release.mjs", "locales.mjs", "src"])
+    for (const name of [
+      "build.mjs",
+      "release.mjs",
+      "locales.mjs",
+      "src",
+      "recordings",
+    ])
       await cp(join(source, name), join(root, name), { recursive: true });
     const artifacts = join(root, "assets");
     await mkdir(artifacts);
@@ -70,7 +76,13 @@ test("publication requires a complete package set and hashes the served bytes", 
 async function previewBuild() {
   const root = await mkdtemp(join(tmpdir(), "oxfuzz-site-"));
   const source = fileURLToPath(new URL("..", import.meta.url));
-  for (const name of ["build.mjs", "release.mjs", "locales.mjs", "src"])
+  for (const name of [
+    "build.mjs",
+    "release.mjs",
+    "locales.mjs",
+    "src",
+    "recordings",
+  ])
     await cp(join(source, name), join(root, name), { recursive: true });
   execFileSync(process.execPath, [join(root, "build.mjs"), "--preview"]);
   return root;
@@ -195,6 +207,58 @@ test("the page lists what is new and says the desktop packages lack the CLI", as
     }
     const english = await readFile(join(root, "dist/index.html"), "utf8");
     assert.match(english, /not in the desktop packages below/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("terminal recordings are rendered from their transcripts, escaped and timed", async () => {
+  const root = await previewBuild();
+  try {
+    for (const edition of ["dist/index.html", "dist/zh/index.html"]) {
+      const html = await readFile(join(root, edition), "utf8");
+      const screens = [
+        ...html.matchAll(
+          /<figure class="term" data-term[\s\S]*?<code>([\s\S]*?)<\/code>/g,
+        ),
+      ].map((match) => match[1]);
+      assert.equal(screens.length, 2, edition);
+      for (const screen of screens) {
+        const lines = [
+          ...screen.matchAll(
+            /<span class="term-line ([a-z]+)" data-at="([0-9.]+)">(.*?)<\/span>/g,
+          ),
+        ];
+        assert.ok(lines.length >= 6, edition);
+        // A recording opens with the command that was typed.
+        assert.equal(lines[0][1], "cmd");
+        assert.match(lines[0][3], /^\$ oxfuzz /);
+        // Lines appear in the order they were printed.
+        const times = lines.map((line) => Number(line[2]));
+        assert.deepEqual(
+          times,
+          [...times].sort((a, b) => a - b),
+        );
+        assert.equal(/<(?!\/?span)/.test(screen), false, "markup in output");
+      }
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a recording with a line the build cannot read fails the build", async () => {
+  const root = await previewBuild();
+  try {
+    await writeFile(
+      join(root, "recordings/binary.term"),
+      "@0|cmd|$ oxfuzz binary .\nthis line has no time\n",
+    );
+    assert.notEqual(
+      spawnSync(process.execPath, [join(root, "build.mjs"), "--preview"])
+        .status,
+      0,
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
