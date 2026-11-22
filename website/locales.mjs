@@ -17,6 +17,7 @@ export const locales = {
     nav_aria: "Main navigation",
     nav_how: "How it works",
     nav_engines: "Engines",
+    nav_new: "What's new",
     nav_contribute: "Contribute",
     nav_download: "Download",
 
@@ -110,6 +111,30 @@ export const locales = {
       "Linux kernel fuzzing in a VM. You supply the kernel and guest image.",
     engine_syzkaller_link: "syzkaller setup guide",
 
+    new_title: "New in the source: more languages, and programs without source",
+    new_intro:
+      "This work was merged in November 2026. It is driven from the command line.",
+    new_1_title: "Four more languages",
+    new_1_text:
+      "Go with native fuzzing, Python with Atheris, Java with Jazzer and JavaScript with Jazzer.js. Each is discovered, built and run in the same sandbox.",
+    new_2_title: "Programs without source",
+    new_2_text:
+      "<code>oxfuzz binary</code> fuzzes a compiled Linux program in AFL++ QEMU mode. It can feed a file, a TCP or UDP server, or a sequence of messages. Checked on Linux arm64 so far.",
+    new_3_title: "More sanitizers, better inputs",
+    new_3_text:
+      "MemorySanitizer and ThreadSanitizer builds join AddressSanitizer and UBSan. Give a target its own dictionary, or generate a mutator from a BNF grammar.",
+    new_4_title: "From crash to commit to ticket",
+    new_4_text:
+      "<code>oxfuzz bisect</code> finds the first commit where an input crashes. File the finding in GitHub, GitLab or Jira, and send new crashes to a webhook.",
+    new_5_title: "Coverage you can open",
+    new_5_text:
+      "Line coverage as an lcov file or a single HTML page, so you can see which lines a corpus never reached.",
+    new_6_title: "Kernel and build systems",
+    new_6_text:
+      "<code>oxfuzz kernel</code> runs a syzkaller campaign from the command line, checked under emulation so far. Bazel projects build offline from a vendored directory. Builds still never download anything.",
+    new_status:
+      'These features are on the <a href="https://github.com/HenryCooper86/oxfuzz" rel="noopener">main branch</a> and are not in the v{{VERSION}} downloads below. To use them now, <a href="https://github.com/HenryCooper86/oxfuzz/blob/main/docs/guides/INSTALL.md" rel="noopener">build from source</a>. The <a href="https://github.com/HenryCooper86/oxfuzz/blob/main/CHANGELOG.md" rel="noopener">changelog</a> lists every change.',
+
     control_title: "The fuzzer runs untrusted code. You stay in charge of it.",
     control_1_title: "Sandboxed",
     control_1_text:
@@ -192,6 +217,7 @@ export const locales = {
     nav_aria: "主导航",
     nav_how: "工作流程",
     nav_engines: "引擎",
+    nav_new: "新功能",
     nav_contribute: "参与贡献",
     nav_download: "下载",
 
@@ -283,6 +309,29 @@ export const locales = {
     engine_syzkaller:
       "在虚拟机中对 Linux 内核做模糊测试。内核和客户机镜像由你提供。",
     engine_syzkaller_link: "syzkaller 配置指南",
+
+    new_title: "源码中的新功能：更多语言，以及没有源码的程序",
+    new_intro: "以下功能已于 2026 年 11 月合并，目前通过命令行使用。",
+    new_1_title: "新增四种语言",
+    new_1_text:
+      "Go（原生模糊测试）、Python（Atheris）、Java（Jazzer）和 JavaScript（Jazzer.js）。它们都在同一个沙箱里完成目标发现、构建和运行。",
+    new_2_title: "没有源码的程序",
+    new_2_text:
+      "<code>oxfuzz binary</code> 以 AFL++ QEMU 模式对已编译的 Linux 程序做模糊测试，输入可以是文件、TCP 或 UDP 服务，也可以是一串消息。目前只在 Linux arm64 上验证过。",
+    new_3_title: "更多 sanitizer，更好的输入",
+    new_3_text:
+      "在 AddressSanitizer 和 UBSan 之外，新增 MemorySanitizer 和 ThreadSanitizer 构建。可以为每个目标指定自己的字典，或根据 BNF 语法生成变异器。",
+    new_4_title: "从崩溃到提交，再到工单",
+    new_4_text:
+      "<code>oxfuzz bisect</code> 找出某个输入最早引发崩溃的提交。发现可以提交到 GitHub、GitLab 或 Jira，新的崩溃可以推送到 webhook。",
+    new_5_title: "可以直接打开的覆盖率",
+    new_5_text:
+      "行覆盖率可以导出为 lcov 文件或单页 HTML，一眼看出语料从未到达哪些代码行。",
+    new_6_title: "内核与构建系统",
+    new_6_text:
+      "<code>oxfuzz kernel</code> 从命令行运行 syzkaller 测试，目前只在模拟环境下验证过。Bazel 项目使用 vendor 目录离线构建。构建过程依然不会下载任何内容。",
+    new_status:
+      '这些功能已在 <a href="https://github.com/HenryCooper86/oxfuzz" rel="noopener">main 分支</a>，但不包含在下方的 v{{VERSION}} 安装包中。想现在使用，请<a href="https://github.com/HenryCooper86/oxfuzz/blob/main/docs/guides/INSTALL.md" rel="noopener">从源码构建</a>。全部改动见<a href="https://github.com/HenryCooper86/oxfuzz/blob/main/CHANGELOG.md" rel="noopener">更新日志</a>。',
 
     control_title: "模糊测试运行的是不可信代码，控制权始终在你手里。",
     control_1_title: "沙箱隔离",

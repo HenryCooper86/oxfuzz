@@ -169,3 +169,32 @@ test("the workflow gallery shows four captures that exist, and a recording", asy
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("the page lists what is new on main and says the downloads lack it", async () => {
+  const root = await previewBuild();
+  try {
+    const repository = "https://github.com/HenryCooper86/oxfuzz";
+    for (const edition of ["dist/index.html", "dist/zh/index.html"]) {
+      const html = await readFile(join(root, edition), "utf8");
+      assert.ok(html.includes('href="#whats-new"'), edition);
+      const section = html.match(
+        /<section[^>]*id="whats-new"[\s\S]*?<\/section>/,
+      );
+      assert.ok(section, edition);
+      assert.equal((section[0].match(/<h3>/g) ?? []).length, 6, edition);
+      for (const command of ["oxfuzz binary", "oxfuzz bisect", "oxfuzz kernel"])
+        assert.ok(section[0].includes(`<code>${command}</code>`), command);
+      for (const path of [
+        "/blob/main/CHANGELOG.md",
+        "/blob/main/docs/guides/INSTALL.md",
+      ])
+        assert.ok(section[0].includes(`${repository}${path}`), path);
+      // The packages on this page predate the section; it has to say so.
+      assert.match(section[0], /v\d+\.\d+\.\d+/);
+    }
+    const english = await readFile(join(root, "dist/index.html"), "utf8");
+    assert.match(english, /not in the v\d+\.\d+\.\d+ downloads/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
