@@ -1768,6 +1768,165 @@ mod tests {
         );
     }
 
+    use hf_core::runtime::CommandResult;
+
+    /// A runtime that answers every command with one prepared result and
+    /// keeps what it was asked to run.
+    struct ScriptedRuntime {
+        exit_code: i32,
+        stdout: &'static str,
+        stderr: &'static str,
+        calls: std::sync::Mutex<Vec<(Vec<String>, ResourceLimits, SandboxOptions)>>,
+    }
+
+    impl ScriptedRuntime {
+        fn answering(exit_code: i32, stdout: &'static str, stderr: &'static str) -> Self {
+            Self {
+                exit_code,
+                stdout,
+                stderr,
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> Vec<(Vec<String>, ResourceLimits, SandboxOptions)> {
+            self.calls.lock().unwrap().clone()
+        }
+
+        fn result(&self, cwd: &Path) -> CommandResult {
+            CommandResult {
+                exit_code: self.exit_code,
+                stdout: self.stdout.to_owned(),
+                stderr: self.stderr.to_owned(),
+                workspace: cwd.to_path_buf(),
+                termination: CommandTermination::Completed,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RuntimeAdapter for ScriptedRuntime {
+        async fn run_command(
+            &self,
+            _cmd: &[String],
+            cwd: &Path,
+            _limits: &ResourceLimits,
+        ) -> Result<CommandResult, ClassifiedError> {
+            Ok(self.result(cwd))
+        }
+
+        async fn run_command_opts(
+            &self,
+            cmd: &[String],
+            cwd: &Path,
+            limits: &ResourceLimits,
+            opts: &SandboxOptions,
+        ) -> Result<CommandResult, ClassifiedError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((cmd.to_vec(), limits.clone(), opts.clone()));
+            Ok(self.result(cwd))
+        }
+
+        async fn write_file(&self, _path: &Path, _content: &str) -> Result<(), ClassifiedError> {
+            Ok(())
+        }
+
+        async fn read_file(&self, _path: &Path) -> Result<String, ClassifiedError> {
+            Ok(String::new())
+        }
+    }
+
+    fn writable_mounts(sandbox: &SandboxOptions) -> Vec<String> {
+        sandbox
+            .extra_mounts
+            .iter()
+            .filter(|mount| !mount.read_only)
+            .map(|mount| mount.container_path.clone())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn the_sandbox_architecture_is_read_from_a_read_only_probe() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = ScriptedRuntime::answering(0, "x86_64\n", "");
+        assert_eq!(
+            sandbox_machine(&runtime, root.path()).await.unwrap(),
+            ElfMachine::X86_64
+        );
+        let calls = runtime.calls();
+        let (command, limits, sandbox) = &calls[0];
+        assert_eq!(command, &["uname", "-m"]);
+        assert_eq!(limits.max_duration_secs, REPLAY_SECS);
+        assert!(sandbox.workspace_read_only);
+        assert!(sandbox.extra_mounts.is_empty());
+
+        let unknown = ScriptedRuntime::answering(0, "riscv64\n", "");
+        let error = sandbox_machine(&unknown, root.path()).await.unwrap_err();
+        assert!(
+            error.to_string().contains("uname -m printed 'riscv64'"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_shim_is_built_with_only_its_own_directory_writable() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join(DESOCK.directory);
+        std::fs::create_dir_all(&directory).unwrap();
+
+        // The compiler failed: its diagnostics reach the operator.
+        let failing = ScriptedRuntime::answering(1, "", "desock.c:3: error: nope");
+        let error = build_shim(&failing, root.path(), &DESOCK)
+            .await
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("socket shim did not compile"), "{message}");
+        assert!(message.contains("(exit 1)"), "{message}");
+        assert!(message.contains("desock.c:3: error: nope"), "{message}");
+
+        // A clean exit that left no library is a failure too.
+        let silent = ScriptedRuntime::answering(0, "", "");
+        assert!(build_shim(&silent, root.path(), &DESOCK).await.is_err());
+
+        std::fs::write(directory.join(DESOCK.library_name), b"\x7fELF").unwrap();
+        build_shim(&silent, root.path(), &DESOCK).await.unwrap();
+        let calls = silent.calls();
+        let (command, limits, sandbox) = &calls[1];
+        assert_eq!(command, &DESOCK.build_command());
+        assert_eq!(limits.max_duration_secs, SHIM_BUILD_SECS);
+        assert_eq!(limits.max_cpus, 1);
+        assert!(!limits.ptrace);
+        assert!(sandbox.workspace_read_only);
+        assert_eq!(
+            writable_mounts(sandbox),
+            [format!("/work/{}", DESOCK.directory)]
+        );
+        assert_eq!(sandbox.max_file_size_bytes, Some(MAX_FILE_BYTES));
+    }
+
+    #[test]
+    fn a_session_writes_only_to_its_corpus_and_output() {
+        let sandbox = session_sandbox(Path::new("session"), Some(b"seed".to_vec()));
+        assert!(sandbox.workspace_read_only);
+        assert_eq!(
+            writable_mounts(&sandbox),
+            [format!("/work/{CORPUS_DIR}"), format!("/work/{OUTPUT_DIR}")]
+        );
+        assert_eq!(sandbox.extra_mounts.len(), 2);
+        assert_eq!(sandbox.max_file_size_bytes, Some(MAX_FILE_BYTES));
+        assert_eq!(sandbox.stdin.as_deref(), Some(b"seed".as_slice()));
+
+        let env = HashMap::from([("AFL_NO_UI".to_owned(), "1".to_owned())]);
+        let limits = limits(90, env.clone());
+        assert_eq!(limits.max_mem_mb, SESSION_MEMORY_MB);
+        assert_eq!(limits.max_cpus, 1);
+        assert_eq!(limits.max_duration_secs, 90);
+        assert_eq!(limits.env, env);
+        assert!(!limits.ptrace);
+    }
+
     // Seen on a Windows Server 2025 host with a WSL 2 engine on 2026-11-22:
     // a file the fuzzer names `id:000001,sig:11,...` appears on the Windows
     // side with U+F03A in place of each colon.
