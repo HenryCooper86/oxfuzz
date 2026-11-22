@@ -5,7 +5,7 @@
   "tag": "v0.9.8",
   "qualification_commit": "840cbb56a7e8d49baedabd0758a8e68a6c64117d",
   "qualification_patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-  "candidate_delta": "None. The evidence was produced on a clean checkout of the tag commit (empty working-tree patch).",
+  "candidate_delta": "None. The qualification recorded the tag commit and an empty working-tree patch (the digest above is that of an empty patch).",
   "source_sha256": "a21529ba223ec0a03b349e9f78b879eed69dc60d8d130dbac1b97fb7bf05a591",
   "status": "passed",
   "started_at": "2026-11-22T15:48:45.605347+00:00",

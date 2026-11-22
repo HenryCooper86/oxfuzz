@@ -5,7 +5,7 @@
   "candidate_commit": "840cbb56a7e8d49baedabd0758a8e68a6c64117d",
   "tag": "v0.9.8",
   "observed_commit": "840cbb56a7e8d49baedabd0758a8e68a6c64117d",
-  "candidate_delta": "None. The evidence was produced on a clean checkout of the tag commit (empty working-tree patch).",
+  "candidate_delta": "None known. The test binaries were built at about 15:57Z in a checkout of the tag commit. The engine qualification recorded an empty working-tree patch in that checkout at 15:48:45Z, and the earliest later change to a source file there is at 16:06Z, after the binaries were built. No digest was taken for this run itself.",
   "platform": "macOS 27.2.1 arm64 / Linux arm64 Docker",
   "sandbox_image": {
     "reference": "oxfuzz/fuzz-sandbox:0.2.3",

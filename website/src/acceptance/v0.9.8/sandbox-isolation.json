@@ -34,5 +34,5 @@
     "The sandbox image changed from 0.2.2 to 0.2.3 in this release. Only the linux/arm64 build was used here; the linux/amd64 build was not."
   ],
   "observed_commit": "840cbb56a7e8d49baedabd0758a8e68a6c64117d",
-  "candidate_delta": "None. The evidence was produced on a clean checkout of the tag commit (empty working-tree patch)."
+  "candidate_delta": "None known. This run ended at 15:48:36Z in a checkout of the tag commit; the engine qualification that started nine seconds later in the same checkout recorded an empty working-tree patch. No digest was taken for this run itself."
 }

@@ -4,7 +4,7 @@
   "candidate_commit": "840cbb56a7e8d49baedabd0758a8e68a6c64117d",
   "tag": "v0.9.8",
   "local_build_commit": "840cbb56a7e8d49baedabd0758a8e68a6c64117d",
-  "production_delta": "None. The local build was made from a clean checkout of the tag commit.",
+  "production_delta": "None known. The local build finished at about 15:55Z in a checkout of the tag commit. The engine qualification recorded an empty working-tree patch in that checkout at 15:48:45Z, and the earliest later change to a source file there is at 16:06Z. No digest was taken for the build itself. The final release installer was built by the release workflow from the tag.",
   "platform": "macOS arm64",
   "version_observed": "0.9.8",
   "local_executable_sha256": "8d305021462791f45df53a86ccd8eb28c35d1659e00877697f223aefdd4e55d1",
