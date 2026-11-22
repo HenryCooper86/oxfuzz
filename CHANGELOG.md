@@ -10,7 +10,48 @@ retain only the current release; older entries remain here as the record.
 
 ## Unreleased
 
+### Added
+
+- Sanitizers: MemorySanitizer and ThreadSanitizer builds, beside
+  AddressSanitizer and UndefinedBehaviorSanitizer.
+- Inputs: a user dictionary per target, and a grammar mutator.
+- Languages, from the command line: Go (native fuzzing), Python (Atheris),
+  Java (Jazzer) and JavaScript (Jazzer.js). The desktop app stops at
+  discovery for these.
+- `oxfuzz binary`: fuzz a program without its source in AFL++ QEMU mode,
+  reading a file, a TCP or UDP socket (`--socket`) or a sequence of messages
+  (`--messages`); `binary-issue` files a finding from such a session.
+- `oxfuzz kernel`: a syzkaller campaign from the command line. Validated
+  under emulation only (`docs/acceptance/kernel-emulated-2026-11-22.md`).
+- `oxfuzz bisect`: find the commit that introduced a crash.
+- `oxfuzz issue` with Jira, and webhook alerts for new findings.
+- Coverage: lcov and HTML line reports.
+- Builds: typed parameters, vendored dependencies in every supported
+  language, and Bazel build profiles that run offline from a `bazel vendor`
+  directory. Builds still never download anything.
+- Sandbox image 0.2.3 with the toolchains above. It is built locally by
+  `scripts/build-sandbox.sh` and is not published.
+- Windows: `docs/guides/WINDOWS_QUALIFICATION.md` is the procedure for
+  qualifying a Windows host, and `scripts/check-windows-target.sh`
+  type-checks the workspace for Windows. One partial run on a hosted Windows
+  Server 2025 runner is recorded in
+  `docs/acceptance/windows-host-2026-11-22.md`; no Windows campaign claim is
+  made.
+
 ### Fixed
+
+- AFL++ refused to start on a host whose kernel pipes core dumps to a
+  program (WSL 2, and Linux hosts with a crash collector), which a container
+  cannot change. AFL++ runs now set
+  `AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1` unless the run sets it itself.
+- Binary-only sessions found no crash files on a Windows host: a file the
+  fuzzer names with colons is listed there with U+F03A in place of each
+  colon.
+- The sandbox image builds from a Windows checkout (line endings of copied
+  files, Git Bash path conversion, and a report check that used POSIX-only
+  file flags).
+- `url` is updated to 2.5.9 for RUSTSEC-2026-0592 (stack overflow in
+  `Url::origin()` on nested `blob:` URLs).
 
 - Triage: a second crash scan of the same run waits for the first instead of
   running beside it. It reported "Waiting for workspace" but went on to
