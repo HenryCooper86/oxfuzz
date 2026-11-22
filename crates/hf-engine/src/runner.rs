@@ -132,6 +132,14 @@ pub const fn run_file_size_limit_bytes(engine: EngineKind) -> u64 {
 ///   `AFL_FUZZER_STATS_UPDATE_INTERVAL` is set; the live run tiles are driven
 ///   from that file, so AFL++ runs refresh it every second (`=1`). An
 ///   explicit value in `cfg.env` is kept.
+/// - afl-fuzz refuses to start when the kernel's `core_pattern` begins with
+///   a pipe. A container shares the host kernel's setting and cannot change
+///   it, and a WSL 2 kernel and common Linux distributions pipe core dumps by
+///   default. `AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1` is the documented
+///   override. Its cost is the one afl-fuzz warns about: on such a host a
+///   crash whose core-dump handler is slow can be recorded as a hang, which
+///   the run keeps under `hangs` rather than losing. An explicit value in
+///   `cfg.env` is kept.
 ///
 /// This is the one definition of an engine run's environment: the harness
 /// smoke qualification uses it too, so smoke and campaign runs agree.
@@ -182,6 +190,8 @@ pub fn run_env(
         env.entry("AFL_CRASHING_SEEDS_AS_NEW_CRASH".to_owned())
             .or_insert_with(|| "1".to_owned());
         env.entry("AFL_FUZZER_STATS_UPDATE_INTERVAL".to_owned())
+            .or_insert_with(|| "1".to_owned());
+        env.entry("AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES".to_owned())
             .or_insert_with(|| "1".to_owned());
     }
     if engine == EngineKind::GoNative {

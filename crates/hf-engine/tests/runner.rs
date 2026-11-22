@@ -472,6 +472,48 @@ fn afl_runs_refresh_fuzzer_stats_every_second() {
     assert!(!libfuzzer.contains_key("AFL_FUZZER_STATS_UPDATE_INTERVAL"));
 }
 
+/// afl-fuzz refuses to start when the kernel's `core_pattern` begins with a
+/// pipe, with a fatal error that names the setting. A container shares the
+/// host kernel's setting and cannot change it, and a WSL 2 kernel and common
+/// Linux distributions pipe core dumps by default (seen on a Windows Server
+/// 2025 host on 2026-11-22, where no AFL++ session started). AFL++ runs
+/// therefore carry the documented override; an operator's explicit value is
+/// kept.
+#[test]
+fn afl_runs_start_on_a_host_that_pipes_core_dumps() {
+    let afl = hf_engine::runner::run_env(
+        EngineKind::AflPlusPlus,
+        &run_config(EngineKind::AflPlusPlus, 10),
+    )
+    .unwrap();
+    assert_eq!(
+        afl.get("AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES")
+            .map(String::as_str),
+        Some("1"),
+        "{afl:?}"
+    );
+
+    let mut cfg = run_config(EngineKind::AflPlusPlus, 10);
+    cfg.env.push((
+        "AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES".to_owned(),
+        "0".to_owned(),
+    ));
+    let explicit = hf_engine::runner::run_env(EngineKind::AflPlusPlus, &cfg).unwrap();
+    assert_eq!(
+        explicit
+            .get("AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES")
+            .map(String::as_str),
+        Some("0")
+    );
+
+    let libfuzzer = hf_engine::runner::run_env(
+        EngineKind::LibFuzzer,
+        &run_config(EngineKind::LibFuzzer, 10),
+    )
+    .unwrap();
+    assert!(!libfuzzer.contains_key("AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES"));
+}
+
 #[tokio::test]
 async fn runner_libfuzzer_parses_progress_and_coverage() {
     let rt = MockRuntime {
