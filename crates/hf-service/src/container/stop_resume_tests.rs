@@ -115,6 +115,77 @@ async fn sandbox_containers() -> BTreeSet<String> {
         .collect()
 }
 
+#[test]
+fn a_resumed_entry_is_matched_to_the_entry_it_came_from() {
+    // A discovered entry is re-imported under a new id, its old name kept.
+    let discovered = "id:000003,src:000000,time:1,execs:24,op:havoc,rep:3,+cov";
+    assert_eq!(carried_name(discovered), discovered);
+    assert_eq!(
+        carried_name(&format!("id:000041,time:0,execs:0,orig:{discovered}")),
+        discovered
+    );
+    // The seed keeps the name it was imported from.
+    assert_eq!(carried_name("id:000000,time:0,execs:0,orig:seed"), "seed");
+    assert_eq!(carried_name("id:000057,time:0,execs:0,orig:seed"), "seed");
+    // A Windows host lists each colon as U+F03A.
+    assert_eq!(
+        carried_name("id\u{f03a}000057,time\u{f03a}0,orig\u{f03a}seed"),
+        "seed"
+    );
+    assert_eq!(carried_name("id:000001,orig"), "id:000001,orig");
+}
+
+#[test]
+fn progress_is_read_from_the_output_tree_on_the_host() {
+    let root = tempfile::tempdir().unwrap();
+    assert!(queue_names(root.path()).is_empty());
+    assert_eq!(executions(root.path()), None);
+
+    let instance = root.path().join("out/default");
+    std::fs::create_dir_all(instance.join("queue/.state")).unwrap();
+    std::fs::write(instance.join("queue/id_000000,orig_seed"), b"a").unwrap();
+    std::fs::write(instance.join("queue/id_000001,src_000000"), b"b").unwrap();
+    std::fs::write(
+        instance.join("fuzzer_stats"),
+        "start_time        : 1\nexecs_done        : 25716\nexecs_per_sec     : 99.5\n",
+    )
+    .unwrap();
+    assert_eq!(
+        queue_names(root.path()).into_iter().collect::<Vec<_>>(),
+        ["id_000000,orig_seed", "id_000001,src_000000"],
+        "the state directory is not an entry"
+    );
+    assert_eq!(executions(root.path()), Some(25716));
+
+    std::fs::write(instance.join("fuzzer_stats"), "execs_done : soon\n").unwrap();
+    assert_eq!(executions(root.path()), None);
+}
+
+#[test]
+fn the_campaign_writes_only_to_its_corpus_and_output() {
+    let workspace = Path::new("campaign");
+    let sandbox = campaign_sandbox(workspace);
+    assert!(sandbox.workspace_read_only);
+    let mounts: Vec<(&Path, &str, bool)> = sandbox
+        .extra_mounts
+        .iter()
+        .map(|mount| {
+            (
+                mount.host_path.as_path(),
+                mount.container_path.as_str(),
+                mount.read_only,
+            )
+        })
+        .collect();
+    assert_eq!(
+        mounts,
+        [
+            (workspace.join("corpus").as_path(), "/work/corpus", false),
+            (workspace.join("out").as_path(), "/work/out", false),
+        ]
+    );
+}
+
 #[tokio::test]
 #[ignore = "requires a local Docker daemon and the pinned sandbox image"]
 async fn live_stop_and_resume_keeps_the_queue_of_a_stopped_campaign() {
