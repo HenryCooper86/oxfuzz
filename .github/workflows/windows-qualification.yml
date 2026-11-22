@@ -1,15 +1,21 @@
 name: Windows host qualification
 
-# Probe stage. Finds out whether a GitHub-hosted Windows runner can run a
-# Linux container with a Windows directory bind-mounted into it, which is what
-# oxfuzz needs from a Windows host. Docker Desktop does not support Windows
-# Server, so other engines are tried side by side. Nothing is published and no
-# secret is used.
+# Runs the Docker steps of docs/guides/WINDOWS_QUALIFICATION.md on a hosted
+# Windows runner: build the sandbox image from a Windows checkout, then the
+# sandbox isolation tests and the provider-free engine tests, with oxfuzz
+# running on Windows and its containers in a Linux engine.
 #
-# First run (2026-11-22, windows-2025): WSL 2 works on the runner. A dockerd
-# inside a WSL distribution runs Linux containers but rejects a Windows path
-# as a bind source, so an engine that translates the path is needed. A file
-# the container names with a colon appears on the Windows side with U+F03A.
+# What this is and is not:
+# - The host is Windows Server 2025. Docker Desktop does not support Windows
+#   Server, so the engine is Rancher Desktop (a Docker engine inside WSL 2 that
+#   accepts Windows paths as bind sources). A probe on 2026-11-22 showed that
+#   WSL 2 works on the runner, that a plain dockerd inside WSL rejects a
+#   Windows bind source, and that Rancher Desktop and a Podman machine both
+#   translate it.
+# - The image is built here and stays on the runner. Nothing is published.
+# - Runbook step 1 (check and test without Docker) is the Windows job of
+#   ci.yml on the same commit. Steps 4 and 5 need a review provider and a
+#   human who has approved the sample sources; they are not run here.
 #
 # Manual. GitHub only dispatches a workflow that exists on the default branch,
 # so on any other branch a change to this file also starts it.
@@ -30,41 +36,52 @@ permissions:
   contents: read
 
 env:
-  PROBE_IMAGE: alpine:3.21
+  RANCHER_DESKTOP_VERSION: 1.25.0
 
 jobs:
-  rancher-desktop:
-    name: Probe Rancher Desktop
+  qualify:
+    name: Docker steps on Windows
     runs-on: windows-2025
-    timeout-minutes: 45
-    defaults:
-      run:
-        shell: pwsh
+    timeout-minutes: 330
     steps:
-      - name: Free the Docker pipe
-        continue-on-error: true
+      # The runner's git rewrites line endings on checkout, as a default Git
+      # for Windows install does. .gitattributes must keep the image build's
+      # inputs intact under that setting, so it is left alone on purpose.
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      - name: Host identity
+        shell: pwsh
+        run: |
+          cmd /c ver
+          Write-Output "ImageOS=$env:ImageOS ImageVersion=$env:ImageVersion"
+          git config --show-origin --get core.autocrlf
+          git rev-parse HEAD
+          git status --short
+          $env:WSL_UTF8 = '1'
+          wsl --version
+          Get-CimInstance Win32_ComputerSystem | Format-List NumberOfLogicalProcessors, TotalPhysicalMemory
+          Get-PSDrive -PSProvider FileSystem | Format-Table Name, Used, Free
+          exit 0
+
+      # The runner ships a Windows-container Docker service on the pipe the
+      # Linux engine needs. The engine's data goes to the larger drive.
+      - name: Install the container engine
+        shell: pwsh
         run: |
           Stop-Service docker -Force
-          Get-Service docker | Format-Table Name, Status
-          exit 0
-
-      - name: Install Rancher Desktop
-        run: |
-          choco install rancher-desktop -y --no-progress
+          New-Item -ItemType Directory -Path D:\rancher-desktop | Out-Null
+          New-Item -ItemType Junction -Path "$env:LOCALAPPDATA\rancher-desktop" -Target D:\rancher-desktop | Out-Null
+          choco install rancher-desktop --version $env:RANCHER_DESKTOP_VERSION -y --no-progress
           if ($LASTEXITCODE -ne 0) { throw "installation failed with $LASTEXITCODE" }
-          $rdctl = Get-ChildItem -Path $env:ProgramFiles, $env:LOCALAPPDATA -Recurse -Filter rdctl.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $rdctl) { throw "rdctl.exe not found" }
-          Write-Output "rdctl at $($rdctl.FullName)"
-          "RDCTL=$($rdctl.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
-          $rdctl.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Append
-          & $rdctl.FullName version
-          & $rdctl.FullName start --help
-          exit 0
+          $bin = "$env:ProgramFiles\Rancher Desktop\resources\resources\win32\bin"
+          if (-not (Test-Path "$bin\rdctl.exe")) { throw "rdctl.exe not found in $bin" }
+          $bin | Out-File -FilePath $env:GITHUB_PATH -Append
 
-      - name: Start the engine
+      - name: Start the container engine
+        shell: pwsh
         run: |
-          & $env:RDCTL start --container-engine.name=moby --kubernetes.enabled=false --application.start-in-background=true
-          Write-Output "rdctl start exit code $LASTEXITCODE"
+          rdctl start --container-engine.name=moby --kubernetes.enabled=false --application.start-in-background=true
           $ready = $false
           foreach ($attempt in 1..90) {
             $os = docker info --format '{{.OSType}}' 2>$null
@@ -75,86 +92,90 @@ jobs:
           docker version
           docker info
 
-      - name: Engine logs
-        if: always()
-        continue-on-error: true
-        run: |
-          $env:WSL_UTF8 = '1'
-          wsl --list --verbose
-          Get-ChildItem "$env:LOCALAPPDATA\rancher-desktop\logs" -ErrorAction SilentlyContinue | ForEach-Object {
-            Write-Output "===== $($_.Name)"
-            Get-Content $_.FullName -Tail 60 | Where-Object { $_ -notmatch 'auth' }
-          }
-          exit 0
-
-      - name: Run a Linux container from Windows
-        run: |
-          docker run --rm --network none $env:PROBE_IMAGE sh -c 'echo container-ok; uname -m'
-          if ($LASTEXITCODE -ne 0) { throw "the container did not run" }
-
-      - name: Bind-mount a Windows directory
-        continue-on-error: true
-        run: |
-          $dir = Join-Path $env:RUNNER_TEMP 'mount-probe'
-          New-Item -ItemType Directory -Path $dir | Out-Null
-          Set-Content -Path (Join-Path $dir 'in.txt') -Value 'from windows'
-          Write-Output "--- Windows path as oxfuzz would pass it: $dir"
-          docker run --rm --network none --mount "type=bind,src=$dir,dst=/work" $env:PROBE_IMAGE sh -c 'cat /work/in.txt && touch "/work/id:000000,sig:11,src:000000" && echo written > /work/out.txt && ls -la /work'
-          Write-Output "exit code $LASTEXITCODE"
-          Write-Output "--- The directory as Windows sees it"
-          Get-ChildItem -Force $dir | ForEach-Object { '{0}  [{1}]' -f $_.Name, (($_.Name.ToCharArray() | ForEach-Object { '{0:X4}' -f [int]$_ }) -join ' ') }
-          exit 0
-
-  podman:
-    name: Probe Podman machine
-    runs-on: windows-2025
-    timeout-minutes: 45
-    defaults:
-      run:
-        shell: pwsh
-    steps:
-      - name: Install Podman
+      # The console shows the build steps; the uploaded log has every line.
+      - name: Build and verify the sandbox image
+        shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          TMPDIR: ${{ runner.temp }}
         run: |
-          $dest = Join-Path $env:RUNNER_TEMP 'podman'
-          New-Item -ItemType Directory -Path $dest | Out-Null
-          gh release download --repo containers/podman --pattern 'podman-remote-release-windows_amd64.zip' --dir $dest
-          if ($LASTEXITCODE -ne 0) { throw "download failed" }
-          Expand-Archive -Path (Join-Path $dest 'podman-remote-release-windows_amd64.zip') -DestinationPath $dest
-          $podman = Get-ChildItem -Path $dest -Recurse -Filter podman.exe | Select-Object -First 1
-          if (-not $podman) { throw "podman.exe not found" }
-          $podman.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Append
-          & $podman.FullName --version
+          ./scripts/build-sandbox.sh 2>&1 | tee "$RUNNER_TEMP/image-build.log" | { grep -vE '^#[0-9]+ [0-9.]+ ' || true; }
+          test "${PIPESTATUS[0]}" -eq 0
 
-      - name: Start the machine
+      - name: Image identity
+        shell: pwsh
         run: |
-          podman machine init --rootful
-          if ($LASTEXITCODE -ne 0) { throw "machine init failed" }
-          podman machine start
-          if ($LASTEXITCODE -ne 0) { throw "machine start failed" }
-          podman machine inspect
-          podman info
+          docker image inspect --format 'image {{.Id}} {{.Architecture}} {{.Size}}' oxfuzz/fuzz-sandbox:0.2.3
+          if ($LASTEXITCODE -ne 0) { throw "the sandbox image is not present" }
+          docker system df
+          Get-PSDrive -PSProvider FileSystem | Format-Table Name, Used, Free
 
-      - name: Run a Linux container from Windows
-        run: |
-          $pipe = podman machine inspect --format '{{.ConnectionInfo.PodmanPipe.Path}}'
-          Write-Output "pipe: $pipe"
-          $env:DOCKER_HOST = 'npipe://' + ($pipe -replace '\\', '/')
-          "DOCKER_HOST=$env:DOCKER_HOST" | Out-File -FilePath $env:GITHUB_ENV -Append
-          docker version
-          docker run --rm --network none $env:PROBE_IMAGE sh -c 'echo container-ok; uname -m'
-          if ($LASTEXITCODE -ne 0) { throw "the container did not run" }
+      - name: Provision the pinned toolchain
+        shell: bash
+        run: rustup show active-toolchain
 
-      - name: Bind-mount a Windows directory
-        continue-on-error: true
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # Test workspaces go under the runner's temp directory on D:, a plain
+      # long path. The default temp path on this runner is an 8.3 short name.
+      - name: Build the live tests
+        shell: bash
+        env:
+          TMP: ${{ runner.temp }}
+          TEMP: ${{ runner.temp }}
         run: |
-          $dir = Join-Path $env:RUNNER_TEMP 'mount-probe'
-          New-Item -ItemType Directory -Path $dir | Out-Null
-          Set-Content -Path (Join-Path $dir 'in.txt') -Value 'from windows'
-          Write-Output "--- Windows path as oxfuzz would pass it: $dir"
-          docker run --rm --network none --mount "type=bind,src=$dir,dst=/work" $env:PROBE_IMAGE sh -c 'cat /work/in.txt && touch "/work/id:000000,sig:11,src:000000" && echo written > /work/out.txt && ls -la /work'
-          Write-Output "exit code $LASTEXITCODE"
-          Write-Output "--- The directory as Windows sees it"
-          Get-ChildItem -Force $dir | ForEach-Object { '{0}  [{1}]' -f $_.Name, (($_.Name.ToCharArray() | ForEach-Object { '{0:X4}' -f [int]$_ }) -join ' ') }
+          cargo test -p hf-runtime --test live_isolation --no-run
+          cargo test --workspace --lib --no-run
+
+      - name: Runbook step 2 - sandbox isolation
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          TMP: ${{ runner.temp }}
+          TEMP: ${{ runner.temp }}
+        run: |
+          cargo test -p hf-runtime --test live_isolation -- --ignored --test-threads=1 2>&1 | tee "$RUNNER_TEMP/step2-isolation.log"
+          test "${PIPESTATUS[0]}" -eq 0
+
+      - name: Runbook step 3 - source engines
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          TMP: ${{ runner.temp }}
+          TEMP: ${{ runner.temp }}
+        run: |
+          cargo test --workspace --lib -- --ignored --test-threads=1 \
+            live_go_native live_bisection live_cpp_memory_sanitizer \
+            live_atheris live_jazzer live_cargo_fuzz 2>&1 | tee "$RUNNER_TEMP/step3-source-engines.log"
+          test "${PIPESTATUS[0]}" -eq 0
+
+      - name: Runbook step 3 - binary-only sessions
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          TMP: ${{ runner.temp }}
+          TEMP: ${{ runner.temp }}
+        run: |
+          cargo test --workspace --lib -- --ignored --test-threads=1 \
+            live_qemu_session live_socket_session 2>&1 | tee "$RUNNER_TEMP/step3-binary-only.log"
+          test "${PIPESTATUS[0]}" -eq 0
+
+      - name: Containers left behind
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          docker ps --all --format '{{.ID}} {{.Image}} {{.Status}} {{.Names}}'
           exit 0
+
+      - name: Upload the logs
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-qualification-logs
+          path: |
+            ${{ runner.temp }}/image-build.log
+            ${{ runner.temp }}/step2-isolation.log
+            ${{ runner.temp }}/step3-source-engines.log
+            ${{ runner.temp }}/step3-binary-only.log
+          if-no-files-found: warn
+          retention-days: 30
