@@ -50,6 +50,11 @@ passing libFuzzer, AFL++, and honggfuzz cycles on one clean candidate and image.
 The [2026-11-22 kernel record](kernel-emulated-2026-11-22.md) is a functional
 validation of a syzkaller campaign under emulation on macOS arm64, with its
 failed and withdrawn attempts; it is not a KVM or throughput record.
+The [2026-11-22 Windows host record](windows-host-2026-11-22.md) is a partial
+run on a hosted Windows Server runner with a Linux engine in WSL 2: image
+build, isolation, source engines and a stopped and resumed AFL++ campaign
+passed, binary-only sessions failed, and the reviewed steps were not run. It
+is not a Windows qualification.
 The [local isolation](isolation-2026-09-27.md) and
 [owned-container recovery](runtime-recovery-2026-09-27.md) records provide
 partial A3 evidence; they do not complete the fault-soak checklist.

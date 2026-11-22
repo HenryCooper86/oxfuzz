@@ -1,21 +1,31 @@
 # Qualifying a Windows host
 
 Windows installers ship, and the workspace compiles and passes its unit tests
-on Windows in CI. No Docker build, smoke run, campaign, Stop or resume has
-been recorded on a Windows host, so the
+on Windows in CI. No reviewed Docker build, smoke run, campaign, Stop and
+resume has been recorded on Windows 10 or 11, so the
 [support matrix](SUPPORT_MATRIX.md) makes no Windows campaign claim. This
 guide is the procedure that produces that record.
 
-**Status: this procedure has not been run on Windows.** It lists the
-project's existing live tests in the order that isolates a failure fastest.
-The steps are host-independent. Steps 1 to 3 pass on macOS arm64 on the tree
-this guide was written against (2026-11-22). Steps 4 and 5 are the procedures
+**Status: run in part, once, and not on the usual configuration.** On
+2026-11-22 the image build and steps 1 to 3 were run on a hosted Windows
+Server 2025 runner with Rancher Desktop as the engine
+([record](../acceptance/windows-host-2026-11-22.md)). The image build, step
+1, step 2 and the source-engine and Stop-and-resume tests of step 3 passed.
+The three binary-only tests of step 3 failed. Steps 4 to 6 have not been run
+on Windows. Nothing has been run on Windows 10 or 11 or with Docker Desktop.
+
+The steps are host-independent and list the project's existing live tests in
+the order that isolates a failure fastest. Steps 4 and 5 are the procedures
 behind the macOS records
 [userspace-2026-09-27](../acceptance/userspace-2026-09-27.md) and
-[service-campaign-process-loss-2026-09-27](../acceptance/service-campaign-process-loss-2026-09-27.md);
-they were not rerun for this guide. Treat each Windows-specific note below as
-a place to look, not as a known result. A failed step is a result too: record
-it.
+[service-campaign-process-loss-2026-09-27](../acceptance/service-campaign-process-loss-2026-09-27.md).
+Treat each Windows-specific note below as a place to look, not as a known
+result, unless it names where it was seen. A failed step is a result too:
+record it.
+
+`.github/workflows/windows-qualification.yml` runs the image build and steps
+2 and 3 on a hosted runner. It is started by hand. It cannot run steps 4 and
+5, which need a provider and a human approval.
 
 ## What you need
 

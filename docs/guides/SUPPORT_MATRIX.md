@@ -84,10 +84,19 @@ Additional operation limits:
   tests. Windows installers and those tests do not establish live Docker build,
   smoke, or campaign qualification. UNC and WSL filesystem configurations
   have not been qualified either. [Qualifying a Windows host](WINDOWS_QUALIFICATION.md)
-  is the procedure that produces the record; it has not been run.
+  is the procedure that produces the record. It has been run in part, once,
+  on a hosted Windows Server 2025 runner with Rancher Desktop as the engine
+  ([record](../acceptance/windows-host-2026-11-22.md)): the image build, the
+  isolation tests, the provider-free source-engine tests and a stopped and
+  resumed AFL++ campaign passed; binary-only sessions failed; the reviewed
+  campaign and process-loss steps were not run. Windows 10 and 11 and Docker
+  Desktop have not been run at all, so no Windows campaign claim is made.
 - AFL++ output and resume on Windows NTFS remain unqualified. The packaged
   AFL++ 4.09c uses colon-delimited queue/crash filenames and resume backup
-  directories. Win32 treats colons as
+  directories. Through a WSL 2 drive mount such a name was stored with
+  U+F03A in place of each colon, and one AFL++ campaign was stopped and
+  resumed that way (the record above); a Docker Desktop mount has not been
+  observed. Win32 treats colons as
   [alternate-stream separators](https://learn.microsoft.com/en-us/windows/win32/fileio/file-streams),
   so host-written fixtures cannot reproduce these as ordinary files.
   AFL++'s [compile-time `SIMPLE_FILES` option](https://github.com/AFLplusplus/AFLplusplus/blob/v4.09c/include/config.h)
