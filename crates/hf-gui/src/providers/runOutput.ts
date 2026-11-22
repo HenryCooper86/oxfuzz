@@ -1,4 +1,5 @@
 import type { ReplayReview } from "../lib/transport";
+import type { RunFuzzerOptions } from "../lib/parityRun";
 import { createContext, useContext } from "react";
 
 export interface RunStats {
@@ -58,6 +59,9 @@ export interface RunOutputValue {
     target: string;
     engine: string;
     duration: number;
+    /** RNG seed as decimal text (keeps all 64 bits). */
+    seed?: string;
+    options?: RunFuzzerOptions;
   }) => Promise<number>;
   replayRun: (review: ReplayReview) => Promise<number>;
   runSyzkaller: (options: Record<string, unknown>) => Promise<number>;

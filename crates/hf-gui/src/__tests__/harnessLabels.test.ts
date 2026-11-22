@@ -8,7 +8,8 @@ it("names engines the way the rest of the app does, whatever spelling the servic
   expect(engineDisplayName("honggfuzz")).toBe("honggfuzz");
   expect(engineDisplayName("syzkaller")).toBe("syzkaller");
   // An engine this build does not know is shown as received, not hidden.
-  expect(engineDisplayName("go-native")).toBe("go-native");
+  expect(engineDisplayName("some-future-engine")).toBe("some-future-engine");
+  expect(engineDisplayName("go-native")).toBe("Go native fuzzing");
 });
 
 it("does not call a smoke test that found crashes a pass", () => {

@@ -9,7 +9,8 @@ import { usePipeline } from "../providers/pipeline";
 import { useRunOutput } from "../providers/runOutput";
 import { useFuzzingSettings } from "../hooks/useFuzzingSettings";
 import { formatDuration } from "../lib/duration";
-import { canonicalHarnessEngine } from "../lib/harnessScope";
+import { canonicalHarnessEngine, engineDisplayName } from "../lib/harnessScope";
+import { engineForLanguage } from "../lib/fuzzingSettings";
 import { Button } from "./ui";
 
 /** The harness scope an approval or a run applies to. */
@@ -98,6 +99,14 @@ type Phase =
 
 const LANGS: Record<string, string> = { c: "c", cpp: "cpp", "c++": "cpp", rust: "rust", go: "go", python: "python", java: "java", javascript: "javascript", js: "javascript" };
 
+/** Languages the one-click flow can be pinned to; the rest auto-detect. */
+const PINNABLE_LANGUAGES = [
+  { value: "go", label: "Go" },
+  { value: "python", label: "Python" },
+  { value: "java", label: "Java" },
+  { value: "javascript", label: "JavaScript" },
+] as const;
+
 /**
  * "Fuzz this project": prepare a target and harness in one click, then stop
  * for the person to approve the harness. The click carries only the smoke-test
@@ -118,6 +127,11 @@ export function OneClickFuzz({ onOpen, apiRef }: {
   const [steps, setSteps] = useState<StepRow[]>([]);
   const [log, setLog] = useState<string[]>([]);
   const [logOpen, setLogOpen] = useState(false);
+  const [language, setLanguage] = useState("");
+  const [fresh, setFresh] = useState(false);
+  const [sanitizer, setSanitizer] = useState("");
+  const [cmplog, setCmplog] = useState(false);
+  const [skipModelReview, setSkipModelReview] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const logRef = useRef<HTMLPreElement>(null);
   const duration = settings?.default_duration_secs ?? 0;
@@ -171,6 +185,7 @@ export function OneClickFuzz({ onOpen, apiRef }: {
   async function prepare() {
     if (!activeProject || !settings) return;
     const project = activeProject;
+    const requestEngine = engineForLanguage(language) ?? settings.default_engine;
     setPhase({ kind: "preparing" });
     setSteps([]);
     setLog([]);
@@ -193,8 +208,23 @@ export function OneClickFuzz({ onOpen, apiRef }: {
       // Without events the panel shows a generic "Preparing" line.
     }
     try {
-      const prepared = await getTransport().invoke<FuzzPrepared>("fuzz_prepare", { project, engine: settings.default_engine });
-      const engine = canonicalHarnessEngine(prepared.engine) || settings.default_engine;
+      // Like `oxfuzz fuzz --lang`: a Go, Python, Java, or JavaScript choice
+      // runs under that language's engine; auto-detect keeps the default.
+      const request: Record<string, unknown> = {
+        project,
+        engine: requestEngine,
+      };
+      if (language) request.lang = language;
+      if (fresh) request.fresh = true;
+      // Like `oxfuzz fuzz --sanitizer/--cmplog/--no-llm-review`; untouched
+      // controls send nothing, so the configured defaults apply.
+      const build: Record<string, unknown> = {};
+      if (sanitizer) build.sanitizer = sanitizer;
+      if (cmplog && requestEngine === "afl++") build.cmplog = true;
+      if (Object.keys(build).length > 0) request.build = build;
+      if (skipModelReview) request.skipModelReview = true;
+      const prepared = await getTransport().invoke<FuzzPrepared>("fuzz_prepare", request);
+      const engine = canonicalHarnessEngine(prepared.engine) || requestEngine;
       const scope = { project, target: prepared.target, engine };
       setTarget(prepared.target);
       setEngine(engine);
@@ -217,8 +247,8 @@ export function OneClickFuzz({ onOpen, apiRef }: {
         // A crash-bearing revision can still be approved with known findings;
         // put it in front of the person instead of an older local draft.
         setTarget(smokeTested);
-        setEngine(settings.default_engine);
-        emitHarnessReplaced({ project, target: smokeTested, engine: settings.default_engine });
+        setEngine(requestEngine);
+        emitHarnessReplaced({ project, target: smokeTested, engine: requestEngine });
         onOpen("harness");
       }
     } finally {
@@ -237,6 +267,56 @@ export function OneClickFuzz({ onOpen, apiRef }: {
           </Button>
         )}
       </div>
+      {phase.kind !== "awaitingApproval" && phase.kind !== "ready" && (
+        <div className="flex flex-wrap items-center gap-3 text-xs">
+          <label className="flex items-center gap-2">
+            <span className="text-text-secondary">{t("parity.lang.language")}</span>
+            <select
+              aria-label={t("parity.lang.language")}
+              value={language}
+              disabled={busy}
+              onChange={(event) => setLanguage(event.target.value)}
+              className="rounded-md border border-border bg-transparent px-2 py-1 text-xs"
+            >
+              <option value="">{t("parity.lang.auto")}</option>
+              {PINNABLE_LANGUAGES.map((option) => {
+                const engine = engineForLanguage(option.value);
+                const usable = engine !== null && (settings?.enabled_engines?.includes(engine) ?? false);
+                return (
+                  <option key={option.value} value={option.value} disabled={!usable}>
+                    {usable ? option.label : t("parity.lang.engineDisabled", { language: option.label, engine: engineDisplayName(engine ?? "") })}
+                  </option>
+                );
+              })}
+            </select>
+          </label>
+          <label className="flex items-center gap-2">
+            <input type="checkbox" checked={fresh} disabled={busy} onChange={(event) => setFresh(event.target.checked)} />
+            <span>{t("parity.lang.fresh")}</span>
+          </label>
+          <label className="flex items-center gap-2">
+            <span className="text-text-secondary">{t("parity.lang.sanitizer")}</span>
+            <select
+              aria-label={t("parity.lang.sanitizer")}
+              value={sanitizer}
+              disabled={busy}
+              onChange={(event) => setSanitizer(event.target.value)}
+              className="rounded-md border border-border bg-transparent px-2 py-1 text-xs"
+            >
+              <option value="">{t("parity.lang.sanitizerDefault")}</option>
+              {["address", "undefined", "thread", "memory"].map((name) => <option key={name} value={name}>{name}</option>)}
+            </select>
+          </label>
+          <label className="flex items-center gap-2">
+            <input type="checkbox" checked={cmplog} disabled={busy} onChange={(event) => setCmplog(event.target.checked)} />
+            <span>{t("parity.lang.cmplog")}</span>
+          </label>
+          <label className="flex items-center gap-2">
+            <input type="checkbox" checked={skipModelReview} disabled={busy} onChange={(event) => setSkipModelReview(event.target.checked)} />
+            <span>{t("parity.lang.skipModelReview")}</span>
+          </label>
+        </div>
+      )}
       {busy && steps.length === 0 && <p role="status" className="text-xs m-0">{t("oneClick.preparing")}</p>}
       {showSteps && (
         <ol role="status" aria-label={t("oneClick.progress")} className="m-0 p-0 list-none flex flex-col gap-1 text-xs">

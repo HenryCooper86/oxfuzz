@@ -207,7 +207,7 @@ project at a time; with no project selected it prompts you to choose one.
 - **Reports** -- compose and save Markdown reports. **Generate** builds a draft
   from the latest campaign data; **Save draft** stores it; **Copy** copies the
   Markdown.
-- **Repro** -- builds an exact \`oxfuzz regress\` command per crash to copy.
+- **Repro** -- points to the regression replay on the Triage page, which re-runs the stored crashes against the current harness.
 - **Review** -- queues of reports, harnesses, and crashes awaiting a human.
 - **Issues** -- turn a crash into a GitHub or GitLab issue draft, then **Copy** it or
   **File** it directly through the provider API (needs a repo + token in

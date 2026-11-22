@@ -30,7 +30,8 @@ function buildReport(status: SystemStatus | null): string {
           `- Docker running: ${yn(status.docker)}`,
           `- Sandbox image built: ${yn(status.sandbox_image)}`,
           `- Engines: libFuzzer=${yn(status.libfuzzer)}, AFL++=${yn(status.aflplusplus)}, ` +
-            `honggfuzz=${yn(status.honggfuzz)}, syzkaller=${yn(status.syzkaller)}`,
+            `honggfuzz=${yn(status.honggfuzz)}, syzkaller=${yn(status.syzkaller)}, ` +
+            `Atheris=${yn(status.atheris)}, Jazzer=${yn(status.jazzer)}, Jazzer.js=${yn(status.jazzer_js)}`,
           `- DefectDojo reachable: ${yn(status.defectdojo)}`,
         ].join("\n")
       : "- System status: unavailable (backend did not respond)",
@@ -96,6 +97,10 @@ export function AboutTab() {
           <Badge variant="accent">AFL++</Badge>
           <Badge variant="accent">honggfuzz</Badge>
           <Badge variant="accent">syzkaller (kernel)</Badge>
+          <Badge variant="accent">Go native fuzzing</Badge>
+          <Badge variant="accent">Atheris</Badge>
+          <Badge variant="accent">Jazzer</Badge>
+          <Badge variant="accent">Jazzer.js</Badge>
         </div>
       </div>
 
@@ -105,9 +110,10 @@ export function AboutTab() {
           <Badge>C</Badge>
           <Badge>C++</Badge>
           <Badge>Rust</Badge>
-          <Badge>{t("settings.about.discoveryOnly", { language: "Go" })}</Badge>
-          <Badge>{t("settings.about.discoveryOnly", { language: "Python" })}</Badge>
-          <Badge>{t("settings.about.discoveryOnly", { language: "Java" })}</Badge>
+          <Badge>{t("parity.lang.aboutLanguage", { language: "Go", engine: "go-native" })}</Badge>
+          <Badge>{t("parity.lang.aboutLanguage", { language: "Python", engine: "atheris" })}</Badge>
+          <Badge>{t("parity.lang.aboutLanguage", { language: "Java", engine: "jazzer" })}</Badge>
+          <Badge>{t("parity.lang.aboutLanguage", { language: "JavaScript", engine: "jazzer-js" })}</Badge>
         </div>
       </div>
 

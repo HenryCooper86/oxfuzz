@@ -14,6 +14,7 @@ const VIEWS: ViewType[] = [
   "run",
   "triage",
   "corpus",
+  "binary",
   "projects",
   "artifacts",
   "reports",

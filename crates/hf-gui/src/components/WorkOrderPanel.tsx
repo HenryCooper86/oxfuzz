@@ -12,6 +12,8 @@ import type {
 import { Button, Input, Textarea } from "./ui";
 import { HarnessApprovalEvidence } from "./HarnessApprovalEvidence";
 import { useI18n } from "../i18nContext";
+import "../i18n.parityDiscovery";
+import { saveWorkOrderPacket } from "../lib/parityDiscovery";
 import { canonicalHarnessEngine, canonicalHarnessLanguage, qualifiedTargetSelector, matchesTargetSelection } from "../lib/harnessScope";
 
 function short(value: string | null | undefined) {
@@ -49,6 +51,7 @@ function WorkOrderPanelSession({
   const { t } = useI18n();
   const [orders, setOrders] = useState<HarnessWorkOrder[]>([]);
   const [selectedOrder, setSelectedOrder] = useState<string | null>(null);
+  const [savedPath, setSavedPath] = useState<string | null>(null);
   const [submissions, setSubmissions] = useState<HarnessWorkOrderSubmission[]>([]);
   const [selectedSubmission, setSelectedSubmission] = useState<string | null>(null);
   const [attempts, setAttempts] = useState<HarnessWorkOrderAttempt[]>([]);
@@ -281,6 +284,17 @@ function WorkOrderPanelSession({
     }
   }
 
+  async function savePacket() {
+    if (!order) return;
+    const generation = lifetime.current;
+    try {
+      const path = await saveWorkOrderPacket(order);
+      if (lifetime.current === generation) setSavedPath(path);
+    } catch (cause) {
+      if (lifetime.current === generation) setError(formatInvokeError(cause));
+    }
+  }
+
   function downloadPacket() {
     if (!order) return;
     try {
@@ -307,7 +321,7 @@ function WorkOrderPanelSession({
           <div className="flex flex-col gap-1">
             {orders.map((item) => <button type="button" key={item.id} disabled={busy !== null} className="text-left text-xs surface-card" onClick={() => { if (item.id === selectedOrder) return; setSelectedOrder(item.id); setSubmissions([]); setSelectedSubmission(null); setParentSubmission(null); setAttempts([]); setSelectedAttempt(null); setApprovalEvidence(null); setEvidenceState("idle"); setRanking(null); }}>{short(item.id)}</button>)}
           </div>
-          {order && <div className="min-w-0"><p className="text-xs mb-2"><strong>{target}</strong> · {language} · {engine}</p><div className="flex gap-2 mb-2"><Button size="sm" variant="outline" onClick={() => void copyPacket()}>{t("workOrder.copy")}</Button><Button size="sm" variant="outline" onClick={downloadPacket}>{t("workOrder.download")}</Button></div><pre className="text-xs overflow-auto max-h-48">{JSON.stringify(order, null, 2)}</pre></div>}
+          {order && <div className="min-w-0"><p className="text-xs mb-2"><strong>{target}</strong> · {language} · {engine}</p><div className="flex gap-2 mb-2"><Button size="sm" variant="outline" onClick={() => void copyPacket()}>{t("workOrder.copy")}</Button><Button size="sm" variant="outline" onClick={downloadPacket}>{t("workOrder.download")}</Button><Button size="sm" variant="outline" onClick={() => void savePacket()}>{t("parityDiscovery.workOrder.save")}</Button></div>{savedPath && <p className="text-xs text-text-muted mb-2">{t("parityDiscovery.workOrder.saved", { path: savedPath })}</p>}<pre className="text-xs overflow-auto max-h-48">{JSON.stringify(order, null, 2)}</pre></div>}
         </div>
       )}
       {selectedOrder && (

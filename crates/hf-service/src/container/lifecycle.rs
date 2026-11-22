@@ -118,7 +118,7 @@ impl ServiceContainer {
                 hf_storage::MAX_CAMPAIGN_HEALTH_SAMPLES,
             )),
             #[cfg(feature = "campaign-health")]
-            campaign_health_delivery: Arc::new(std::sync::Mutex::new(None)),
+            campaign_health_delivery: Arc::new(std::sync::Mutex::new(Vec::new())),
             active_agents: Arc::new(std::sync::Mutex::new(Vec::new())),
             session_turn_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             chat_turns: super::operation_registry::OperationRegistry::default(),
@@ -261,6 +261,46 @@ impl ServiceContainer {
         let mut detached = self.clone();
         detached.provider_pool = Arc::new(std::sync::RwLock::new(None));
         detached
+    }
+
+    /// Apply an [`AiPolicy`](super::AiPolicy) to a whole composite flow
+    /// (campaign, CI gate), which reaches a model at several steps.
+    ///
+    /// `Off` returns [`Self::without_provider_pool`], so no step can call a
+    /// model. `Require` is a preflight only: it refuses when no provider is
+    /// configured or every configured one is frozen; each step still warns
+    /// and continues on a mid-flow provider failure. `Auto` returns a clone.
+    ///
+    /// `what` names the flow in the error ("this campaign").
+    ///
+    /// # Errors
+    /// Returns [`ClassifiedError::Validation`] under `Require` when no
+    /// provider is configured or all are frozen.
+    pub async fn scoped_to_ai_policy(
+        &self,
+        policy: super::AiPolicy,
+        what: &str,
+    ) -> Result<Self, ClassifiedError> {
+        match policy {
+            super::AiPolicy::Off => Ok(self.without_provider_pool()),
+            super::AiPolicy::Auto => Ok(self.clone()),
+            super::AiPolicy::Require => {
+                let Some(pool) = self.provider_pool() else {
+                    return Err(ClassifiedError::Validation(format!(
+                        "{what} was asked to use the model but no provider is \
+                         configured; configure one in providers.toml or set HF_PROVIDER_API_KEY"
+                    )));
+                };
+                let statuses = pool.provider_statuses().await;
+                if !statuses.is_empty() && statuses.iter().all(|status| status.is_frozen) {
+                    return Err(ClassifiedError::Validation(format!(
+                        "{what} was asked to use the model but every configured \
+                         provider is frozen after earlier failures"
+                    )));
+                }
+                Ok(self.clone())
+            }
+        }
     }
 
     /// Reload the provider pool from the current on-disk config, swapping it in
@@ -520,7 +560,7 @@ impl ServiceContainer {
                 hf_storage::MAX_CAMPAIGN_HEALTH_SAMPLES,
             )),
             #[cfg(feature = "campaign-health")]
-            campaign_health_delivery: Arc::new(std::sync::Mutex::new(None)),
+            campaign_health_delivery: Arc::new(std::sync::Mutex::new(Vec::new())),
             active_agents: Arc::new(std::sync::Mutex::new(Vec::new())),
             session_turn_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             chat_turns: super::operation_registry::OperationRegistry::default(),
@@ -1180,5 +1220,33 @@ mod work_order_recovery_tests {
         assert_recovery_gate!(service.harness_work_order_attempt(attempt.id));
         assert_recovery_gate!(service.list_harness_work_order_attempts(attempt.submission_id));
         assert!(service.provider_statuses().await.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod ai_policy_scope_tests {
+    use super::ServiceContainer;
+    use crate::container::AiPolicy;
+
+    #[tokio::test]
+    async fn require_refuses_a_flow_that_has_no_provider_and_off_detaches_it() {
+        let container = ServiceContainer::stubbed();
+
+        let error = container
+            .scoped_to_ai_policy(AiPolicy::Require, "this campaign")
+            .await
+            .err()
+            .expect("require without a provider must fail");
+        assert!(error
+            .to_string()
+            .contains("this campaign was asked to use the model but no provider is configured"));
+
+        for policy in [AiPolicy::Off, AiPolicy::Auto] {
+            let scoped = container
+                .scoped_to_ai_policy(policy, "this campaign")
+                .await
+                .expect("off and auto never refuse");
+            assert!(scoped.provider_pool().is_none());
+        }
     }
 }

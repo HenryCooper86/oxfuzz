@@ -53,8 +53,22 @@ interface SystemSnapshot {
 
 const n = (v: number) => v.toLocaleString();
 
-function ProviderCard({ p }: { p: ProviderSnapshot }) {
+function ProviderCard({ p, onThawed }: { p: ProviderSnapshot; onThawed: () => void }) {
   const { t } = useI18n();
+  const [thawing, setThawing] = useState(false);
+  const [thawError, setThawError] = useState<string | null>(null);
+  async function thaw() {
+    setThawing(true);
+    setThawError(null);
+    try {
+      await getTransport().invoke("thaw_provider", { providerId: p.id });
+      onThawed();
+    } catch (e) {
+      setThawError(t("obs.thawFailed", { id: p.id, error: String(e) }));
+    } finally {
+      setThawing(false);
+    }
+  }
   const pct = p.max_concurrency > 0 ? (p.active_requests / p.max_concurrency) * 100 : 0;
   const fillClass = pct >= 100 ? "full" : pct >= 75 ? "high" : "";
   return (
@@ -68,7 +82,13 @@ function ProviderCard({ p }: { p: ProviderSnapshot }) {
         <span className={`obs-badge ${p.is_frozen ? "obs-badge-frozen" : "obs-badge-healthy"}`}>
           {p.is_frozen ? t("obs.frozen") : t("obs.available")}
         </span>
+        {p.is_frozen && (
+          <Button size="sm" variant="outline" onClick={() => void thaw()} loading={thawing} disabled={thawing}>
+            {t("obs.thaw")}
+          </Button>
+        )}
       </div>
+      {thawError && <div role="alert" className="obs-no-items" style={{ color: "var(--danger, #ef4444)" }}>{thawError}</div>}
 
       {p.tags.length > 0 && (
         <div className="obs-tags">
@@ -186,7 +206,7 @@ export function ObservabilityPanel() {
               {snap.providers.length === 0 ? (
                 <div className="obs-no-items">{t("obs.noProvider")}</div>
               ) : (
-                snap.providers.map((p) => <ProviderCard key={p.id} p={p} />)
+                snap.providers.map((p) => <ProviderCard key={p.id} p={p} onThawed={() => void reload()} />)
               )}
             </Section>
 

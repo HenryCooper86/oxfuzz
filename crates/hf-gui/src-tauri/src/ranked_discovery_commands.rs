@@ -12,10 +12,16 @@ pub async fn ranked_discovery_start(
     state: State<'_, AppState>,
     project: PathBuf,
     lang: String,
+    ai: Option<hf_service::AiPolicy>,
 ) -> Result<Uuid, String> {
     let language = lang.parse().map_err(|error: String| error)?;
+    // `require` refuses to start a ranking no model can answer; `off` is the
+    // plain `discover` command, which calls no model.
     state
         .container
+        .scoped_to_ai_policy(ai.unwrap_or_default(), "target ranking")
+        .await
+        .map_err(|error| error.to_string())?
         .start_ranked_discovery(&project, language)
         .await
         .map_err(|error| error.to_string())

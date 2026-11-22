@@ -30,6 +30,9 @@ import { FuzzingPolicyNotice } from "../components/FuzzingPolicyNotice";
 import { TargetSelectionRepairNotice } from "../components/TargetSelectionRepairNotice";
 import { projectStorageKey } from "../lib/projectState";
 import { WorkOrderPanel } from "../components/WorkOrderPanel";
+import { HarnessOptionsPanel } from "../components/HarnessOptionsPanel";
+import { HarnessRevisionActions } from "../components/HarnessRevisionActions";
+import { buildOptionsFor, DEFAULT_HARNESS_OPTIONS, needsSmokeOptions, type HarnessOptions } from "../lib/parityHarness";
 import { harnessReviewMatchesScope, candidateTargetSelector, matchesTargetSelection, engineDisplayName, harnessStatusLabelKey } from "../lib/harnessScope";
 
 /** Which generator wrote a draft. Under `auto` a provider outage substitutes
@@ -144,6 +147,7 @@ export function HarnessView({
   const [inventory, setInventory] = useState<TargetInventory | null>(null);
   const [harness, setHarness] = useState<HarnessResult | null>(null);
   const [aiPolicy, setAiPolicy] = useState<AiPolicy>("auto");
+  const [harnessOptions, setHarnessOptions] = useState<HarnessOptions>(DEFAULT_HARNESS_OPTIONS);
   const [prevSource, setPrevSource] = useState<string | null>(null);
   const [showDiff, setShowDiff] = useState(false);
   const [compileResult, setCompileResult] = useState<CompileResult | null>(null);
@@ -236,6 +240,11 @@ export function HarnessView({
       showRetainedRevision();
     }
   }), [project, selectedTarget, engine, showRetainedRevision]);
+
+  function buildArgumentFor() {
+    const build = buildOptionsFor(harnessOptions, engine);
+    return build ? { build } : {};
+  }
 
   function isCurrentScope() {
     return mounted.current && currentScope.current === requestScope;
@@ -364,9 +373,11 @@ export function HarnessView({
     setSeeds(null);
     setCompiled(false);
     setShowDiff(false);
+    const buildArgument = buildArgumentFor();
     try {
       const result = await getTransport().invoke<HarnessResult>("harness_draft", {
         project, target, engine, lang, ai: aiPolicy,
+        ...buildArgument,
       });
       if (!isCurrentDraft(generation)) return null;
       setHarness(result);
@@ -402,6 +413,7 @@ export function HarnessView({
     try {
       const result = await getTransport().invoke<CompileResult>("harness_compile", {
         source: src, project, engine, target: selectedTarget, lang,
+        ...buildArgumentFor(),
       });
       if (!isCurrentDraft(generation)) return false;
       setCompileResult(result);
@@ -430,9 +442,14 @@ export function HarnessView({
     setPromotionResult(null);
     setCompiled(false);
     try {
-      const result = await getTransport().invoke<SmokeResult>("harness_smoke", {
-        project, target: selectedTarget, engine, lang,
-      });
+      const result = needsSmokeOptions(harnessOptions)
+        ? await getTransport().invoke<SmokeResult>("harness_smoke_with_options", {
+          project, target: selectedTarget, engine, lang,
+          repairs: harnessOptions.repairs, skipModelReview: harnessOptions.skipModelReview, ai: aiPolicy,
+        })
+        : await getTransport().invoke<SmokeResult>("harness_smoke", {
+          project, target: selectedTarget, engine, lang,
+        });
       if (!isCurrentDraft(generation)) return false;
       setSmokeResult(result);
       // The smoke step is complete once it has run, whether it passed or
@@ -719,6 +736,16 @@ export function HarnessView({
             </Button>
           </div>
         </div>
+      )}
+
+      {selectedTarget && (
+        <HarnessOptionsPanel value={harnessOptions} onChange={setHarnessOptions} engine={engine}
+          disabled={selectionBlocked || buildBlocked || qualificationBusy} />
+      )}
+      {selectedTarget && (
+        <HarnessRevisionActions key={`${project}:${selectedTarget}:${engine}:${lang}`} project={project} target={selectedTarget} engine={engine} lang={lang}
+          ai={aiPolicy} repairs={harnessOptions.repairs} disabled={selectionBlocked || buildBlocked || qualificationBusy}
+          onChanged={showRetainedRevision} />
       )}
 
       {/* Step pipeline */}

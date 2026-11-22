@@ -7,9 +7,53 @@ export const FUZZING_ENGINE_OPTIONS = [
   { value: "afl++", label: "AFL++" },
   { value: "honggfuzz", label: "honggfuzz" },
   { value: "syzkaller", label: "syzkaller (kernel)" },
+  { value: "go-native", label: "Go native fuzzing" },
+  { value: "atheris", label: "Atheris (Python)" },
+  { value: "jazzer", label: "Jazzer (Java)" },
+  { value: "jazzer-js", label: "Jazzer.js (JavaScript)" },
 ] as const;
 
 export type FuzzingEngineId = (typeof FUZZING_ENGINE_OPTIONS)[number]["value"];
+
+/**
+ * The engine each non-C-family language runs under. Mirrors
+ * `EngineKind::supports_language` in hf-core: go-native drives Go, atheris
+ * Python, jazzer Java, jazzer-js JavaScript, and libFuzzer drives Rust.
+ */
+const LANGUAGE_ENGINES: Readonly<Record<string, FuzzingEngineId>> = {
+  go: "go-native",
+  python: "atheris",
+  java: "jazzer",
+  javascript: "jazzer-js",
+};
+
+/** Engines that only drive one language, and that language. */
+const ENGINE_LANGUAGE: Readonly<Record<string, string>> = {
+  "go-native": "go",
+  atheris: "python",
+  jazzer: "java",
+  "jazzer-js": "javascript",
+};
+
+/** The language-specific engine for `language`, or null for C, C++, and Rust. */
+export function engineForLanguage(language: string | undefined): FuzzingEngineId | null {
+  return (language !== undefined && LANGUAGE_ENGINES[language]) || null;
+}
+
+const LANGUAGE_NAMES: Readonly<Record<string, string>> = {
+  go: "Go",
+  python: "Python",
+  java: "Java",
+  javascript: "JavaScript",
+};
+
+/** Display name of the one language a language-specific engine drives, else null. */
+export function engineLanguageName(engine: string): string | null {
+  return LANGUAGE_NAMES[ENGINE_LANGUAGE[engine] ?? ""] ?? null;
+}
+
+/** The engines a default deployment enables (`EngineKind::ALL`). */
+const DEFAULT_ENABLED_ENGINES: FuzzingEngineId[] = ["libfuzzer", "afl++", "honggfuzz", "syzkaller"];
 
 export interface FuzzingSandboxSettings {
   max_mem_mb: number;
@@ -38,7 +82,7 @@ export function fuzzingActionsEnabled(
 
 export const DEFAULT_FUZZING_SETTINGS: FuzzingSettings = {
   collect_function_coverage: false,
-  enabled_engines: FUZZING_ENGINE_OPTIONS.map((option) => option.value),
+  enabled_engines: [...DEFAULT_ENABLED_ENGINES],
   default_engine: "libfuzzer",
   default_duration_secs: 60,
   sandbox: {
@@ -212,19 +256,12 @@ export function enabledEngineOptions(
     if (!enabled.has(option.value)) return false;
     if (language !== undefined) {
       if (option.value === "syzkaller") return false;
+      const only = ENGINE_LANGUAGE[option.value];
+      if (only !== undefined) return only === language;
       if (language === "rust") return option.value === "libfuzzer";
-      if (
-        language === "go" ||
-        language === "python" ||
-        language === "java" ||
-        language === "javascript"
-      ) {
-        // Go, Python, Java, and JavaScript harnesses run under the
-        // go-native, atheris, jazzer, and jazzer-js engines, which the
-        // desktop app does not drive: they are fuzzed from the CLI.
-        // Returning no options keeps the harness action disabled here.
-        return false;
-      }
+      // Go, Python, Java, and JavaScript compile to no libFuzzer, AFL++, or
+      // honggfuzz binary; only their own engine drives them.
+      if (engineForLanguage(language) !== null) return false;
     }
     if (option.value === "syzkaller") return includeSyzkaller;
     return true;

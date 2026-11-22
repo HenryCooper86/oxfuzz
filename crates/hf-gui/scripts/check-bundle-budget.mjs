@@ -23,7 +23,12 @@ const limits = {
   chunk: budget("HF_GUI_MAX_CHUNK_BUDGET", 800_000),
   // Discovery guidance plus seven provider presets and bilingual credential/
   // coding-plan guidance bring the measured application graph to 1,424,804 B.
-  app: budget("HF_GUI_APP_JS_BUDGET", 1_430_000),
+  // The screens for the operations that were command-line only (binary-only
+  // fuzzing, campaigns, the CI gate, bisection, coverage reports, Clang
+  // analysis, remote arming and the rest of the 2026-11-23 parity work) add
+  // 133,552 B, all of it in lazily loaded view chunks: measured 1,558,356 B.
+  // The initial budget is unchanged.
+  app: budget("HF_GUI_APP_JS_BUDGET", 1_570_000),
   vendor: budget("HF_GUI_VENDOR_JS_BUDGET", 3_700_000),
 };
 

@@ -1,7 +1,10 @@
+import "../i18n.parityHarness";
+import { straightQuotes } from "../lib/parityRun";
 import { useEffect, useRef, useState } from "react";
 import { getTransport } from "../lib";
 import { useI18n } from "../i18nContext";
 import { Button } from "./ui";
+import { grammarMutatorSource } from "../lib/parityHarness";
 
 export interface MutatorArtifact {
   version: number;
@@ -69,6 +72,26 @@ function ManagedMutatorForm({ project, target, engine, lang, harnessId, disabled
       if (mounted.current) { setStatus(result); setImported(true); onImported(); }
     } catch (reason) { if (mounted.current) setError(String(reason)); } finally { if (mounted.current) setBusy(false); }
   }
+  const [grammar, setGrammar] = useState("");
+  const [grammarSource, setGrammarSource] = useState<string | null>(null);
+  async function previewGrammar() {
+    if (busy) return;
+    setBusy(true); setError(null);
+    try {
+      const generated = await grammarMutatorSource(grammar, engine);
+      if (mounted.current) setGrammarSource(generated);
+    } catch (reason) { if (mounted.current) setError(String(reason)); } finally { if (mounted.current) setBusy(false); }
+  }
+  async function attachGrammar() {
+    if (!status || busy) return;
+    setBusy(true); setError(null); setImported(false);
+    try {
+      const result = await getTransport().invoke<MutatorStatus>("attach_grammar_mutator", {
+        project, target, engine, expectedHarnessId: status.harness_id, grammar,
+      });
+      if (mounted.current) { setStatus(result); setImported(true); onImported(); }
+    } catch (reason) { if (mounted.current) setError(String(reason)); } finally { if (mounted.current) setBusy(false); }
+  }
   async function importFile(file: File | undefined) {
     if (!file) return;
     if (file.size > 65536) { setError(t("mutator.size")); return; }
@@ -86,6 +109,16 @@ function ManagedMutatorForm({ project, target, engine, lang, harnessId, disabled
       <textarea aria-label={t("mutator.source")} value={source} disabled={disabled || busy || !status} onChange={(event) => setSource(event.target.value)} rows={10}
         className="w-full text-xs mt-2 p-2" style={{ background: "var(--surface-code)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", fontFamily: "var(--font-mono)" }} />
       <Button size="sm" disabled={disabled || busy || !status || source.trim().length === 0} onClick={() => { void compile(); }}>{t(busy ? "mutator.compiling" : "mutator.compile")}</Button>
+    </details>}
+    {supported && <details><summary className="text-xs">{t("parityHarness.grammarTitle")}</summary>
+      <p className="text-xs text-text-secondary mt-2">{t("parityHarness.grammarHelp")}</p>
+      <textarea aria-label={t("parityHarness.grammar")} value={grammar} disabled={disabled || busy || !status} spellCheck={false} autoCorrect="off" autoCapitalize="off" onChange={(event) => { setGrammar(straightQuotes(event.target.value)); setGrammarSource(null); }} rows={8}
+        className="w-full text-xs mt-2 p-2" style={{ background: "var(--surface-code)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", fontFamily: "var(--font-mono)" }} />
+      <div className="flex gap-2 mt-2">
+        <Button size="sm" variant="outline" disabled={disabled || busy || grammar.trim().length === 0} onClick={() => { void previewGrammar(); }}>{t("parityHarness.grammarPreview")}</Button>
+        <Button size="sm" disabled={disabled || busy || !status || grammar.trim().length === 0} onClick={() => { void attachGrammar(); }}>{t(busy ? "parityHarness.grammarAttaching" : "parityHarness.grammarAttach")}</Button>
+      </div>
+      {grammarSource !== null && <pre aria-label={t("parityHarness.grammarSource")} className="text-xs p-2 mt-2 overflow-auto max-h-60" style={{ whiteSpace: "pre-wrap", background: "var(--surface-code)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", fontFamily: "var(--font-mono)" }}>{grammarSource}</pre>}
     </details>}
     {imported && <p role="status" className="text-xs">{t("mutator.next")}</p>}
     {error && <p role="alert" className="text-xs" style={{ color: "var(--danger)" }}>{error}</p>}

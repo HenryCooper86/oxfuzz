@@ -30,7 +30,18 @@ export function canonicalHarnessEngine(value: unknown): string {
       return "afl++";
     case "honggfuzz":
     case "syzkaller":
+    case "atheris":
+    case "jazzer":
       return value.toLowerCase();
+    case "go-native":
+    case "gonative":
+    case "go_native":
+      return "go-native";
+    case "jazzer-js":
+    case "jazzerjs":
+    case "jazzer_js":
+    case "jazzer.js":
+      return "jazzer-js";
     default:
       return "";
   }
@@ -41,6 +52,10 @@ const ENGINE_DISPLAY_NAMES: Record<string, string> = {
   "afl++": "AFL++",
   honggfuzz: "honggfuzz",
   syzkaller: "syzkaller",
+  "go-native": "Go native fuzzing",
+  atheris: "Atheris",
+  jazzer: "Jazzer",
+  "jazzer-js": "Jazzer.js",
 };
 
 /** The engine's product name; the service spells it as a Rust enum variant. */

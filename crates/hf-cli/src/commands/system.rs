@@ -88,31 +88,19 @@ fn provider_status_lines(statuses: &[hf_service::ProviderStatus]) -> Vec<String>
 /// this only carries the operator's answer to it over the same HTTP surface
 /// the GUI uses.
 pub(crate) async fn cmd_arm(url: &str, off: bool, status: bool) -> anyhow::Result<()> {
-    let endpoint = format!("{}/schedule/arm", url.trim_end_matches('/'));
-    let client = reqwest::Client::new();
-    let request = if status {
-        client.get(&endpoint)
+    use hf_service::remote_arm::{remote_schedule_arm, RemoteArmAction};
+    let action = if status {
+        RemoteArmAction::Status
     } else if off {
-        client.delete(&endpoint)
+        RemoteArmAction::Disarm
     } else {
-        client.post(&endpoint)
+        RemoteArmAction::Arm
     };
     // Non-loopback binds require a token; send it when one is configured so the
     // command works against the same server the operator started.
-    let request = match std::env::var("HF_WEB_TOKEN") {
-        Ok(token) if !token.is_empty() => request.bearer_auth(token),
-        _ => request,
-    };
-
-    let response = request
-        .send()
-        .await
-        .map_err(|error| anyhow::anyhow!("could not reach {endpoint}: {error}"))?;
-    if !response.status().is_success() {
-        anyhow::bail!("{endpoint} returned {}", response.status());
-    }
-    let body: serde_json::Value = response.json().await?;
-    let armed = body.get("armed").and_then(serde_json::Value::as_bool);
+    // Swallowed: an unset or non-UTF-8 HF_WEB_TOKEN means no token is sent.
+    let token = std::env::var("HF_WEB_TOKEN").ok();
+    let armed = remote_schedule_arm(url, action, token.as_deref()).await?;
 
     match armed {
         Some(true) => println!("armed: restored work may run"),
@@ -120,7 +108,7 @@ pub(crate) async fn cmd_arm(url: &str, off: bool, status: bool) -> anyhow::Resul
         Some(false) => {
             println!("disarmed: the server reports no scheduler, so there is nothing to arm");
         }
-        None => println!("{body}"),
+        None => println!("the server reported no arming state"),
     }
     Ok(())
 }

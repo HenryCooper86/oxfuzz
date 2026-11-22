@@ -10,6 +10,29 @@ retain only the current release; older entries remain here as the record.
 
 ## Unreleased
 
+### Added
+
+- Desktop app: the operations that were command-line only are now in the
+  app. A Binary page fuzzes a program without its source and drafts or files
+  its findings. The Harness page takes the sanitizer, CmpLog, persistent
+  mode, repair attempts, refine, adopting a stored revision and grammar
+  mutators. The Run page takes per-run seed, CPUs, timeout, resume, sanitizer,
+  CmpLog and model policy, a dictionary per target, campaigns, the CI gate and
+  the engine preflight. Triage has bisection, the regression replay and the
+  model policy; Corpus has afl-cmin, dead-seed regeneration, crash absorption,
+  concolic enrichment and line coverage with lcov and HTML export; Discover
+  lists unreached entry points and coverage attribution; Runs has the trust
+  report, edge-set capture and the edge-set diff. Settings has webhook
+  alerts and thawing a frozen provider. Discover also takes the ranking
+  model policy and, in a build with Clang analysis, runs it; Runs filters to
+  active runs or the newest N and shows a run's full record; a work order
+  packet saves to a chosen file; Automation can authorize or withdraw
+  scheduled runs on another server, and start or stop the REST server on
+  this computer with a token generated for each start.
+- Desktop app: Go, Python, Java and JavaScript targets can be harnessed and
+  run once their engine is enabled in Settings; they no longer stop at
+  discovery.
+
 ## 0.9.8 - 2026-11-22
 
 ### Added

@@ -18,6 +18,8 @@ pub enum ExplicitAction {
     RunFuzzer,
     Triage,
     PublishFindings,
+    #[cfg(feature = "concolic-enrichment")]
+    RunConcolic,
     #[cfg(feature = "build-doctor")]
     RunProjectBuild,
     #[cfg(feature = "change-aware")]
@@ -57,6 +59,8 @@ impl ApprovalGate for WorkflowApproval {
             ExplicitAction::RunFuzzer => matches!(action, Action::RunFuzzer { .. }),
             ExplicitAction::Triage => matches!(action, Action::Triage),
             ExplicitAction::PublishFindings => matches!(action, Action::PublishFindings { .. }),
+            #[cfg(feature = "concolic-enrichment")]
+            ExplicitAction::RunConcolic => matches!(action, Action::RunConcolic { .. }),
             #[cfg(feature = "build-doctor")]
             ExplicitAction::RunProjectBuild => matches!(action, Action::RunProjectBuild { .. }),
             #[cfg(feature = "change-aware")]
@@ -141,6 +145,14 @@ mod tests {
                 ExplicitAction::PublishFindings,
                 Action::PublishFindings {
                     destination: "issue-tracker".to_owned(),
+                },
+            ),
+            #[cfg(feature = "concolic-enrichment")]
+            (
+                ExplicitAction::RunConcolic,
+                Action::RunConcolic {
+                    target: "parse".to_owned(),
+                    duration_secs: 10,
                 },
             ),
             #[cfg(feature = "build-doctor")]

@@ -10,6 +10,7 @@ import {
   patchFuzzingSettings,
   type FuzzingEngineId,
   type FuzzingSettings,
+  engineLanguageName,
 } from "../../lib/fuzzingSettings";
 
 type ConfigValue = Record<string, unknown>;
@@ -81,7 +82,9 @@ export function FuzzingTab({ value, onChange }: FuzzingTabProps) {
               title={engine.label}
               description={engine.value === "syzkaller"
                 ? t("settings.fuzzing.syzkallerDesc")
-                : t("settings.fuzzing.engineDesc")}
+                : engineLanguageName(engine.value)
+                  ? t("parity.lang.engineDesc", { language: engineLanguageName(engine.value) ?? "" })
+                  : t("settings.fuzzing.engineDesc")}
             >
               <div className="flex items-center gap-2">
                 <Badge variant={isEnabled ? "success" : "default"}>

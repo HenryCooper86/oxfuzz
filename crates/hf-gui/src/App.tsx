@@ -39,7 +39,7 @@ import { FindingSelectionProvider } from "./providers/FindingSelectionContext";
 import { ProgressPanel } from "./components/ProgressPanel";
 import { progressPanelScope } from "./lib/progressPanel";
 import { isTauriEnvironment, pickFolder } from "./lib";
-import { MessageSquare, Crosshair, Play, Bug, Database, Settings, FileCode, FileText, History, Activity, Gauge, Info, FolderOpen, Boxes, ListChecks, Bot, Puzzle, BookOpen, Zap, LayoutDashboard, ScrollText, ShieldCheck, LifeBuoy, CarFront , GitCompare} from "lucide-react";
+import { MessageSquare, Crosshair, Play, Bug, Database, Settings, FileCode, FileText, History, Activity, Gauge, Info, FolderOpen, Boxes, ListChecks, Bot, Puzzle, BookOpen, Zap, LayoutDashboard, ScrollText, ShieldCheck, LifeBuoy, CarFront , GitCompare, Cpu} from "lucide-react";
 
 const SettingsView = lazy(() => import("./components/settings/SettingsView").then(module => ({ default: module.SettingsView })));
 const WorkflowView = lazy(() => import("./views/WorkflowView").then(module => ({ default: module.WorkflowView })));
@@ -47,6 +47,7 @@ const DiscoverView = lazy(() => import("./views/DiscoverView").then(module => ({
 const HarnessView = lazy(() => import("./views/HarnessView").then(module => ({ default: module.HarnessView })));
 const RunView = lazy(() => import("./views/RunView").then(module => ({ default: module.RunView })));
 const TriageView = lazy(() => import("./views/TriageView").then(module => ({ default: module.TriageView })));
+const BinaryView = lazy(() => import("./views/BinaryView").then(module => ({ default: module.BinaryView })));
 const CorpusView = lazy(() => import("./views/CorpusView").then(module => ({ default: module.CorpusView })));
 
 const AuditView = lazy(() =>
@@ -278,6 +279,11 @@ function AppInner() {
                     <Suspense fallback={<div role="status">{t("common.loading")}</div>}><CorpusView onNavigate={navigate} /></Suspense>
                   </ViewCanvas>
                 )}
+                {activeView === "binary" && (
+                  <ViewCanvas>
+                    <Suspense fallback={<div role="status">{t("common.loading")}</div>}><BinaryView /></Suspense>
+                  </ViewCanvas>
+                )}
                 {activeView === "projects" && (
                   <ViewCanvas>
                     <ProjectsView onNavigate={navigate} />
@@ -499,6 +505,7 @@ const viewIcons: Record<ViewType, React.ReactNode> = {
   run: <Play size={18} />,
   triage: <Bug size={18} />,
   corpus: <Database size={18} />,
+  binary: <Cpu size={18} />,
   settings: <Settings size={18} />,
   projects: <FolderOpen size={18} />,
   artifacts: <Boxes size={18} />,

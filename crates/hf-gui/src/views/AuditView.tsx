@@ -2,7 +2,8 @@ import { useCallback, useEffect, useState } from "react";
 import { getTransport, onDataChanged } from "../lib";
 import { useI18n } from "../i18nContext";
 import { useProject } from "../providers/project";
-import { ViewHeader, EmptyState, Button } from "../components/ui";
+import { ViewHeader, EmptyState, Button, Select } from "../components/ui";
+import { AUDIT_LIMITS, DEFAULT_AUDIT_LIMIT } from "../lib/paritySettings";
 import { PolicyDecisionList, type PolicyDecision } from "../components/PolicyDecisionList";
 import { RotateCcw, AlertTriangle, ScrollText } from "lucide-react";
 
@@ -35,6 +36,7 @@ export function AuditView() {
   const [scope, setScope] = useState<"all" | "project">(activeProject ? "project" : "all");
   const [events, setEvents] = useState<AutoRevertEvent[]>([]);
   const [decisions, setDecisions] = useState<PolicyDecision[]>([]);
+  const [limit, setLimit] = useState(DEFAULT_AUDIT_LIMIT);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -52,7 +54,7 @@ export function AuditView() {
       // Decisions are not project-scoped in the service: the guardrail trail
       // records actions that have no project, so scoping would silently drop
       // them.
-      getTransport().invoke<PolicyDecision[]>("policy_decisions", { limit: 200 }),
+      getTransport().invoke<PolicyDecision[]>("policy_decisions", { limit }),
     ]);
 
     if (eventsResult.status === "fulfilled") {
@@ -76,7 +78,7 @@ export function AuditView() {
     setError(failures.length > 0 ? failures.join(" ") : null);
 
     setLoading(false);
-  }, [scope, activeProject, t]);
+  }, [scope, activeProject, limit, t]);
 
   useEffect(() => {
     queueMicrotask(() => void load());
@@ -109,7 +111,16 @@ export function AuditView() {
 
       <div className="flex flex-col gap-2">
         <h3 className="text-sm font-medium">{t("audit.decisionsTitle")}</h3>
-        <div className="text-xs text-text-muted">{t("audit.decisionsAllProjects")}</div>
+        <div className="flex flex-wrap items-center gap-2 text-xs text-text-muted">
+          <span>{t("audit.decisionsAllProjects")}</span>
+          <span>{t("audit.decisionLimitLabel")}</span>
+          <Select
+            ariaLabel={t("audit.decisionLimit")}
+            value={String(limit)}
+            onChange={(value) => setLimit(Number(value))}
+            options={AUDIT_LIMITS.map((n) => ({ value: String(n), label: String(n) }))}
+          />
+        </div>
         {loading ? (
           <div className="text-xs text-text-muted">{t("audit.loading")}</div>
         ) : (

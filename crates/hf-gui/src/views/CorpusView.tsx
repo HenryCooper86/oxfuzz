@@ -1,6 +1,8 @@
+import "../i18n.parityAnalysis";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fileRowName } from "../lib/publicPaths";
-import { Database, FolderOpen, Plus, Scissors, Sparkles, Sprout } from "lucide-react";
+import { Database, FolderOpen, Plus, Scissors, Sparkles, Sprout, Waypoints } from "lucide-react";
+import { CoverageSummaryPanel } from "../components/CoverageSummaryPanel";
 import { CoverageBlockerPanel } from "../components/CoverageBlockerPanel";
 import { PathActions } from "../components/PathActions";
 import { Button, Input, ViewHeader } from "../components/ui";
@@ -9,6 +11,7 @@ import { getTransport, isTauriEnvironment, onDataChanged, pickFolder } from "../
 import { useConfirm } from "../providers/confirm";
 import { useProject } from "../providers/project";
 import { useTarget } from "../providers/target";
+import { concolicUnavailableReason, type ConcolicOutcome, type ReductionOutcome as ParityReduction, type SeedRegenerationOutcome } from "../lib/parityAnalysis";
 import type { CorpusEntry, ViewType } from "../types";
 
 interface CorpusCapability { available: boolean; reason_code: string | null; reason: string | null }
@@ -40,6 +43,9 @@ function CorpusWorkspace({ project, target, lang, embedded }: { project: string;
   const [notice, setNotice] = useState<string | null>(null);
   const [importSource, setImportSource] = useState("");
   const [survival, setSurvival] = useState<SurvivalReport | null>(null);
+  // null until the service answers; an unavailable answer carries its reason.
+  const [concolicReason, setConcolicReason] = useState<string | null | undefined>(undefined);
+  const [coverageRefresh, setCoverageRefresh] = useState(0);
   const mounted = useRef(true);
   const hasInventory = useRef(false);
   const listGeneration = useRef(0);
@@ -104,6 +110,14 @@ function CorpusWorkspace({ project, target, lang, embedded }: { project: string;
       return false;
     }
   }, [project, target]);
+
+  useEffect(() => {
+    let active = true;
+    Promise.resolve().then(() => getTransport().invoke<unknown>("concolic_availability"))
+      .then((answer) => { if (active) setConcolicReason(concolicUnavailableReason(answer)); })
+      .catch((caught: unknown) => { if (active) setConcolicReason(String(caught)); });
+    return () => { active = false; };
+  }, []);
 
   const refreshScope = useCallback(async () => {
     await Promise.all([refreshList(), refreshCapabilities()]);
@@ -212,6 +226,7 @@ function CorpusWorkspace({ project, target, lang, embedded }: { project: string;
   const pruneCapability = capabilities?.coverage_prune;
   const minimizeCapability = capabilities?.minimize;
   const capabilityReason = (capability: CorpusCapability | undefined) => capability?.reason ?? (capabilityStatus === "loading" ? t("corpus.capabilitiesLoading") : t("corpus.unavailable"));
+  const parityReduction = (label: string) => (result: ParityReduction) => setNotice(t("parity.analysis.corpus.reduced", { op: label, before: result.before, after: result.after, beforeBytes: result.before_bytes, afterBytes: result.after_bytes }));
   const reductionNotice = (result: ReductionOutcome) => setNotice(t("corpus.reductionResult", { before: result.before, after: result.after, beforeBytes: result.before_bytes, afterBytes: result.after_bytes }));
 
   return (
@@ -246,10 +261,19 @@ function CorpusWorkspace({ project, target, lang, embedded }: { project: string;
           <ActionButton icon={<Scissors size={14} />} label={t("corpus.pruneCoverage")} loading={loading === "corpus_prune_coverage"} disabled={!target || busy || capabilityStatus !== "ready" || !pruneCapability?.available} title={capabilityReason(pruneCapability)} onClick={() => void runOperation<ReductionOutcome>({ command: "corpus_prune_coverage", refresh: true, confirmation: { title: t("corpus.pruneCoverageConfirmTitle"), message: t("corpus.pruneCoverageConfirmMessage"), label: t("corpus.pruneCoverage") }, completed: reductionNotice })} />
           <ActionButton icon={<Scissors size={14} />} label={t("corpus.minimize")} loading={loading === "corpus_minimize"} disabled={!target || busy || capabilityStatus !== "ready" || !minimizeCapability?.available} title={capabilityReason(minimizeCapability)} onClick={() => void runOperation<ReductionOutcome>({ command: "corpus_minimize", refresh: true, confirmation: { title: t("corpus.minimizeConfirmTitle"), message: t("corpus.minimizeConfirmMessage"), label: t("corpus.minimize") }, completed: reductionNotice })} />
         </div>
+        <div className="text-xs text-text-muted">{t("parity.analysis.corpus.moreHelp")}</div>
+        <div className="flex flex-wrap gap-2">
+          <ActionButton icon={<Scissors size={14} />} label={t("parity.analysis.corpus.aflCmin")} loading={loading === "corpus_afl_cmin"} disabled={!target || busy} onClick={() => void runOperation<ParityReduction>({ command: "corpus_afl_cmin", refresh: true, confirmation: { title: t("parity.analysis.corpus.aflCminConfirmTitle"), message: t("parity.analysis.corpus.aflCminConfirmMessage"), label: t("parity.analysis.corpus.aflCmin") }, completed: parityReduction("afl-cmin") })} />
+          <ActionButton icon={<Sprout size={14} />} label={t("parity.analysis.corpus.regen")} loading={loading === "corpus_regenerate_dead_seeds"} disabled={!target || busy} onClick={() => void runOperation<SeedRegenerationOutcome>({ command: "corpus_regenerate_dead_seeds", args: { lang }, refresh: true, completed: (result) => setNotice(t("parity.analysis.corpus.regenResult", { removed: result.removed_dead, requested: result.replacements_requested, added: result.replacements_added, survive: result.replacement_survives, die: result.replacement_dies_at_entry, unmeasured: result.replacement_not_measured })) })} />
+          <ActionButton icon={<Plus size={14} />} label={t("parity.analysis.corpus.absorb")} loading={loading === "corpus_absorb_crashes"} disabled={!target || busy} onClick={() => void runOperation<number>({ command: "corpus_absorb_crashes", refresh: true, completed: (count) => setNotice(t("parity.analysis.corpus.absorbResult", { n: count })) })} />
+          <ActionButton icon={<Waypoints size={14} />} label={t("parity.analysis.corpus.concolic")} loading={loading === "corpus_concolic"} disabled={!target || busy || concolicReason !== null} title={concolicReason === undefined ? t("parity.analysis.corpus.concolicChecking") : concolicReason ? t("parity.analysis.corpus.concolicUnavailable", { reason: concolicReason }) : undefined} onClick={() => void runOperation<ConcolicOutcome>({ command: "corpus_concolic", refresh: true, completed: (result) => { setCoverageRefresh((value) => value + 1); setNotice(t("parity.analysis.corpus.concolicResult", { explored: result.inputs_explored, skipped: result.inputs_skipped, solved: result.inputs_solved, novel: result.inputs_novel, before: result.corpus_size_before, after: result.corpus_size_after, reason: result.stop_reason })); } })} />
+        </div>
+        {concolicReason && <p className="text-xs text-text-muted m-0">{t("parity.analysis.corpus.concolicUnavailable", { reason: concolicReason })}</p>}
         {capabilities && (!survivalCapability?.available || !minimizeCapability?.available) && <div className="text-xs text-text-muted">{!survivalCapability?.available && <p>{t("corpus.aflUnavailable")}: {capabilityReason(survivalCapability)}</p>}{!minimizeCapability?.available && <p>{t("corpus.libFuzzerUnavailable")}: {capabilityReason(minimizeCapability)}</p>}</div>}
         {survival && <div className="text-xs text-text-secondary"><p>{t("corpus.survivalRatio")}: {survival.survival_ratio === null ? t("corpus.unknown") : `${Math.round(survival.survival_ratio * 100)}%`}</p><p>{t("corpus.survives")}: {survival.survives}; {t("corpus.diesAtEntry")}: {survival.dies_at_entry}; {t("corpus.notMeasured")}: {survival.not_measured}</p></div>}
       </section>
 
+      {target && <CoverageSummaryPanel key={`coverage-summary:${project}:${target}`} project={project} target={target} refreshKey={coverageRefresh} />}
       {target && <div className="text-xs text-text-muted">
         {inventoryStatus === "ready" && t("corpus.inventory", { inputs: entries.length, bytes: inputBytes })}
         {inventoryStatus === "loading" && t("corpus.inventoryLoading")}

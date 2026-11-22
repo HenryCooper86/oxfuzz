@@ -30,6 +30,10 @@ describe("fuzzing settings", () => {
       "afl++",
       "honggfuzz",
       "syzkaller",
+      "go-native",
+      "atheris",
+      "jazzer",
+      "jazzer-js",
     ]);
   });
 
@@ -133,8 +137,8 @@ describe("fuzzing settings", () => {
       .toEqual(["libfuzzer"]);
     expect(enabledEngineOptions(settings, { language: "rust", includeSyzkaller: true })
       .map((item) => item.value)).toEqual(["libfuzzer"]);
-    // Go, Python, Java, and JavaScript are discoverable here; their engines
-    // are driven from the CLI only.
+    // Go, Python, Java, and JavaScript need their own engine, which this
+    // policy does not enable.
     expect(enabledEngineOptions(settings, { language: "go" })).toEqual([]);
     expect(enabledEngineOptions(settings, { language: "python" })).toEqual([]);
     expect(enabledEngineOptions(settings, { language: "java" })).toEqual([]);

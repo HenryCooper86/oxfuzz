@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { Send, Square, Loader2, Crosshair, FolderPlus, FolderOpen, ChevronDown, X, Bot, RotateCcw, History, GitBranch, Maximize2, Minimize2, Sparkles, ListChecks, Trash2 } from "lucide-react";
+import { Send, Square, Loader2, Crosshair, FolderPlus, FolderOpen, ChevronDown, X, Bot, RotateCcw, History, GitBranch, Maximize2, Minimize2, Sparkles, ListChecks, Trash2, Plus } from "lucide-react";
 import { getTransport, pickFolder } from "../lib";
 import { Button, IconButton } from "../components/ui";
 import { useToast } from "../components/ui/toastContext";
@@ -142,6 +142,7 @@ export function ChatView() {
   const [stopping, setStopping] = useState(false);
   const turnRef = useRef<RunningTurn | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [newSessionTitle, setNewSessionTitle] = useState("");
   const [loadedProject, setLoadedProject] = useState<string | null>(null);
   const sessionReady = loadedProject === activeProject;
   const projectRef = useRef(activeProject);
@@ -221,6 +222,24 @@ export function ChatView() {
 
   // Clear the current project's conversation: delete the session server-side,
   // forget the mapping, mint a fresh session, and empty the thread.
+  // Start a fresh conversation without deleting the current one. The title is
+  // optional: with none, the call is identical to the automatic session path.
+  const startNewSession = useCallback(async () => {
+    if (busy) return;
+    const projectKey = activeProject || "";
+    const title = newSessionTitle.trim();
+    try {
+      const id = await getTransport().invoke<string | null>("create_session", title ? { title } : undefined);
+      if (!id) return;
+      setSessionId(id);
+      setProjectSession(projectKey, id);
+      setMessages([]);
+      setNewSessionTitle("");
+    } catch (error) {
+      toast({ title: t("chat.newSession"), description: String(error), variant: "error" });
+    }
+  }, [busy, activeProject, newSessionTitle, toast, t]);
+
   const clearHistory = useCallback(async () => {
     if (busy) return;
     if (!(await confirm({ title: t("chat.clearHistoryTitle"), message: t("chat.clearHistoryMessage"), danger: true, confirmLabel: t("common.clear") }))) return;
@@ -820,6 +839,23 @@ export function ChatView() {
                   title={t("chat.undoLastTurn")}
                   onClick={rollbackLast}
                 />
+              )}
+              {messages.length > 0 && !busy && sessionReady && (
+                <>
+                  <input
+                    aria-label={t("chat.sessionTitle")}
+                    placeholder={t("chat.sessionTitle")}
+                    value={newSessionTitle}
+                    onChange={(e) => setNewSessionTitle(e.target.value)}
+                    className="text-xs rounded-md border border-border bg-transparent px-2 outline-none"
+                    style={{ height: "26px", width: "150px" }}
+                  />
+                  <ToolbarIconButton
+                    icon={<Plus size={16} />}
+                    title={t("chat.newSession")}
+                    onClick={() => void startNewSession()}
+                  />
+                </>
               )}
               {messages.length > 0 && !busy && sessionReady && (
                 <ToolbarIconButton

@@ -18,12 +18,24 @@ struct GatheredHealth {
 }
 
 impl ServiceContainer {
-    /// Bind the existing presentation event channel to durable health events.
-    /// The callback runs only after `SQLite` admits the event.
+    /// Add a presentation event channel for durable health events. Every
+    /// bound channel receives each event, so the desktop app and a REST
+    /// server it hosts can share one container. A callback runs only after
+    /// `SQLite` admits the event.
     pub fn bind_campaign_health_delivery(&self, delivery: super::CampaignHealthDelivery) {
-        if let Ok(mut slot) = self.campaign_health_delivery.lock() {
-            *slot = Some(delivery);
+        // A poisoned lock drops the binding; persisted events stay readable.
+        if let Ok(mut listeners) = self.campaign_health_delivery.lock() {
+            listeners.push(delivery);
         }
+    }
+
+    /// The channels currently bound, for one delivery pass.
+    fn campaign_health_listeners(&self) -> Vec<super::CampaignHealthDelivery> {
+        // A poisoned delivery lock skips live delivery; the persisted event remains readable.
+        self.campaign_health_delivery
+            .lock()
+            .map(|listeners| listeners.clone())
+            .unwrap_or_default()
     }
 
     /// Read strictly decoded retained health events for one campaign.
@@ -315,15 +327,14 @@ impl ServiceContainer {
                     }),
                 )
                 .await;
-                // A poisoned delivery lock skips live delivery; the persisted event remains readable.
-                let delivery = self
-                    .campaign_health_delivery
-                    .lock()
-                    .ok()
-                    .and_then(|slot| slot.clone());
-                if let Some(delivery) = delivery {
+                let listeners = self.campaign_health_listeners();
+                if !listeners.is_empty() {
                     match self.run_owner(event.run_id).await {
-                        Ok(owner) => delivery(owner, event.clone()),
+                        Ok(owner) => {
+                            for deliver in &listeners {
+                                deliver(owner.clone(), event.clone());
+                            }
+                        }
                         Err(error) => {
                             tracing::warn!(run_id = %event.run_id, %error, "health event owner is unavailable");
                         }
@@ -568,6 +579,15 @@ fn legacy_progress_stale_secs(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_second_health_listener_is_added_beside_the_first() {
+        let container = crate::ServiceContainer::stubbed();
+        assert!(container.campaign_health_listeners().is_empty());
+        container.bind_campaign_health_delivery(std::sync::Arc::new(|_, _| {}));
+        container.bind_campaign_health_delivery(std::sync::Arc::new(|_, _| {}));
+        assert_eq!(container.campaign_health_listeners().len(), 2);
+    }
+
     use super::*;
     use std::sync::Arc;
 

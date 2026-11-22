@@ -1,3 +1,4 @@
+import { SurfacePanels } from "../components/SurfacePanels";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getTransport } from "../lib";
 import {
@@ -28,6 +29,9 @@ import type {
 import { Button, Select, ViewHeader } from "../components/ui";
 import { ActiveProjectBar } from "../components/ActiveProjectBar";
 import { useI18n } from "../i18nContext";
+import "../i18n.parityDiscovery";
+import { ClangAnalysisPanel } from "../components/ClangAnalysisPanel";
+import { RANKING_POLICIES, type RankingPolicy } from "../lib/parityDiscovery";
 import { Crosshair, Search, Loader2, ChevronRight, ChevronDown } from "lucide-react";
 import { shouldLoadCoverage } from "../lib/discoverCoverage";
 import { waitForRankedDiscovery } from "../lib/rankedDiscovery";
@@ -50,6 +54,7 @@ export function DiscoverView({ embedded = false, onNavigate }: { embedded?: bool
   const [discoveryContext, setDiscoveryContext] =
     useState<SemgrepContext | null>(snapshot ? { project, lang } : null);
   const [loading, setLoading] = useState(false);
+  const [rankPolicy, setRankPolicy] = useState<RankingPolicy>("auto");
   const [error, setError] = useState<string | null>(null);
   const [rankingStatus, setRankingStatus] = useState<RankedDiscoveryStatus | null>(null);
   const [semgrepInventory, setSemgrepInventory] =
@@ -179,6 +184,7 @@ export function DiscoverView({ embedded = false, onNavigate }: { embedded?: bool
       const operationId = await getTransport().invoke<string>("ranked_discovery_start", {
         project,
         lang,
+        ...(rankPolicy === "auto" ? {} : { ai: rankPolicy }),
       });
       if (!mountedRef.current || sequence !== rankingSequenceRef.current) return;
       setSemgrepInventory(null);
@@ -193,7 +199,7 @@ export function DiscoverView({ embedded = false, onNavigate }: { embedded?: bool
         setLoading(false);
       }
     }
-  }, [lang, project, pollRanking]);
+  }, [lang, project, pollRanking, rankPolicy]);
 
   const retryRanking = useCallback(async () => {
     const priorId = snapshot?.rankedOperationId;
@@ -425,11 +431,19 @@ export function DiscoverView({ embedded = false, onNavigate }: { embedded?: bool
           options={[
             { value: "c", label: "C" },
             { value: "cpp", label: "C++" },
+            { value: "rust", label: "Rust" },
             { value: "go", label: "Go" },
             { value: "python", label: "Python" },
             { value: "java", label: "Java" },
             { value: "javascript", label: "JavaScript" },
           ]}
+        />
+        <Select
+          ariaLabel={t("parityDiscovery.rankPolicy")}
+          value={rankPolicy}
+          onChange={(v) => setRankPolicy(v as RankingPolicy)}
+          disabled={loading || semgrepLoading}
+          options={RANKING_POLICIES.map((policy) => ({ value: policy, label: t(`parityDiscovery.rankPolicy.${policy}`) }))}
         />
         <Button
           variant="primary"
@@ -441,6 +455,8 @@ export function DiscoverView({ embedded = false, onNavigate }: { embedded?: bool
           {loading ? t("discover.scanning") : t("discover.discover")}
         </Button>
       </div>
+      <p className="text-xs text-text-muted">{t(`parityDiscovery.rankPolicyHelp.${rankPolicy}`)}</p>
+      <ClangAnalysisPanel key={`${project}\n${lang}`} project={project} lang={lang} />
 
       {error && (
         <div
@@ -574,6 +590,7 @@ export function DiscoverView({ embedded = false, onNavigate }: { embedded?: bool
           </div>
         </div>
       )}
+      {project && <SurfacePanels project={project} lang={lang} />}
     </div>
   );
 }

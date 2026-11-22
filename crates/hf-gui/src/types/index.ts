@@ -8,6 +8,7 @@ export type ViewType =
   | "run"
   | "triage"
   | "corpus"
+  | "binary"
   | "settings"
   | "chat"
   | "projects"
@@ -691,7 +692,7 @@ export interface BuildPlan {
   sandbox_image_id: string;
 }
 export type BuildProfileState = "unconfigured" | "needs_build" | "ready" | "stale" | "invalid";
-export type ProfileBuildSystem = "cmake" | "make";
+export type ProfileBuildSystem = "cmake" | "make" | "meson" | "autotools" | "bazel";
 export interface BuildDependency { kind: "command" | "pkg_config"; name: string }
 export interface BuildProfileView {
   project_root: string;

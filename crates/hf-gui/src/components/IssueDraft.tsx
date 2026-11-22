@@ -4,15 +4,16 @@ import { getTransport, openExternal } from "../lib";
 import { useI18n } from "../i18nContext";
 import { useToast } from "./ui/toastContext";
 import { Button, Textarea } from "./ui";
+import { issueProviderLabel } from "../lib/paritySettings";
 import type { CreatedIssue, IssueExport } from "../types";
 
-/** A GitHub or GitLab issue draft for one crash: copy it, open the new-issue page, or file it. */
+/** A GitHub, GitLab or Jira issue draft for one crash: copy it, open the new-issue page, or file it. */
 export function IssueDraft({ draft, project }: { draft: IssueExport; project: string }) {
   const { toast } = useToast();
   const { t } = useI18n();
   const [copied, setCopied] = useState(false);
   const [filing, setFiling] = useState(false);
-  const providerLabel = draft.provider === "github" ? "GitHub" : "GitLab";
+  const providerLabel = issueProviderLabel(draft.provider);
 
   async function copyBody() {
     await navigator.clipboard?.writeText(`${draft.title}\n\n${draft.description}`);

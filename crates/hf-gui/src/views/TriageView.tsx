@@ -7,6 +7,8 @@ import { Button, Input, SeverityBadge, ViewHeader } from "../components/ui";
 import { FindingProofCard } from "../components/FindingProofCard";
 import { PatchToProofPanel } from "../components/PatchToProofPanel";
 import { PathActions } from "../components/PathActions";
+import { BisectPanel } from "../components/BisectPanel";
+import { TriageParityPanel } from "../components/TriageParityPanel";
 import { emitDataChanged, getTransport, isTauriEnvironment } from "../lib";
 import { useI18n } from "../i18nContext";
 import { useFindingSelection } from "../providers/findingSelection";
@@ -459,6 +461,7 @@ function ScopedTriageView({ embedded, initialRunId, onNavigate }: { embedded: bo
           </Button>}
         </div>
       </div>
+      <TriageParityPanel project={activeProject || "."} target={scanTarget} disabled={actionsBusy || isKernelRun} onTriaged={() => setReloadVersion((value) => value + 1)} />
       {message && <div className="text-xs text-text-muted">{message}</div>}
       {disabledReason && <div role="status" className="surface-card text-xs text-text-muted" style={{ padding: "var(--space-sm) var(--space-md)" }}>{disabledReason}</div>}
       <p className="text-xs text-text-secondary">{t("triage.scanScope")}</p>
@@ -602,6 +605,7 @@ function CrashDetail({ item, verdict, onVerify, actionBusy }: { item: FindingRev
       {issue && <IssueDraft draft={issue} project={item.project_root} />}
       {verifyingFix && <PatchToProofPanel key={crash.id} findingId={crash.id} runId={crash.run_id} suggestedFix={crash.bug_report?.suggested_fix ?? null} />}
     </div>
+    <BisectPanel key={crash.id} project={item.project_root} target={item.target_symbol} crashId={crash.id} />
     <details className="border-t border-border pt-3 text-xs">
       <summary className="cursor-pointer text-text-secondary">{t("triage.evidenceDetails")}</summary>
       <FindingProofCard proof={item.proof} />

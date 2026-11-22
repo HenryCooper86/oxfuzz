@@ -4,20 +4,33 @@
 //! domain logic here (Engineering Protocol 2.9). All builds and fuzz runs go through
 //! `hf-runtime` sandboxing (Engineering Protocol 2.12).
 
-#[cfg(test)]
+// The desktop test fixture writes a config that enables function coverage,
+// which the service accepts only with `proof-carrying`.
+#[cfg(all(test, feature = "proof-carrying"))]
 mod ai_policy_ipc_tests;
-#[cfg(test)]
+#[cfg(all(test, feature = "proof-carrying"))]
 mod approval_ipc_tests;
 mod closeout_commands;
 mod commands;
-#[cfg(test)]
+#[cfg(all(test, feature = "proof-carrying"))]
 mod history_ipc_tests;
+mod parity_analysis;
+#[cfg(feature = "binary-only-fuzzing")]
+mod parity_binary;
+mod parity_discovery;
+mod parity_harness;
+#[cfg(all(test, feature = "proof-carrying"))]
+mod parity_ipc_tests;
+mod parity_run;
+mod parity_settings;
 #[cfg(feature = "ai-target-ranking")]
 mod ranked_discovery_commands;
+#[cfg(feature = "rest-server")]
+mod rest_server;
 mod state;
 mod work_order_commands;
 mod workflow_approval;
-#[cfg(test)]
+#[cfg(all(test, feature = "proof-carrying"))]
 mod workflow_approval_tests;
 
 #[cfg(feature = "ai-target-ranking")]
@@ -103,246 +116,13 @@ pub fn run() {
             return;
         }
     };
-    let builder = tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_opener::init())
-        .manage(app_state)
-        .invoke_handler(tauri::generate_handler![
-            discover,
-            #[cfg(feature = "ai-target-ranking")]
-            ranked_discovery_start,
-            #[cfg(feature = "ai-target-ranking")]
-            ranked_discovery_status,
-            #[cfg(feature = "ai-target-ranking")]
-            ranked_discovery_result,
-            #[cfg(feature = "ai-target-ranking")]
-            ranked_discovery_cancel,
-            #[cfg(feature = "ai-target-ranking")]
-            ranked_discovery_retry,
-            semgrep_available,
-            #[cfg(feature = "semgrep-enrichment")]
-            semgrep_enrich,
-            #[cfg(feature = "semgrep-enrichment")]
-            semgrep_status,
-            #[cfg(feature = "semgrep-enrichment")]
-            semgrep_cancel,
-            open_folder_dialog,
-            open_file_dialog,
-            harness_draft,
-            harness_compile,
-            attach_managed_mutator,
-            managed_mutator_status,
-            harness_smoke,
-            harness_promote,
-            harness_promote_with_findings,
-            work_order_export,
-            work_order_list,
-            work_order_get,
-            work_order_import,
-            work_order_submissions,
-            work_order_qualify,
-            work_order_attempts,
-            work_order_attempt,
-            work_order_rank,
-            work_order_promote,
-            generate_seeds,
-            generate_seeds_llm,
-            corpus_list,
-            corpus_seed,
-            corpus_grow,
-            corpus_prune,
-            corpus_import,
-            seed_survival,
-            corpus_prune_coverage,
-            corpus_minimize,
-            corpus_capabilities,
-            all_crashes,
-            all_corpus,
-            triage,
-            scan_crashes,
-            cancel_crash_scan,
-            verify_crash,
-            system_status_cmd,
-            setup_readiness,
-            setup_providers,
-            initialize_provider,
-            ensure_docker,
-            app_paths,
-            host_arch,
-            list_models,
-            get_fuzzing_settings,
-            get_automotive_settings,
-            set_automotive_settings,
-            automotive_capabilities,
-            automotive_analyze_capture,
-            automotive_generate_mutations,
-            automotive_build_replay_plan,
-            automotive_execute_replay,
-            automotive_mint_approval,
-            list_automotive_operations,
-            promote_automotive_state_artifact,
-            list_automotive_state_corpus,
-            generate_automotive_report,
-            automotive_import_capture,
-            automotive_diff_captures,
-            automotive_live_monitor,
-            automotive_scan_uds,
-            get_defectdojo_config,
-            patch_defectdojo_config,
-            get_issue_tracker_config,
-            patch_issue_tracker_config,
-            get_providers,
-            set_providers,
-            provider_test,
-            read_config,
-            write_config,
-            model_budget_view,
-            config_toml_to_value,
-            config_value_to_toml,
-            run_function_coverage,
-            run_harness_behavior,
-            replay_review,
-            replay_run,
-            run_fuzzer,
-            run_syzkaller,
-            cancel_run,
-            run_owner,
-            #[cfg(feature = "campaign-health")]
-            campaign_health_report,
-            #[cfg(feature = "campaign-health")]
-            campaign_telemetry,
-            #[cfg(feature = "campaign-health")]
-            campaign_health_events,
-            #[cfg(feature = "campaign-health")]
-            morning_health_summary,
-            generate_report,
-            export_report,
-            export_repro,
-            run_comparison,
-            allocation_candidates,
-            allocation_status,
-            allocation_propose,
-            allocation_review,
-            campaign_evidence,
-            export_remediation_draft,
-            automotive_lab_coverage,
-            automotive_lab_plan,
-            automotive_lab_simulate,
-            automotive_lab_reset,
-            build_diagnose,
-            build_profile,
-            build_profile_set,
-            build_profile_clear,
-            build_history,
-            harness_tournament,
-            coverage_blockers,
-            oracle_scaffold,
-            oracle_violation,
-            build_run,
-            change_impact,
-            change_compare,
-            change_publish,
-            create_remediation_operation,
-            approve_remediation_operation,
-            start_remediation_verification,
-            remediation_operation,
-            finding_proof_card_for_crash,
-            finding_review_queue,
-            finding_review,
-            export_markdown,
-            export_project_data,
-            report_formats,
-            reveal_path,
-            open_url,
-            open_defectdojo,
-            run_history,
-            run_coverage_series,
-            run_harness_source,
-            run_closeout_report,
-            run_closeout,
-            revert_harness_from_run,
-            project_auto_revert_override,
-            project_auto_revert_overrides,
-            effective_auto_revert_policy,
-            auto_revert_events,
-            policy_decisions,
-            set_project_auto_revert_override,
-            clear_project_auto_revert_override,
-            chat_agent,
-            create_session,
-            delete_session,
-            chat_answer_permission,
-            chat_cancel,
-            chat_rollback,
-            chat_checkpoints,
-            chat_rollback_to,
-            chat_branch,
-            chat_branches,
-            coverage_functions,
-            chat_history,
-            knowledge_summary,
-            clear_knowledge,
-            clear_workspace,
-            delete_project,
-            delete_crash,
-            delete_corpus_entry,
-            clear_all_artifacts,
-            delete_run,
-            clear_all_runs,
-            diagnostics_cost_summary,
-            artifact_summary,
-            system_snapshot,
-            workbench_dashboard,
-            harness_review_queue,
-            harness_active_review,
-            issue_export,
-            file_issue,
-            issue_tracker_test_connection,
-            defectdojo_configured,
-            defectdojo_embed,
-            defectdojo_embed_close,
-            defectdojo_embed_reload,
-            defectdojo_status,
-            defectdojo_start,
-            defectdojo_stop,
-            defectdojo_test_connection,
-            push_to_defectdojo,
-            list_report_drafts,
-            save_report_draft,
-            delete_report_draft,
-            push_report_to_defectdojo,
-            interrupted_runs,
-            dismiss_interrupted_run,
-            schedule_list,
-            schedule_recovery_list,
-            schedule_recovery_acknowledge,
-            schedule_history,
-            schedule_history_clear,
-            schedule_targets,
-            schedule_runtime,
-            export_sarif,
-            fuzz_prepare,
-            schedule_arm,
-            schedule_disarm,
-            schedule_concurrency_limits,
-            schedule_concurrency_set,
-            schedule_create,
-            schedule_delete,
-            schedule_set_enabled,
-            knowledge_index,
-            knowledge_ingest,
-            knowledge_search,
-            knowledge_stats,
-            agent_info,
-            list_skills,
-            read_skill,
-            save_skill,
-            delete_skill,
-            list_agents,
-            agent_tools,
-            save_agent,
-            delete_agent,
-        ]);
+    let builder = with_rest_server(
+        tauri::Builder::default()
+            .plugin(tauri_plugin_dialog::init())
+            .plugin(tauri_plugin_opener::init())
+            .manage(app_state),
+    )
+    .invoke_handler(command_handler());
     configure_application_setup(builder, |app| {
         let main_window = app.get_webview_window("main").expect("no main window");
 
@@ -398,6 +178,310 @@ pub fn run() {
     .expect("error while running oxfuzz GUI");
 }
 
+/// Every command the webview may invoke.
+fn command_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
+    tauri::generate_handler![
+        discover,
+        #[cfg(feature = "ai-target-ranking")]
+        ranked_discovery_start,
+        #[cfg(feature = "ai-target-ranking")]
+        ranked_discovery_status,
+        #[cfg(feature = "ai-target-ranking")]
+        ranked_discovery_result,
+        #[cfg(feature = "ai-target-ranking")]
+        ranked_discovery_cancel,
+        #[cfg(feature = "ai-target-ranking")]
+        ranked_discovery_retry,
+        semgrep_available,
+        #[cfg(feature = "semgrep-enrichment")]
+        semgrep_enrich,
+        #[cfg(feature = "semgrep-enrichment")]
+        semgrep_status,
+        #[cfg(feature = "semgrep-enrichment")]
+        semgrep_cancel,
+        open_folder_dialog,
+        open_file_dialog,
+        harness_draft,
+        harness_compile,
+        attach_managed_mutator,
+        managed_mutator_status,
+        harness_smoke,
+        harness_promote,
+        harness_promote_with_findings,
+        work_order_export,
+        work_order_list,
+        work_order_get,
+        work_order_import,
+        work_order_submissions,
+        work_order_qualify,
+        work_order_attempts,
+        work_order_attempt,
+        work_order_rank,
+        work_order_promote,
+        generate_seeds,
+        generate_seeds_llm,
+        corpus_list,
+        corpus_seed,
+        corpus_grow,
+        corpus_prune,
+        corpus_import,
+        seed_survival,
+        corpus_prune_coverage,
+        corpus_minimize,
+        corpus_capabilities,
+        all_crashes,
+        all_corpus,
+        triage,
+        scan_crashes,
+        cancel_crash_scan,
+        verify_crash,
+        system_status_cmd,
+        setup_readiness,
+        setup_providers,
+        initialize_provider,
+        ensure_docker,
+        app_paths,
+        host_arch,
+        list_models,
+        get_fuzzing_settings,
+        get_automotive_settings,
+        set_automotive_settings,
+        automotive_capabilities,
+        automotive_analyze_capture,
+        automotive_generate_mutations,
+        automotive_build_replay_plan,
+        automotive_execute_replay,
+        automotive_mint_approval,
+        list_automotive_operations,
+        promote_automotive_state_artifact,
+        list_automotive_state_corpus,
+        generate_automotive_report,
+        automotive_import_capture,
+        automotive_diff_captures,
+        automotive_live_monitor,
+        automotive_scan_uds,
+        get_defectdojo_config,
+        patch_defectdojo_config,
+        get_issue_tracker_config,
+        patch_issue_tracker_config,
+        get_providers,
+        set_providers,
+        provider_test,
+        read_config,
+        write_config,
+        model_budget_view,
+        config_toml_to_value,
+        config_value_to_toml,
+        run_function_coverage,
+        run_harness_behavior,
+        replay_review,
+        replay_run,
+        run_fuzzer,
+        run_syzkaller,
+        cancel_run,
+        run_owner,
+        #[cfg(feature = "campaign-health")]
+        campaign_health_report,
+        #[cfg(feature = "campaign-health")]
+        campaign_telemetry,
+        #[cfg(feature = "campaign-health")]
+        campaign_health_events,
+        #[cfg(feature = "campaign-health")]
+        morning_health_summary,
+        generate_report,
+        export_report,
+        export_repro,
+        run_comparison,
+        allocation_candidates,
+        allocation_status,
+        allocation_propose,
+        allocation_review,
+        campaign_evidence,
+        export_remediation_draft,
+        automotive_lab_coverage,
+        automotive_lab_plan,
+        automotive_lab_simulate,
+        automotive_lab_reset,
+        build_diagnose,
+        build_profile,
+        build_profile_set,
+        build_profile_clear,
+        build_history,
+        harness_tournament,
+        coverage_blockers,
+        oracle_scaffold,
+        oracle_violation,
+        build_run,
+        change_impact,
+        change_compare,
+        change_publish,
+        create_remediation_operation,
+        approve_remediation_operation,
+        start_remediation_verification,
+        remediation_operation,
+        finding_proof_card_for_crash,
+        finding_review_queue,
+        finding_review,
+        export_markdown,
+        export_project_data,
+        report_formats,
+        reveal_path,
+        open_url,
+        open_defectdojo,
+        run_history,
+        run_coverage_series,
+        run_harness_source,
+        run_closeout_report,
+        run_closeout,
+        revert_harness_from_run,
+        project_auto_revert_override,
+        project_auto_revert_overrides,
+        effective_auto_revert_policy,
+        auto_revert_events,
+        policy_decisions,
+        set_project_auto_revert_override,
+        clear_project_auto_revert_override,
+        chat_agent,
+        create_session,
+        delete_session,
+        chat_answer_permission,
+        chat_cancel,
+        chat_rollback,
+        chat_checkpoints,
+        chat_rollback_to,
+        chat_branch,
+        chat_branches,
+        coverage_functions,
+        chat_history,
+        knowledge_summary,
+        clear_knowledge,
+        clear_workspace,
+        delete_project,
+        delete_crash,
+        delete_corpus_entry,
+        clear_all_artifacts,
+        delete_run,
+        clear_all_runs,
+        diagnostics_cost_summary,
+        artifact_summary,
+        system_snapshot,
+        workbench_dashboard,
+        harness_review_queue,
+        harness_active_review,
+        issue_export,
+        file_issue,
+        issue_tracker_test_connection,
+        defectdojo_configured,
+        defectdojo_embed,
+        defectdojo_embed_close,
+        defectdojo_embed_reload,
+        defectdojo_status,
+        defectdojo_start,
+        defectdojo_stop,
+        defectdojo_test_connection,
+        push_to_defectdojo,
+        list_report_drafts,
+        save_report_draft,
+        delete_report_draft,
+        push_report_to_defectdojo,
+        interrupted_runs,
+        dismiss_interrupted_run,
+        schedule_list,
+        schedule_recovery_list,
+        schedule_recovery_acknowledge,
+        schedule_history,
+        schedule_history_clear,
+        schedule_targets,
+        schedule_runtime,
+        export_sarif,
+        fuzz_prepare,
+        schedule_arm,
+        schedule_disarm,
+        schedule_concurrency_limits,
+        schedule_concurrency_set,
+        schedule_create,
+        schedule_delete,
+        schedule_set_enabled,
+        knowledge_index,
+        knowledge_ingest,
+        knowledge_search,
+        knowledge_stats,
+        agent_info,
+        list_skills,
+        read_skill,
+        save_skill,
+        delete_skill,
+        list_agents,
+        agent_tools,
+        save_agent,
+        delete_agent,
+        parity_harness::harness_refine,
+        parity_harness::harness_adopt_revision,
+        parity_harness::harness_smoke_with_options,
+        #[cfg(feature = "managed-mutators")]
+        parity_harness::grammar_mutator_source,
+        #[cfg(feature = "managed-mutators")]
+        parity_harness::attach_grammar_mutator,
+        parity_run::run_campaign,
+        parity_run::run_ci_gate,
+        parity_run::save_text_file,
+        parity_run::user_dictionary,
+        parity_run::set_user_dictionary,
+        parity_run::clear_user_dictionary,
+        parity_run::fuzzing_preflight,
+        #[cfg(feature = "binary-only-fuzzing")]
+        parity_binary::binary_fuzz,
+        #[cfg(feature = "binary-only-fuzzing")]
+        parity_binary::binary_issue_export,
+        #[cfg(feature = "binary-only-fuzzing")]
+        parity_binary::binary_file_issue,
+        #[cfg(feature = "crash-bisection")]
+        parity_analysis::bisect_crash,
+        parity_analysis::verify_regressions,
+        parity_analysis::corpus_afl_cmin,
+        parity_analysis::corpus_regenerate_dead_seeds,
+        parity_analysis::corpus_absorb_crashes,
+        #[cfg(feature = "concolic-enrichment")]
+        parity_analysis::concolic_availability,
+        #[cfg(feature = "concolic-enrichment")]
+        parity_analysis::corpus_concolic,
+        parity_analysis::coverage_summary,
+        parity_analysis::export_coverage_line_report,
+        #[cfg(feature = "unreached-surface")]
+        parity_analysis::unreached_surface,
+        #[cfg(feature = "unreached-surface")]
+        parity_analysis::coverage_attribution,
+        #[cfg(feature = "campaign-trust")]
+        parity_analysis::campaign_trust_report,
+        #[cfg(feature = "run-closeout")]
+        parity_analysis::run_edge_diff,
+        #[cfg(feature = "run-closeout")]
+        parity_analysis::capture_run_edges,
+        #[cfg(feature = "crash-alerts")]
+        parity_settings::notifications_test,
+        #[cfg(feature = "crash-alerts")]
+        parity_settings::notify_latest_run,
+        parity_settings::thaw_provider,
+        parity_discovery::clang_available,
+        #[cfg(feature = "rest-server")]
+        rest_server::rest_server_start,
+        #[cfg(feature = "rest-server")]
+        rest_server::rest_server_stop,
+        #[cfg(feature = "rest-server")]
+        rest_server::rest_server_status,
+        #[cfg(feature = "clang-analysis")]
+        parity_discovery::clang_analysis_start,
+        #[cfg(feature = "clang-analysis")]
+        parity_discovery::clang_analysis_status,
+        #[cfg(feature = "clang-analysis")]
+        parity_discovery::clang_analysis_result,
+        #[cfg(feature = "clang-analysis")]
+        parity_discovery::clang_analysis_cancel,
+        parity_discovery::run_detail,
+        parity_discovery::remote_schedule_arm,
+    ]
+}
+
 fn configure_application_setup<R, F>(builder: tauri::Builder<R>, setup: F) -> tauri::Builder<R>
 where
     R: tauri::Runtime,
@@ -419,6 +503,18 @@ where
         }
         setup(app)
     })
+}
+
+/// Give the app the state of the REST server it can host.
+#[cfg(feature = "rest-server")]
+fn with_rest_server<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
+    builder.manage(rest_server::RestServerState::default())
+}
+
+/// A build without the REST server has no state for it.
+#[cfg(not(feature = "rest-server"))]
+fn with_rest_server<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
+    builder
 }
 
 /// Build the `AppState` from the canonical [`hf_service::ServiceContainer::bootstrap`]:

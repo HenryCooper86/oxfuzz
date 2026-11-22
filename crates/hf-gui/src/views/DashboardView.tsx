@@ -8,7 +8,6 @@ import {
   Bug,
   CheckCircle2,
   ChevronRight,
-  Clipboard,
   Copy,
   FileCode,
   FileText,
@@ -523,6 +522,7 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
             <ReproCenter
               project={activeProject}
               crashes={dashboard.crash_reviews}
+              onOpenTriage={onNavigate ? () => onNavigate("triage") : undefined}
             />
           )}
           {tab === "team" && (
@@ -821,9 +821,11 @@ function CrashCard({ crash, onExport, onOpen }: { crash: CrashReviewItem; onExpo
 function ReproCenter({
   project,
   crashes,
+  onOpenTriage,
 }: {
   project: string;
   crashes: CrashReviewItem[];
+  onOpenTriage?: () => void;
 }) {
   const { t } = useI18n();
   return (
@@ -835,23 +837,17 @@ function ReproCenter({
       ) : (
         <div className="flex flex-col gap-3">
           {crashes.map((crash) => {
-            const target = crash.target_symbol;
-            const command = project
-              ? `oxfuzz regress ${shellQuote(project)} --target ${shellQuote(target)}`
-              : t("dashboard.selectProjectForCommand");
             return (
               <div key={crash.crash_id} className="rounded-md border border-border" style={{ padding: "var(--space-md)", background: "var(--surface-secondary)" }}>
                 <div className="flex items-center justify-between gap-3">
                   <span className="text-sm font-medium truncate">{crash.target_symbol}</span>
                   <StatusBadge value={t(crash.minimized ? "dashboard.minimized" : "dashboard.rawInput")} />
                 </div>
-                <code className="block text-xs font-mono mt-3 p-2 rounded-md whitespace-pre-wrap" style={{ background: "var(--surface-code)", color: "var(--text-secondary)" }}>
-                  {command}
-                </code>
+                <p className="text-xs text-text-muted mt-3 m-0">{t("parity.analysis.dashboard.replayPointer")}</p>
                 <div className="flex justify-end mt-2">
-                  <Button variant="outline" size="sm" onClick={() => copyText(command)} disabled={!project}>
-                    <Clipboard size={13} />
-                    {t("dashboard.copyCommand")}
+                  <Button variant="outline" size="sm" onClick={onOpenTriage} disabled={!project || !onOpenTriage}>
+                    <Play size={13} />
+                    {t("parity.analysis.dashboard.openTriage")}
                   </Button>
                 </div>
               </div>
@@ -997,6 +993,9 @@ function HealthPanel({ status, dashboard }: { status: SystemStatus | null; dashb
     ["AFL++", status?.aflplusplus],
     ["honggfuzz", status?.honggfuzz],
     ["syzkaller", status?.syzkaller],
+    ["Atheris", status?.atheris],
+    ["Jazzer", status?.jazzer],
+    ["Jazzer.js", status?.jazzer_js],
   ] as const;
   return (
     <section className="surface-card flex flex-col gap-4" style={{ padding: "var(--space-md)" }}>
@@ -1453,11 +1452,6 @@ function formatDate(value: string): string {
 
 function shortId(id: string): string {
   return id.slice(0, 8);
-}
-
-function shellQuote(value: string): string {
-  if (/^[A-Za-z0-9_./:-]+$/.test(value)) return value;
-  return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
 async function copyText(value: string) {

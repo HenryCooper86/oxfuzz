@@ -80,6 +80,7 @@ pub mod repro;
 pub mod run_closeout;
 mod run_history_error;
 pub use run_history_error::RunHistoryError;
+pub mod remote_arm;
 pub mod run_comparison;
 pub mod sarif;
 mod schedule_retirement;

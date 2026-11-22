@@ -6,6 +6,7 @@ export type SectionId =
   | "storage"
   | "integrations"
   | "issuetracker"
+  | "notifications"
   | "about";
 
 export interface SettingsSectionDefinition {
@@ -24,5 +25,6 @@ export const SETTINGS_SECTION_DEFINITIONS: readonly SettingsSectionDefinition[] 
   { id: "storage", label: "Storage", config: null },
   { id: "integrations", label: "Integrations", config: "defectdojo" },
   { id: "issuetracker", label: "Issue Tracker", config: "issue_tracker" },
+  { id: "notifications", label: "Notifications", config: null },
   { id: "about", label: "About", config: null },
 ];

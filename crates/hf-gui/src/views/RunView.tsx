@@ -1,3 +1,4 @@
+import "../i18n.parityRun";
 import { useState, useEffect, useRef } from "react";
 import { engineDisplayName } from "../lib/harnessScope";
 import { formatRunStat } from "../lib/runStats";
@@ -24,6 +25,12 @@ import { FuzzingPolicyNotice } from "../components/FuzzingPolicyNotice";
 import { TargetSelectionRepairNotice } from "../components/TargetSelectionRepairNotice";
 import { canonicalHarnessEngine, matchesTargetSelection } from "../lib/harnessScope";
 import { projectStorageKey } from "../lib/projectState";
+import { DEFAULT_RUN_OPTIONS, buildRunOptions, runOptionsError, type RunOptionsState } from "../lib/parityRun";
+import { RunOptionsFields } from "../components/RunOptionsFields";
+import { DictionaryPanel } from "../components/DictionaryPanel";
+import { CampaignPanel } from "../components/CampaignPanel";
+import { CiGatePanel } from "../components/CiGatePanel";
+import { PreflightPanel } from "../components/PreflightPanel";
 
 export function RunView({
   embedded = false,
@@ -42,6 +49,7 @@ export function RunView({
     engine: selectedEngine,
     setEngine,
     compiled,
+    lang: targetLang,
     selectionRepair,
     storageError,
     canResetTargetSelections,
@@ -104,8 +112,12 @@ export function RunView({
   const [sshKey, setSshKey] = useState("");
   const [managerCfg, setManagerCfg] = useState("");
   const [vmCount, setVmCount] = useState("2");
+  const [kernelArch, setKernelArch] = useState<string | null>(null);
+  const [runOptions, setRunOptions] = useState<RunOptionsState>(DEFAULT_RUN_OPTIONS);
 
   const isSyz = engine === "syzkaller";
+  const maxCpus = fuzzingSettings?.sandbox.max_cpus ?? null;
+  const runOptionsInvalid = !isSyz && runOptionsError(runOptions, { maxCpus }) !== null;
   const hasRunMetrics = liveStats.edges !== null || liveStats.currentExecs !== null || liveStats.meanExecs !== null || liveStats.peakExecs !== null || liveStats.rawCrashSignals !== null;
 
   // Target and engine are sourced directly from the shared validated context,
@@ -154,7 +166,7 @@ export function RunView({
   }, [project, target, engine, isSyz, selectionBlocked, summary]);
 
   async function run() {
-    if (selectionBlocked || !validDuration) return;
+    if (selectionBlocked || !validDuration || runOptionsInvalid) return;
     const policy = fuzzingSettings;
     if (!policy) return;
     if (!project) return;
@@ -165,7 +177,7 @@ export function RunView({
       const crashes = isSyz
         ? await runSyzkaller({
             project,
-            arch: sandboxArch,
+            arch: kernelArch ?? sandboxArch,
             duration: durationSeconds,
             kernel_image: kernelImage || null,
             disk_image: diskImage || null,
@@ -178,6 +190,7 @@ export function RunView({
             target,
             engine,
             duration: durationSeconds,
+            ...buildRunOptions(runOptions, engine),
           });
       markDone("run", project);
       // If the run found no crashes, there is nothing to triage.
@@ -301,6 +314,31 @@ export function RunView({
               onChange={(e) => setVmCount(e.target.value)}
             />
           </div>
+          <div className="flex flex-col gap-1" style={{ maxWidth: "260px" }}>
+            <Label>{t("run.kernelArch")}</Label>
+            <Select
+              ariaLabel={t("run.kernelArch")}
+              value={kernelArch ?? sandboxArch}
+              onChange={setKernelArch}
+              options={[
+                { value: "linux/arm64", label: "arm64 (linux/arm64)" },
+                { value: "linux/amd64", label: "amd64 (linux/amd64)" },
+              ]}
+            />
+            <span className="text-xs text-text-muted">{t("run.kernelArchHelp")}</span>
+          </div>
+        </div>
+      )}
+
+      {!isSyz && (
+        <div className="surface-card" style={{ padding: "var(--space-md)" }}>
+          <RunOptionsFields
+            value={runOptions}
+            onChange={setRunOptions}
+            engine={engine}
+            maxCpus={maxCpus}
+            disabled={running}
+          />
         </div>
       )}
 
@@ -316,7 +354,7 @@ export function RunView({
           variant="primary"
           className="self-start"
           onClick={run}
-          disabled={selectionBlocked || !validDuration || !fuzzingSettings || running || !project || (!isSyz && (!target || !harnessBuilt || !harnessApproved))}
+          disabled={selectionBlocked || !validDuration || runOptionsInvalid || !fuzzingSettings || running || !project || (!isSyz && (!target || !harnessBuilt || !harnessApproved))}
           loading={running}
         >
           {!running && <Play size={14} />}
@@ -504,6 +542,33 @@ export function RunView({
           {healthEvents.map((event) => <div key={event.id} className="text-xs" style={{ color: event.severity === "error" ? "var(--error)" : "var(--warning, #d9a441)" }}>{event.condition}: {event.detail}</div>)}
           {loadOlderHealthEvents && healthState?.hasOlder && <Button disabled={healthState.loading} variant="ghost" size="sm" onClick={() => void loadOlderHealthEvents()}>{t("run.loadOlderHealth")}</Button>}
         </section>
+      )}
+
+      {project && fuzzingSettings && (
+        <div className="flex flex-col gap-3">
+          <PreflightPanel engine={engine} durationSecs={validDuration ? durationSeconds : null} />
+          {!isSyz && <DictionaryPanel project={project} target={target} />}
+          {!isSyz && (
+            <CampaignPanel
+              project={project}
+              target={target}
+              engine={engine}
+              lang={targetLang}
+              defaultDurationSecs={fuzzingSettings.default_duration_secs}
+              maxDurationSecs={fuzzingSettings.sandbox.max_duration_secs}
+              disabled={selectionBlocked || running}
+            />
+          )}
+          {!isSyz && (
+            <CiGatePanel
+              project={project}
+              target={target}
+              engine={engine}
+              maxDurationSecs={fuzzingSettings.sandbox.max_duration_secs}
+              disabled={selectionBlocked || running}
+            />
+          )}
+        </div>
       )}
 
       {log.length > 0 && (

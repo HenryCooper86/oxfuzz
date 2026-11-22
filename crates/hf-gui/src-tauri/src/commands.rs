@@ -286,12 +286,14 @@ pub async fn harness_draft(
     engine: String,
     lang: Option<String>,
     ai: Option<hf_service::AiPolicy>,
+    build: Option<HarnessBuildOptions>,
 ) -> Result<serde_json::Value, String> {
     let engine_kind = parse_engine(&engine)?;
     let lang = match lang.as_deref() {
         Some(l) => parse_lang(l)?,
         None => TargetLanguage::C,
     };
+    let build = build.unwrap_or_default();
     let draft = state
         .container
         .harness_draft_with_policy(
@@ -300,11 +302,8 @@ pub async fn harness_draft(
             engine_kind,
             lang,
             ai.unwrap_or_default(),
-            None,
-            // The desktop draft flow offers the stock driver shape; a
-            // persistent-mode source pasted into the editor still compiles
-            // driver-less through the source-derived build variant.
-            false,
+            build.sanitizer()?,
+            build.persistent,
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -323,6 +322,39 @@ pub async fn harness_draft(
     }))
 }
 
+/// Build choices baked into a harness binary, as `oxfuzz harness` takes
+/// them. Absent fields keep the configured defaults.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct HarnessBuildOptions {
+    /// `address`, `undefined`, `thread` or `memory`.
+    sanitizer: Option<String>,
+    /// AFL++: also build the `CmpLog` companion binary.
+    cmplog: bool,
+    /// AFL++: draft a persistent-mode harness that owns `main`.
+    persistent: bool,
+}
+
+impl HarnessBuildOptions {
+    fn sanitizer(&self) -> Result<Option<hf_service::Sanitizer>, String> {
+        self.sanitizer.as_deref().map(str::parse).transpose()
+    }
+}
+
+/// Per-run choices of `oxfuzz run`. Absent fields keep the configured
+/// defaults, and the run records the harness's own sanitizer.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct RunOptions {
+    cpus: Option<u32>,
+    timeout_ms: Option<u64>,
+    resume: Option<bool>,
+    /// Assert the sanitizer the promoted harness was built with.
+    sanitizer: Option<String>,
+    cmplog: Option<bool>,
+    ai: Option<hf_service::AiPolicy>,
+}
+
 /// Compile a harness in the sandbox via `hf-runtime`.
 #[tauri::command]
 pub async fn harness_compile(
@@ -332,12 +364,15 @@ pub async fn harness_compile(
     engine: String,
     target: String,
     lang: Option<String>,
+    build: Option<HarnessBuildOptions>,
 ) -> Result<serde_json::Value, String> {
     let engine_kind = parse_engine(&engine)?;
     let lang = match lang.as_deref() {
         Some(l) => parse_lang(l)?,
         None => TargetLanguage::C,
     };
+    let build = build.unwrap_or_default();
+    let sanitizer = build.sanitizer()?;
     if !hf_service::docker_daemon_ready() {
         return Ok(serde_json::json!({
             "status": "Draft",
@@ -346,7 +381,15 @@ pub async fn harness_compile(
     }
     match state
         .container
-        .harness_compile(source, &project, engine_kind, &target, lang, None, false)
+        .harness_compile(
+            source,
+            &project,
+            engine_kind,
+            &target,
+            lang,
+            sanitizer,
+            build.cmplog,
+        )
         .await
     {
         Ok(out) => Ok(serde_json::json!({
@@ -1750,10 +1793,11 @@ pub fn delete_agent(
 #[tauri::command]
 pub async fn create_session(
     state: tauri::State<'_, crate::state::AppState>,
+    title: Option<String>,
 ) -> Result<Option<String>, String> {
     state
         .container
-        .create_chat_session(None)
+        .create_chat_session(title.filter(|title| !title.trim().is_empty()))
         .await
         .map_err(|error| error.to_string())
 }
@@ -1993,9 +2037,9 @@ fn send_run_admission(
     channel.map_or(Ok(()), |channel| channel.send(run_id.to_string()))
 }
 
-fn native_run_callbacks(
-    app: tauri::AppHandle,
-    webview: tauri::Webview,
+fn native_run_callbacks<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    webview: tauri::Webview<R>,
     on_run_started: Option<tauri::ipc::JavaScriptChannelId>,
 ) -> (
     impl Fn(FuzzProgress) + Send + Sync,
@@ -2082,21 +2126,25 @@ pub async fn replay_run(
 /// `hf-engine::runner::EngineRunner` and `hf-runtime::DockerRuntime` (with
 /// `--network=none` isolation).
 #[tauri::command]
-pub async fn run_fuzzer(
+pub async fn run_fuzzer<R: tauri::Runtime>(
     state: tauri::State<'_, crate::state::AppState>,
-    app: tauri::AppHandle,
-    webview: tauri::Webview,
+    app: tauri::AppHandle<R>,
+    webview: tauri::Webview<R>,
     project: String,
     target: String,
     engine: String,
     duration: u64,
     // Decimal text preserves all 64 seed bits, matching `ReplayReview.seed`.
     seed: Option<String>,
+    options: Option<RunOptions>,
     on_run_started: Option<tauri::ipc::JavaScriptChannelId>,
 ) -> Result<serde_json::Value, String> {
     use tauri::Emitter;
 
     let engine_kind = parse_engine(&engine)?;
+    let options = options.unwrap_or_default();
+    let sanitizer: Option<hf_service::Sanitizer> =
+        options.sanitizer.as_deref().map(str::parse).transpose()?;
     let emit = |ty: &str, data: serde_json::Value| {
         let _event_has_no_listener = app.emit(
             "run:progress",
@@ -2177,26 +2225,20 @@ pub async fn run_fuzzer(
             &target,
             engine_kind,
             duration,
-            None,
-            // The desktop run button carries no per-run timeout, resume,
-            // sanitizer, or CmpLog override; the configured
-            // `fuzzing.default_timeout_ms` / `fuzzing.default_resume` apply,
-            // CmpLog stays off (per-run opt-in only), and the run records the
-            // harness's own sanitizer. The seed arrives as decimal text so
-            // the webview keeps every bit above 2^53.
-            None,
-            None,
-            None,
-            None,
+            options.cpus,
+            options.timeout_ms,
+            options.resume,
+            sanitizer,
+            options.cmplog,
+            // The seed arrives as decimal text so the webview keeps every
+            // bit above 2^53.
             seed.as_deref()
                 .map(str::parse)
                 .transpose()
                 .map_err(|e| format!("invalid seed: {e}"))?,
             &(on_progress),
             &(on_started),
-            // The desktop run button carries no per-run AI policy control;
-            // the configured provider applies (`auto`).
-            hf_service::AiPolicy::default(),
+            options.ai.unwrap_or_default(),
         )
         .await;
 
@@ -3830,15 +3872,22 @@ fn filename_stem_or(s: &str, fallback: &str) -> String {
 /// only the smoke-test consent (as the Harness step's own button does); the
 /// harness is approved, and a run started, by separate explicit actions.
 #[tauri::command]
-pub async fn fuzz_prepare(
-    app: tauri::AppHandle,
+pub async fn fuzz_prepare<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, crate::state::AppState>,
     project: String,
     engine: String,
     target: Option<String>,
+    lang: Option<String>,
+    build: Option<HarnessBuildOptions>,
+    fresh: Option<bool>,
+    skip_model_review: Option<bool>,
 ) -> Result<hf_service::FuzzPrepared, String> {
     use tauri::Emitter;
     let engine_kind = parse_engine(&engine)?;
+    let lang = lang.as_deref().map(parse_lang).transpose()?;
+    let build = build.unwrap_or_default();
+    let sanitizer = build.sanitizer()?;
     let container = with_user_approval(&state.container, ExplicitAction::RunHarness);
     let on_stage = |stage: hf_service::FuzzStage| {
         // Swallowed: the stage display is advisory; the command's result is
@@ -3857,11 +3906,15 @@ pub async fn fuzz_prepare(
                 project: std::path::Path::new(&project),
                 target: target.as_deref(),
                 engine: engine_kind,
-                lang: None,
-                review_bypass: hf_service::HarnessReviewBypass::NotRequested,
-                fresh: false,
-                sanitizer: None,
-                cmplog: false,
+                lang,
+                review_bypass: if skip_model_review.unwrap_or(false) {
+                    hf_service::HarnessReviewBypass::Requested
+                } else {
+                    hf_service::HarnessReviewBypass::NotRequested
+                },
+                fresh: fresh.unwrap_or(false),
+                sanitizer,
+                cmplog: build.cmplog,
             },
             &on_stage,
             &on_progress,
@@ -5228,5 +5281,39 @@ mod chat_turn_tests {
         assert!(turn.timestamp.is_none());
         let json = serde_json::to_value(&turn).unwrap();
         assert!(json.get("timestamp").is_none());
+    }
+}
+
+#[cfg(test)]
+mod run_option_tests {
+    use super::{HarnessBuildOptions, RunOptions};
+
+    #[test]
+    fn run_options_use_the_frontend_field_names_and_default_to_unset() {
+        let options: RunOptions = serde_json::from_value(serde_json::json!({
+            "cpus": 2, "timeoutMs": 500, "resume": true,
+            "sanitizer": "address", "cmplog": true, "ai": "off",
+        }))
+        .unwrap();
+        assert_eq!(options.cpus, Some(2));
+        assert_eq!(options.timeout_ms, Some(500));
+        assert_eq!(options.resume, Some(true));
+        assert_eq!(options.cmplog, Some(true));
+        assert_eq!(options.ai, Some(hf_service::AiPolicy::Off));
+
+        let unset: RunOptions = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(unset.cpus.is_none() && unset.timeout_ms.is_none() && unset.ai.is_none());
+    }
+
+    #[test]
+    fn build_options_parse_every_sanitizer_and_refuse_an_unknown_one() {
+        for name in ["address", "undefined", "thread", "memory"] {
+            let build: HarnessBuildOptions =
+                serde_json::from_value(serde_json::json!({ "sanitizer": name })).unwrap();
+            assert!(build.sanitizer().unwrap().is_some(), "{name}");
+        }
+        let unknown: HarnessBuildOptions =
+            serde_json::from_value(serde_json::json!({ "sanitizer": "nonsense" })).unwrap();
+        assert!(unknown.sanitizer().is_err());
     }
 }

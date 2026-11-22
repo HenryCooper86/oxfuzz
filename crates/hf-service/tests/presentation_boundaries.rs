@@ -19,10 +19,14 @@ fn presentations_depend_on_internal_logic_only_through_service() {
             .split("[dev-dependencies]")
             .next()
             .unwrap_or(manifest.as_str());
+        // The command line and the desktop app each host the REST server
+        // (`oxfuzz serve`, and the REST server control on Automation), so
+        // both may link hf-web, itself a presentation crate over hf-service.
+        let hosts_rest_server = relative.starts_with("hf-cli") || relative.starts_with("hf-gui");
         for line in shipping.lines().map(str::trim_start) {
             if line.starts_with("hf-")
                 && !line.starts_with("hf-service =")
-                && !(relative.starts_with("hf-cli") && line.starts_with("hf-web ="))
+                && !(hosts_rest_server && line.starts_with("hf-web ="))
             {
                 panic!("{relative} bypasses hf-service with dependency: {line}");
             }

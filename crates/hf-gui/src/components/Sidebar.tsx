@@ -4,7 +4,7 @@ import { useTarget } from "../providers/target";
 import { useI18n } from "../i18nContext";
 import { useDefectDojo } from "../lib";
 import { APP_VERSION } from "../lib/appVersion";
-import { Bot, BookOpen, Bug, Boxes, CarFront, Crosshair, Database, FileCode, FileText, FolderOpen, History, LayoutDashboard, LifeBuoy, MessageSquare, Play, Plus, Puzzle, ScrollText, Settings, ShieldCheck, Workflow, X, Zap, GitCompare } from "lucide-react";
+import { Bot, BookOpen, Bug, Boxes, CarFront, Cpu, Crosshair, Database, FileCode, FileText, FolderOpen, History, LayoutDashboard, LifeBuoy, MessageSquare, Play, Plus, Puzzle, ScrollText, Settings, ShieldCheck, Workflow, X, Zap, GitCompare } from "lucide-react";
 
 interface SidebarProps {
   activeView: ViewType;
@@ -28,7 +28,7 @@ const PRIMARY_ITEMS: NavItem[] = [
 const TOOL_GROUPS: { label: string; items: NavItem[] }[] = [
   { label: "sidebar.pipeline", items: [
     { view: "discover", icon: Crosshair }, { view: "harness", icon: FileCode },
-    { view: "run", icon: Play }, { view: "corpus", icon: Database },
+    { view: "run", icon: Play }, { view: "corpus", icon: Database }, { view: "binary", icon: Cpu },
   ] },
   { label: "sidebar.results", items: [
     { view: "artifacts", icon: Boxes }, { view: "changes", icon: GitCompare }, { view: "audit", icon: ScrollText },

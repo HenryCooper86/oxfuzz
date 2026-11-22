@@ -30,28 +30,16 @@ pub(crate) async fn apply_ai_policy(
     ai: AiOption,
     what: &str,
 ) -> anyhow::Result<ServiceContainer> {
-    match ai {
-        // Operation-local: the detached container has its own provider cell, so
-        // a running server keeps serving every other request with its model.
-        AiOption::Off => Ok(container.without_provider_pool()),
-        AiOption::Require => {
-            let Some(pool) = container.provider_pool() else {
-                anyhow::bail!(
-                    "--ai require: {what} was asked to use the model but no provider is \
-                     configured; configure one in providers.toml or set HF_PROVIDER_API_KEY"
-                );
-            };
-            let statuses = pool.provider_statuses().await;
-            if !statuses.is_empty() && statuses.iter().all(|status| status.is_frozen) {
-                anyhow::bail!(
-                    "--ai require: {what} was asked to use the model but every configured \
-                     provider is frozen after earlier failures"
-                );
+    container
+        .scoped_to_ai_policy(ai.into(), what)
+        .await
+        .map_err(|error| match (ai, error) {
+            // Name the flag the operator typed; the service names the cause.
+            (AiOption::Require, hf_service::ClassifiedError::Validation(message)) => {
+                anyhow::anyhow!("--ai require: {message}")
             }
-            Ok(container)
-        }
-        AiOption::Auto => Ok(container),
-    }
+            (_, error) => anyhow::Error::from(error),
+        })
 }
 
 impl From<AiOption> for hf_service::AiPolicy {

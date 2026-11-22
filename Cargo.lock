@@ -2548,8 +2548,10 @@ name = "hf-gui"
 version = "0.9.8"
 dependencies = [
  "async-trait",
+ "axum",
  "chrono",
  "hf-service",
+ "hf-web",
  "serde",
  "serde_json",
  "tauri",

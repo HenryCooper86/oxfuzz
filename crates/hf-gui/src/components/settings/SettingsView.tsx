@@ -8,7 +8,7 @@
 // erased accidentally. ONE header "Save Changes" button persists the draft.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowLeft, Server, Database, Info, SlidersHorizontal, Share2, GitPullRequest, Crosshair, CarFront } from "lucide-react";
+import { ArrowLeft, Server, Database, Info, SlidersHorizontal, Share2, GitPullRequest, Crosshair, CarFront, Bell } from "lucide-react";
 import { getTransport } from "../../lib";
 import { useI18n } from "../../i18nContext";
 import { useToast } from "../ui/toastContext";
@@ -20,6 +20,7 @@ import { ProvidersTab } from "./ProvidersTab";
 import { normalizeProvider, type Provider } from "./providerTypes";
 import { StorageTab } from "./StorageTab";
 import { IntegrationsTab } from "./IntegrationsTab";
+import { NotificationsTab } from "./NotificationsTab";
 import { IssueTrackerTab } from "./IssueTrackerTab";
 import { AboutTab } from "./AboutTab";
 import { FuzzingTab } from "./FuzzingTab";
@@ -67,6 +68,7 @@ const SECTION_ICONS: Record<SectionId, React.ComponentType<{ size?: number }>> =
   storage: Database,
   integrations: Share2,
   issuetracker: GitPullRequest,
+  notifications: Bell,
   about: Info,
 };
 
@@ -367,6 +369,8 @@ export function SettingsView({ onBack, onRunWizard }: { onBack?: () => void; onR
         return <StorageTab />;
       case "integrations":
         return <IntegrationsTab value={value as DefectDojoDraft} onChange={onFormChange} />;
+      case "notifications":
+        return <NotificationsTab />;
       case "issuetracker":
         return <IssueTrackerTab value={value as IssueTrackerDraft} onChange={onFormChange} />;
       default:

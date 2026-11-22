@@ -849,7 +849,7 @@ pub struct ServiceContainer {
     #[cfg(feature = "campaign-health")]
     campaign_telemetry: Arc<health_monitor::RunTelemetryRegistry>,
     #[cfg(feature = "campaign-health")]
-    campaign_health_delivery: Arc<std::sync::Mutex<Option<CampaignHealthDelivery>>>,
+    campaign_health_delivery: Arc<std::sync::Mutex<Vec<CampaignHealthDelivery>>>,
     /// Labels of agent turns currently executing, so the Observability panel can
     /// show live agent activity instead of always "No active agent instances".
     /// A turn registers via [`Self::track_agent`] and is removed when the

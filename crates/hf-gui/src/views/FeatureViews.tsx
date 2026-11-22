@@ -8,8 +8,11 @@ import { Button, IconButton, EmptyState, ErrorState, Input, LoadingState, Select
 import { DurationInput } from "../components/ui/DurationInput";
 import { Puzzle, BookOpen, Zap, Target, FileCode, Activity, Bug, Crosshair, Play, Loader2, Plus, Trash2, RotateCw, RotateCcw, Copy, Square, Bot, Shield, Database, Pencil, Save, X, Search, FilePlus, FolderOpen, Layers } from "lucide-react";
 import { getTransport, pickFile, pickFolder } from "../lib";
+import { DEFAULT_KNOWLEDGE_LIMIT, parseKnowledgeLimit, SCHEDULE_EVENT_TYPES } from "../lib/paritySettings";
 import { isTauriEnvironment } from "../lib/transport";
 import { useI18n } from "../i18nContext";
+import { RemoteArmPanel } from "../components/RemoteArmPanel";
+import { RestServerPanel } from "../components/RestServerPanel";
 import { useConfirm } from "../providers/confirm";
 import { useProject } from "../providers/project";
 import { useTarget } from "../providers/target";
@@ -163,6 +166,16 @@ const ROLE_ICONS: Record<AgentRole, ReactNode> = {
 };
 
 const splitList = (s: string) => s.split(",").map((x) => x.trim()).filter(Boolean);
+
+function eventLabel(event: string, t: (key: string) => string): string {
+  switch (event) {
+    case "crash.found": return t("automation.eventCrashFound");
+    case "run.completed": return t("automation.eventRunCompleted");
+    case "run.failed": return t("automation.eventRunFailed");
+    case "campaign.health": return t("automation.eventCampaignHealth");
+    default: return event;
+  }
+}
 
 // kebab-case slug from a name: ascii alnum, '-' and '_' only.
 function slugify(name: string): string {
@@ -859,6 +872,7 @@ function ProjectKnowledgeSearch({ project }: { project: string }) {
   const searchVersion = useRef(0);
   const [indexing, setIndexing] = useState(false);
   const [query, setQuery] = useState("");
+  const [limitText, setLimitText] = useState(String(DEFAULT_KNOWLEDGE_LIMIT));
   const [hits, setHits] = useState<KnowledgeHit[] | null>(null);
   const [searching, setSearching] = useState(false);
   const [ingesting, setIngesting] = useState(false);
@@ -940,7 +954,7 @@ function ProjectKnowledgeSearch({ project }: { project: string }) {
     setHits(null);
     setError(null);
     try {
-      const result = await getTransport().invoke<KnowledgeHit[]>("knowledge_search", { project, query, limit: 10 });
+      const result = await getTransport().invoke<KnowledgeHit[]>("knowledge_search", { project, query, limit: parseKnowledgeLimit(limitText) });
       if (!mounted.current || version !== searchVersion.current) return;
       setHits(result);
       await refreshStatus();
@@ -1038,6 +1052,16 @@ function ProjectKnowledgeSearch({ project }: { project: string }) {
           {searching ? <Loader2 size={13} className="animate-spin" /> : <Search size={13} />}
           {t("common.search")}
         </button>
+        <Input
+          type="number"
+          min={1}
+          max={100}
+          aria-label={t("knowledge.resultLimit")}
+          title={t("knowledge.resultLimit")}
+          value={limitText}
+          onChange={(e) => setLimitText(e.target.value)}
+          className="w-16 shrink-0"
+        />
       </div>
       {hits && hits.length === 0 && <p className="text-xs text-text-muted">{t("knowledge.noMatches")}</p>}
       {hits && hits.length > 0 && (
@@ -1241,8 +1265,9 @@ export function AutomationView() {
     recoveryLoadReducer,
     initialRecoveryLoadState,
   );
-  const [triggerKind, setTriggerKind] = useState<"interval" | "cron" | "once">("interval");
+  const [triggerKind, setTriggerKind] = useState<"interval" | "cron" | "once" | "event">("interval");
   const [triggerValue, setTriggerValue] = useState("3600");
+  const [campaignName, setCampaignName] = useState("");
   const [durationOverride, setDurationOverride] = useState<string | null>(null);
   const duration = durationOverride ?? String(fuzzingSettings?.default_duration_secs ?? "");
   const [busy, setBusy] = useState(false);
@@ -1444,6 +1469,8 @@ export function AutomationView() {
       if (v.split(/\s+/).length < 5) return t("automation.errCron");
     } else if (triggerKind === "once") {
       if (Number.isNaN(Date.parse(v))) return t("automation.errOnce");
+    } else if (triggerKind === "event") {
+      if (!SCHEDULE_EVENT_TYPES.includes(v)) return t("automation.errTriggerEmpty");
     }
     return null;
   }
@@ -1475,7 +1502,7 @@ export function AutomationView() {
     setError(null);
     try {
       const next = await getTransport().invoke<CampaignView[]>("schedule_create", {
-        name: `${shortProject(project)} / ${scopeLabel}`,
+        name: campaignName.trim() || `${shortProject(project)} / ${scopeLabel}`,
         project,
         // null = portfolio over all promoted targets; else the one target.
         target: scopeAll ? null : selected?.target ?? null,
@@ -1640,6 +1667,8 @@ export function AutomationView() {
       )}
 
       <SchedulerRuntimeStatus status={runtimeStatus} onArm={(armed) => void changeArming(armed)} busy={arming} />
+      <RemoteArmPanel />
+      <RestServerPanel project={project} />
       {project ? <CampaignAllocation key={project} project={project} /> : null}
 
       <ScheduleRecoveryPanel
@@ -1725,16 +1754,31 @@ export function AutomationView() {
         <div className="flex flex-wrap items-center gap-2">
           <Select
             value={triggerKind}
-            onChange={(v) => setTriggerKind(v as typeof triggerKind)}
+            onChange={(v) => {
+              const kind = v as typeof triggerKind;
+              // An event name is not a valid interval, cron or time: start the
+              // new kind from a valid value when crossing to or from `event`.
+              if (kind === "event") setTriggerValue(SCHEDULE_EVENT_TYPES[0]);
+              else if (triggerKind === "event") setTriggerValue(kind === "interval" ? "3600" : "");
+              setTriggerKind(kind);
+            }}
             options={[
               { value: "interval", label: t("automation.triggerInterval") },
               { value: "cron", label: t("automation.triggerCron") },
               { value: "once", label: t("automation.triggerOnce") },
+              { value: "event", label: t("automation.triggerEvent") },
             ]}
           />
           {triggerKind === "interval"
             ? <DurationInput ariaLabel={t("automation.triggerInterval")} seconds={triggerValue} onChange={setTriggerValue} />
-            : <Input mono value={triggerValue} onChange={(e) => setTriggerValue(e.target.value)} placeholder={placeholder}
+            : triggerKind === "event"
+              ? <Select
+                ariaLabel={t("automation.eventName")}
+                value={triggerValue}
+                onChange={setTriggerValue}
+                options={SCHEDULE_EVENT_TYPES.map((event) => ({ value: event, label: eventLabel(event, t) }))}
+              />
+              : <Input mono value={triggerValue} onChange={(e) => setTriggerValue(e.target.value)} placeholder={placeholder}
               className="flex-1 min-w-[180px]" />}
           <span className="text-xs text-text-muted">{t("automation.runLabel")}</span>
           <DurationInput
@@ -1744,6 +1788,13 @@ export function AutomationView() {
             onChange={setDurationOverride}
           />
         </div>
+
+        <Input
+          aria-label={t("automation.campaignName")}
+          value={campaignName}
+          onChange={(e) => setCampaignName(e.target.value)}
+          placeholder={t("automation.campaignNamePlaceholder")}
+        />
 
         {/* Budget (optional): stop after N runs or M minutes of fuzzing. */}
         <div className="flex flex-wrap items-center gap-2 text-xs text-text-muted">

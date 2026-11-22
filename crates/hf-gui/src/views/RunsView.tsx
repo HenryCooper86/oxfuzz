@@ -1,8 +1,12 @@
+import { TrustReportPanel } from "../components/TrustReportPanel";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { engineDisplayName } from "../lib/harnessScope";
 import { getTransport, isTauriEnvironment, onDataChanged, emitDataChanged } from "../lib";
 import { formatInvokeError, formatRunHistoryError } from "../lib/invokeError";
 import { useI18n } from "../i18nContext";
+import { RunListFilters } from "../components/RunListFilters";
+import { RunRecordPanel } from "../components/RunRecordPanel";
+import { filterRuns, type RunListFilter } from "../lib/parityDiscovery";
 import { useProject } from "../providers/project";
 import { useToast } from "../components/ui/toastContext";
 import { useConfirm } from "../providers/confirm";
@@ -55,6 +59,7 @@ function ScopedRunsView({ onNavigate, focusedId, onClearFocus, onReviewFindings 
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string[]>([]);
   const [filter, setFilter] = useState(focusedId ?? "");
+  const [listFilter, setListFilter] = useState<RunListFilter>({ activeOnly: false, limit: null });
   const [expanded, setExpanded] = useState<string | null>(null);
   // Per-run coverage curve cache: undefined = not fetched, "loading", or samples.
   const [series, setSeries] = useState<Record<string, CoverageSample[] | "loading" | { error: string }>>({});
@@ -200,7 +205,8 @@ function ScopedRunsView({ onNavigate, focusedId, onClearFocus, onReviewFindings 
     .filter((r): r is RunHistoryItem => !!r);
 
   const q = filter.trim().toLowerCase();
-  const shownRuns = q ? runs.filter((r) => `${r.id} ${r.target ?? ""} ${r.engine} ${r.status}`.toLowerCase().includes(q)) : runs;
+  const matchedRuns = q ? runs.filter((r) => `${r.id} ${r.target ?? ""} ${r.engine} ${r.status}`.toLowerCase().includes(q)) : runs;
+  const shownRuns = filterRuns(matchedRuns, listFilter);
 
   // Chronological (oldest->newest) finished runs with recorded coverage, for the
   // trend charts. Capped so a long history stays readable.
@@ -406,6 +412,7 @@ function ScopedRunsView({ onNavigate, focusedId, onClearFocus, onReviewFindings 
               <Input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder={t("runs.filterPlaceholder")} className="flex-1" />
             </div>
           )}
+          <RunListFilters value={listFilter} onChange={setListFilter} />
           {shownRuns.map((r) => {
             const isSel = selected.includes(r.id);
             const isOpen = expanded === r.id;
@@ -493,6 +500,7 @@ function ScopedRunsView({ onNavigate, focusedId, onClearFocus, onReviewFindings 
                 {isOpen && (
                   <div className="surface-card mt-1" style={{ padding: "var(--space-md)" }}>
                     <RunEvidenceSummary run={r} onFindings={onReviewFindings ? () => onReviewFindings(r) : undefined} onReport={onNavigate ? () => { setActiveProject(r.project_root); onNavigate("reports"); } : undefined} />
+                    <RunRecordPanel runId={r.id} />
                     {data === "loading" || data === undefined ? (
                       <p className="text-xs text-text-muted">{t("runs.loadingCurve")}</p>
                     ) : !Array.isArray(data) ? (
@@ -508,6 +516,7 @@ function ScopedRunsView({ onNavigate, focusedId, onClearFocus, onReviewFindings 
                       {r.kind.toLowerCase() === "campaign" && r.ended_at && <><ReplayRun runId={r.id} onNavigate={onNavigate} /><RunFunctionCoverage runId={r.id} /></>}
                       {r.kind.toLowerCase() === "smoke" && r.ended_at && <RetainedHarnessBehavior runId={r.id} project={r.project_root} target={r.target_selector ?? r.target ?? ""} />}
                       <RunCloseoutPanel runId={r.id} runKind={r.kind} runStatus={r.status} />
+                      {r.ended_at && <TrustReportPanel runId={r.id} />}
                     </div>
                   </div>
                 )}
