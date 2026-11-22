@@ -3,8 +3,13 @@ name: Windows host qualification
 # Probe stage. Finds out whether a GitHub-hosted Windows runner can run a
 # Linux container with a Windows directory bind-mounted into it, which is what
 # oxfuzz needs from a Windows host. Docker Desktop does not support Windows
-# Server, so three other engines are tried side by side. Nothing is published
-# and no secret is used.
+# Server, so other engines are tried side by side. Nothing is published and no
+# secret is used.
+#
+# First run (2026-11-22, windows-2025): WSL 2 works on the runner. A dockerd
+# inside a WSL distribution runs Linux containers but rejects a Windows path
+# as a bind source, so an engine that translates the path is needed. A file
+# the container names with a colon appears on the Windows side with U+F03A.
 #
 # Manual. GitHub only dispatches a workflow that exists on the default branch,
 # so on any other branch a change to this file also starts it.
@@ -25,94 +30,9 @@ permissions:
   contents: read
 
 env:
-  WSL_UTF8: "1"
   PROBE_IMAGE: alpine:3.21
 
 jobs:
-  wsl-dockerd:
-    name: Probe dockerd inside WSL 2
-    runs-on: windows-2025
-    timeout-minutes: 30
-    defaults:
-      run:
-        shell: pwsh
-    steps:
-      - name: Host facts
-        continue-on-error: true
-        run: |
-          cmd /c ver
-          systeminfo | Select-String 'OS Name|OS Version|System Type|Hyper-V|Virtualization|hypervisor'
-          Get-CimInstance Win32_Processor | Format-List Name, NumberOfLogicalProcessors, VirtualizationFirmwareEnabled, SecondLevelAddressTranslationExtensions
-          Get-CimInstance Win32_ComputerSystem | Format-List HypervisorPresent, TotalPhysicalMemory
-          Get-PSDrive -PSProvider FileSystem | Format-Table Name, Used, Free
-          foreach ($feature in 'VirtualMachinePlatform', 'Microsoft-Windows-Subsystem-Linux', 'Microsoft-Hyper-V', 'Containers') {
-            Get-WindowsOptionalFeature -Online -FeatureName $feature | Format-Table FeatureName, State
-          }
-          Write-Output "ImageOS=$env:ImageOS ImageVersion=$env:ImageVersion"
-          docker version
-          docker info
-          wsl --version
-          wsl --status
-          wsl --list --verbose
-          exit 0
-
-      - name: Import a WSL 2 distribution
-        run: |
-          $rootfs = Join-Path $env:RUNNER_TEMP 'alpine.tar.gz'
-          curl.exe -fsSL -o $rootfs https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/x86_64/alpine-minirootfs-3.21.3-x86_64.tar.gz
-          $hash = (Get-FileHash -Algorithm SHA256 $rootfs).Hash.ToLower()
-          if ($hash -ne '1a694899e406ce55d32334c47ac0b2efb6c06d7e878102d1840892ad44cd5239') { throw "unexpected root filesystem hash $hash" }
-          wsl --import oxfuzz-engine (Join-Path $env:RUNNER_TEMP 'wsl-engine') $rootfs --version 2
-          if ($LASTEXITCODE -ne 0) { throw "wsl --import failed with $LASTEXITCODE" }
-          wsl --list --verbose
-          wsl -d oxfuzz-engine -u root -- sh -c 'uname -a; nproc; free -m; df -h / /mnt/c /mnt/d 2>&1; mount | grep -E "drvfs|9p|virtiofs"'
-          if ($LASTEXITCODE -ne 0) { throw "the distribution did not start" }
-
-      - name: Start dockerd in the distribution
-        run: |
-          wsl -d oxfuzz-engine -u root -- sh -c 'apk add --no-cache docker iptables && docker --version'
-          if ($LASTEXITCODE -ne 0) { throw "installing docker failed" }
-          Start-Process -FilePath wsl.exe -WindowStyle Hidden -ArgumentList @(
-            '-d', 'oxfuzz-engine', '-u', 'root', '--', 'sh', '-c',
-            '"dockerd -H unix:///var/run/docker.sock -H tcp://0.0.0.0:2375 > /var/log/dockerd.log 2>&1"')
-          $ready = $false
-          foreach ($attempt in 1..60) {
-            wsl -d oxfuzz-engine -u root -- docker info *> $null
-            if ($LASTEXITCODE -eq 0) { $ready = $true; break }
-            Start-Sleep -Seconds 2
-          }
-          wsl -d oxfuzz-engine -u root -- sh -c 'tail -n 40 /var/log/dockerd.log'
-          if (-not $ready) { throw "dockerd did not become ready" }
-          wsl -d oxfuzz-engine -u root -- docker info
-
-      - name: Run a Linux container from Windows
-        env:
-          DOCKER_HOST: tcp://127.0.0.1:2375
-        run: |
-          docker version
-          docker run --rm --network none $env:PROBE_IMAGE sh -c 'echo container-ok; uname -m'
-          if ($LASTEXITCODE -ne 0) { throw "the container did not run" }
-
-      - name: Bind-mount a Windows directory
-        continue-on-error: true
-        env:
-          DOCKER_HOST: tcp://127.0.0.1:2375
-        run: |
-          $dir = Join-Path $env:RUNNER_TEMP 'mount-probe'
-          New-Item -ItemType Directory -Path $dir | Out-Null
-          Set-Content -Path (Join-Path $dir 'in.txt') -Value 'from windows'
-          Write-Output "--- Windows path as oxfuzz would pass it: $dir"
-          docker run --rm --network none --mount "type=bind,src=$dir,dst=/work" $env:PROBE_IMAGE sh -c 'cat /work/in.txt && touch "/work/id:000000,sig:11,src:000000" && echo written > /work/out.txt && ls -la /work'
-          Write-Output "exit code $LASTEXITCODE"
-          $drive = $dir.Substring(0, 1).ToLower()
-          $translated = '/mnt/' + $drive + ($dir.Substring(2) -replace '\\', '/')
-          Write-Output "--- Translated by hand: $translated"
-          docker run --rm --network none --mount "type=bind,src=$translated,dst=/work" $env:PROBE_IMAGE sh -c 'cat /work/in.txt && touch "/work/id:000001,sig:11,src:000000" && echo written > /work/out2.txt && ls -la /work'
-          Write-Output "exit code $LASTEXITCODE"
-          Write-Output "--- The directory as Windows sees it"
-          Get-ChildItem -Force $dir | ForEach-Object { '{0}  [{1}]' -f $_.Name, (($_.Name.ToCharArray() | ForEach-Object { '{0:X4}' -f [int]$_ }) -join ' ') }
-          exit 0
-
   rancher-desktop:
     name: Probe Rancher Desktop
     runs-on: windows-2025
@@ -159,10 +79,11 @@ jobs:
         if: always()
         continue-on-error: true
         run: |
+          $env:WSL_UTF8 = '1'
           wsl --list --verbose
           Get-ChildItem "$env:LOCALAPPDATA\rancher-desktop\logs" -ErrorAction SilentlyContinue | ForEach-Object {
             Write-Output "===== $($_.Name)"
-            Get-Content $_.FullName -Tail 60
+            Get-Content $_.FullName -Tail 60 | Where-Object { $_ -notmatch 'auth' }
           }
           exit 0
 
@@ -204,7 +125,7 @@ jobs:
           $podman = Get-ChildItem -Path $dest -Recurse -Filter podman.exe | Select-Object -First 1
           if (-not $podman) { throw "podman.exe not found" }
           $podman.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Append
-          & $podman.FullName version
+          & $podman.FullName --version
 
       - name: Start the machine
         run: |
