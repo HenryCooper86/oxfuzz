@@ -5,6 +5,24 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# Git Bash on Windows rewrites arguments that look like POSIX paths, which
+# corrupts paths meant for the container, and reports host paths as /d/...,
+# which no container engine accepts as a bind source. Switch the rewriting
+# off and convert host paths here. On other hosts both are no-ops.
+export MSYS_NO_PATHCONV=1
+export MSYS2_ARG_CONV_EXCL='*'
+host_path() {
+    if command -v cygpath >/dev/null 2>&1; then
+        cygpath -w "$1"
+    else
+        printf '%s\n' "$1"
+    fi
+}
+python_command=python3
+if ! command -v python3 >/dev/null 2>&1; then
+    python_command=python
+fi
+
 IMAGE="${OXFUZZ_SANDBOX_IMAGE:-oxfuzz/fuzz-sandbox:0.2.3}"
 if [[ "$IMAGE" == "latest" || "$IMAGE" == *":latest" ]]; then
     echo "OXFUZZ_SANDBOX_IMAGE must use an explicit version tag" >&2
@@ -43,8 +61,8 @@ trap cleanup EXIT
 echo "Verifying the pinned sandbox toolchain ..."
 docker run "${run_args[@]}" \
     --tmpfs /tmp:rw,nosuid,nodev,size=64m \
-    --mount "type=bind,src=${PWD}/docker/sandbox/semgrep/fixtures,dst=/work/source,readonly" \
-    --mount "type=bind,src=${verification_output},dst=/work/output" \
+    --mount "type=bind,src=$(host_path "${PWD}/docker/sandbox/semgrep/fixtures"),dst=/work/source,readonly" \
+    --mount "type=bind,src=$(host_path "$verification_output"),dst=/work/output" \
     "$IMAGE" bash -lc '
         set -euo pipefail
         for binary in clang afl-fuzz afl-qemu-trace honggfuzz python3 java javac jazzer jazzer-js bazel oxfuzz-bazel-compdb syz-manager ssh scp qemu-system-aarch64 qemu-system-x86_64 casr-san casr-cluster cargo semgrep; do
@@ -79,7 +97,8 @@ docker run "${run_args[@]}" \
         oxfuzz-semgrep-scan
     '
 
-python3 scripts/validate-semgrep-smoke.py "$verification_output/semgrep.json" 67108864
+"$python_command" scripts/validate-semgrep-smoke.py \
+    "$(host_path "$verification_output/semgrep.json")" 67108864
 
 echo "Verified offline read-only scan with read-only source and writable output"
 docker image inspect --format 'Verified {{.Id}} ({{.Architecture}})' "$IMAGE"
