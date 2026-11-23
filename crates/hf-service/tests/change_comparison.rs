@@ -216,6 +216,7 @@ async fn fixture() -> Fixture {
     }
 
     let crash = |run_id: Uuid, signature: &str| Crash {
+        control_replay: None,
         reproduction: None,
         id: Uuid::new_v4(),
         run_id,
@@ -346,6 +347,7 @@ fn defectdojo_document_qualifies_head_only_observations_with_comparison_evidence
     };
     let crash_id = Uuid::new_v4();
     let crash = Crash {
+        control_replay: None,
         reproduction: None,
         id: crash_id,
         run_id: head_run_id,

@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 fn crash() -> Crash {
     Crash {
+        control_replay: None,
         reproduction: None,
         id: uuid::Uuid::new_v4(),
         run_id: uuid::Uuid::new_v4(),

@@ -966,6 +966,7 @@ const VERDICT_REPLY: &str = "{\"reproduces_deterministically\": true, \
 
 fn asan_crash(run_id: Uuid) -> Crash {
     Crash {
+        control_replay: None,
         reproduction: None,
         id: Uuid::new_v4(),
         run_id,

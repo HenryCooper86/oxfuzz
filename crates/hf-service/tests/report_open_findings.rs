@@ -134,6 +134,7 @@ fn run(fixture: &Fixture, status: RunStatus, offset_minutes: i64) -> RunRecord {
 
 fn finding(run: &RunRecord, target: &TargetCandidate, signature: &str) -> Crash {
     Crash {
+        control_replay: None,
         reproduction: None,
         id: Uuid::new_v4(),
         run_id: run.id,

@@ -1709,6 +1709,7 @@ mod tests {
             kind: hf_core::crash::CrashKind::Asan,
             summary: "heap-buffer-overflow".to_owned(),
             minimized: false,
+            control_replay: None,
             reproduction: None,
             bug_report: None,
             casr: None,
@@ -1735,6 +1736,7 @@ mod tests {
             kind: hf_core::crash::CrashKind::Segv,
             summary: "frameless fault".to_owned(),
             minimized: false,
+            control_replay: None,
             reproduction: None,
             bug_report: None,
             casr: None,
@@ -1935,6 +1937,7 @@ mod one_finding_per_bug_tests {
 
     fn crash(target: Uuid, run: u128, line: &str) -> Crash {
         Crash {
+            control_replay: None,
             reproduction: None,
             id: Uuid::new_v4(),
             run_id: Uuid::from_u128(run),

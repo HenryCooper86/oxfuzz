@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 fn crash(origin: CrashOrigin, minimized: bool) -> Crash {
     Crash {
+        control_replay: None,
         reproduction: None,
         id: Uuid::from_u128(1),
         run_id: Uuid::from_u128(2),

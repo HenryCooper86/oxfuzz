@@ -1077,6 +1077,7 @@ mod project_artifact_tests {
             store.insert_run(&run).await.unwrap();
             run_ids.push(run.id);
             let crash = Crash {
+                control_replay: None,
                 reproduction: None,
                 id: Uuid::new_v4(),
                 run_id: run.id,

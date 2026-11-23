@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 fn crash(kind: CrashKind, severity: CrashSeverity, short: &str, crashline: &str) -> Crash {
     Crash {
+        control_replay: None,
         reproduction: None,
         id: Uuid::nil(),
         run_id: Uuid::nil(),

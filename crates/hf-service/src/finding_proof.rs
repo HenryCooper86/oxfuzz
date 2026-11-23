@@ -90,12 +90,72 @@ pub enum FixVerificationDetermination {
     NotVerified,
 }
 
+/// Whether a confirmed failure depends on the fuzzed bytes, from control replay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputDependenceDetermination {
+    /// Every benign control reproduced the failure.
+    InputIndependent,
+    /// Some controls reproduced it and the others exited cleanly.
+    SizeOrContentSensitive,
+    /// Every control exited cleanly. This does not establish valid API usage.
+    InputDependent,
+    /// Control evidence is retained but cannot support a determination.
+    Inconclusive,
+    /// No control evidence is retained.
+    NotVerified,
+}
+
+/// Whether a finding is held out of SARIF and `DefectDojo` for a usage review.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FindingUsageReviewState {
+    /// Control replay did not show an input-independent target fault.
+    NotApplicable,
+    /// Input-independent, and no review of this evidence is recorded.
+    Held,
+    /// A person reviewed this exact evidence and released the finding.
+    Released,
+}
+
+/// The usage-review state of one crash, derived from its retained evidence.
+#[must_use]
+pub fn finding_usage_review_state(crash: &Crash) -> FindingUsageReviewState {
+    use crate::container::crash_confirmation::{assess_control_evidence, ControlOutcome};
+
+    let Some(controls) = &crash.control_replay else {
+        return FindingUsageReviewState::NotApplicable;
+    };
+    if crash.origin != CrashOrigin::Target
+        || assess_control_evidence(crash, controls).outcome != ControlOutcome::InputIndependent
+    {
+        return FindingUsageReviewState::NotApplicable;
+    }
+    let reviewed = controls.usage_review.as_ref().is_some_and(|review| {
+        review.version == 1
+            && review.input_sha256 == controls.input_sha256
+            && review.binary_sha256 == controls.binary_sha256
+    });
+    if reviewed {
+        FindingUsageReviewState::Released
+    } else {
+        FindingUsageReviewState::Held
+    }
+}
+
+/// Whether SARIF and `DefectDojo` must leave this crash out until it is reviewed.
+#[must_use]
+pub fn held_for_usage_review(crash: &Crash) -> bool {
+    finding_usage_review_state(crash) == FindingUsageReviewState::Held
+}
+
 /// Service-owned evidence view for one retained crash.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FindingProofCard {
     pub schema_version: u32,
     pub fault_origin: FindingProofClaim<CrashOrigin>,
     pub deterministic_reproduction: FindingProofClaim<ReproductionDetermination>,
+    pub input_dependence: FindingProofClaim<InputDependenceDetermination>,
     pub casr_exploitability: FindingProofClaim<CasrExploitabilityDetermination>,
     pub external_reachability: FindingProofClaim<ReachabilityDetermination>,
     pub fix_verification: FindingProofClaim<FixVerificationDetermination>,
@@ -174,6 +234,8 @@ pub fn finding_proof_card(crash: &Crash) -> FindingProofCard {
         }
     }
 
+    let input_dependence = input_dependence_claim(crash, &crash_record);
+
     let casr_exploitability = crash.casr.as_ref().map_or_else(
         || {
             proof_claim(
@@ -202,6 +264,7 @@ pub fn finding_proof_card(crash: &Crash) -> FindingProofCard {
         schema_version: FINDING_PROOF_SCHEMA_VERSION,
         fault_origin,
         deterministic_reproduction,
+        input_dependence,
         casr_exploitability,
         external_reachability: proof_claim(
             ReachabilityDetermination::NotVerified,
@@ -218,6 +281,62 @@ pub fn finding_proof_card(crash: &Crash) -> FindingProofCard {
             Vec::new(),
         ),
     }
+}
+
+fn input_dependence_claim(
+    crash: &Crash,
+    crash_record: &FindingEvidenceReference,
+) -> FindingProofClaim<InputDependenceDetermination> {
+    use crate::container::crash_confirmation::{assess_controls, ControlOutcome};
+
+    let Some(assessment) = assess_controls(crash) else {
+        return proof_claim(
+            InputDependenceDetermination::NotVerified,
+            FindingProofStatus::NotVerified,
+            "input_dependence_not_run",
+            "No control-input replay is retained for this crash.",
+            Vec::new(),
+        );
+    };
+    let (determination, status, detail_code) = match assessment.outcome {
+        ControlOutcome::InputIndependent => (
+            InputDependenceDetermination::InputIndependent,
+            FindingProofStatus::Supported,
+            "input_dependence_independent",
+        ),
+        ControlOutcome::SizeOrContentSensitive => (
+            InputDependenceDetermination::SizeOrContentSensitive,
+            FindingProofStatus::Supported,
+            "input_dependence_sensitive",
+        ),
+        ControlOutcome::InputDependent => (
+            InputDependenceDetermination::InputDependent,
+            FindingProofStatus::Supported,
+            "input_dependence_dependent",
+        ),
+        ControlOutcome::Inconclusive => (
+            InputDependenceDetermination::Inconclusive,
+            FindingProofStatus::NotVerified,
+            "input_dependence_inconclusive",
+        ),
+    };
+    let (detail_code, detail) =
+        if finding_usage_review_state(crash) == FindingUsageReviewState::Released {
+            (
+                "input_dependence_reviewed",
+                "Every benign control input reproduced the same failure. A person reviewed the \
+                 harness usage and released this finding.",
+            )
+        } else {
+            (detail_code, assessment.reason)
+        };
+    proof_claim(
+        determination,
+        status,
+        detail_code,
+        detail,
+        vec![crash_record.clone()],
+    )
 }
 
 fn proof_claim<T>(

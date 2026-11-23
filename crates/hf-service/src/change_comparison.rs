@@ -397,6 +397,7 @@ impl ServiceContainer {
                 "no retained crash matches the head-only observations".to_owned(),
             ));
         }
+        crate::defectdojo::findings_held(&crashes)?;
         let findings = change_comparison_defectdojo_document(comparison, &crashes);
         let client = crate::defectdojo::DefectDojoClient::from_config(&cfg, &token)?;
         let import = crate::defectdojo::ImportTarget {

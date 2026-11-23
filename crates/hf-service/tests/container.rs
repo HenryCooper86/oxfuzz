@@ -207,6 +207,7 @@ fn stored_run(
 
 fn stored_crash(run_id: uuid::Uuid, target_id: uuid::Uuid, marker: &str) -> hf_core::crash::Crash {
     hf_core::crash::Crash {
+        control_replay: None,
         reproduction: None,
         id: uuid::Uuid::new_v4(),
         run_id,

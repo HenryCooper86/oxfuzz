@@ -307,6 +307,12 @@ pub(crate) async fn cmd_defectdojo(
             .map(|u| format!(" -- {u}"))
             .unwrap_or_default()
     );
+    if outcome.findings_held > 0 {
+        println!(
+            "{} finding(s) held for a harness usage review; see `oxfuzz triage --accept-usage`.",
+            outcome.findings_held
+        );
+    }
     Ok(())
 }
 

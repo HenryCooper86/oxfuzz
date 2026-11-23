@@ -669,6 +669,15 @@ pub(crate) struct TriageArgs {
     /// of silently omitting verdicts.
     #[arg(long, value_enum, default_value_t = AiOption::Auto)]
     pub(crate) ai: AiOption,
+    /// Record that you reviewed this held input-independent finding and the
+    /// harness uses the API validly, releasing it to SARIF and `DefectDojo`.
+    /// Runs no triage.
+    #[arg(long, value_name = "FINDING_ID", conflicts_with = "hold_usage")]
+    pub(crate) accept_usage: Option<uuid::Uuid>,
+    /// Withdraw a recorded usage review, holding the finding again. Runs no
+    /// triage.
+    #[arg(long, value_name = "FINDING_ID")]
+    pub(crate) hold_usage: Option<uuid::Uuid>,
 }
 
 /// Manage the fuzzing corpus for a target.
@@ -1617,6 +1626,44 @@ mod ai_option_tests {
             panic!("expected triage");
         };
         assert_eq!(ai, AiOption::Auto);
+    }
+
+    #[test]
+    fn a_usage_review_names_one_finding_and_one_decision() {
+        let id = uuid::Uuid::from_u128(7).to_string();
+        let accepted = Cli::try_parse_from([
+            "oxfuzz",
+            "triage",
+            "/p",
+            "--target",
+            "t",
+            "--accept-usage",
+            &id,
+        ])
+        .unwrap();
+        let Commands::Triage(crate::args::TriageArgs {
+            accept_usage,
+            hold_usage,
+            ..
+        }) = accepted.command
+        else {
+            panic!("expected triage");
+        };
+        assert_eq!(accept_usage, Some(uuid::Uuid::from_u128(7)));
+        assert_eq!(hold_usage, None);
+
+        assert!(Cli::try_parse_from([
+            "oxfuzz",
+            "triage",
+            "/p",
+            "--target",
+            "t",
+            "--accept-usage",
+            &id,
+            "--hold-usage",
+            &id,
+        ])
+        .is_err());
     }
 
     #[test]

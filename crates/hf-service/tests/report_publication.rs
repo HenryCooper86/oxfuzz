@@ -143,6 +143,7 @@ async fn project(label: &str, symbol: &str) -> ProjectFixture {
     // exactly one finding.
     store
         .upsert_crash(&Crash {
+            control_replay: None,
             reproduction: None,
             id: Uuid::new_v4(),
             run_id: latest.id,

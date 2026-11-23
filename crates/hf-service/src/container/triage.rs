@@ -187,6 +187,9 @@ impl ServiceContainer {
             }
             if let Some(retained) = by_signature.or(same_input) {
                 crash.id = retained.id;
+                // A held finding stays held, and its review stays recorded,
+                // until a later control replay of the same crash replaces it.
+                crash.control_replay.clone_from(&retained.control_replay);
                 if self.scan_control.is_some() {
                     // Classification-only scans must not erase earlier enrichment.
                     crash.bug_report.clone_from(&retained.bug_report);
@@ -606,6 +609,9 @@ impl ServiceContainer {
                 }
             }
         }
+        #[cfg(feature = "control-replay")]
+        self.replay_triaged_controls(workspace, run, engine, binary, &image, &policy, crashes)
+            .await?;
         Ok(())
     }
 
@@ -1065,6 +1071,7 @@ impl ServiceContainer {
                     format!("{} at {}", casr.severity_short, casr.crashline)
                 };
                 hf_core::crash::Crash {
+                    control_replay: None,
                     reproduction: None,
                     id: Uuid::new_v4(),
                     run_id,
@@ -1164,6 +1171,12 @@ impl ServiceContainer {
                 let (kind, sig, summary) = hf_crash::classify(log);
                 crash.kind = kind;
                 crash.summary = summary;
+                // The origin comes from the same log as the classification. A
+                // replay without symbolized frames keeps the ingested origin.
+                let replay_origin = hf_crash::crash_origin(log);
+                if replay_origin != hf_core::crash::CrashOrigin::Unknown {
+                    crash.origin = replay_origin;
+                }
                 if seen_signatures.insert(sig.clone()) {
                     since_new_signature = 0;
                 } else {

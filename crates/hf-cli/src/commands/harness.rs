@@ -542,6 +542,36 @@ pub(crate) async fn cmd_run(
     Ok(())
 }
 
+/// Record or withdraw the review that releases a held finding to exports.
+#[cfg(feature = "triage-disposition")]
+pub(crate) async fn cmd_usage_review(
+    project: PathBuf,
+    finding: uuid::Uuid,
+    accepted: bool,
+) -> anyhow::Result<()> {
+    let container = crate::approval::bootstrap().await;
+    let item = container
+        .finding_usage_review(&project, finding, accepted)
+        .await?;
+    if accepted {
+        println!("Finding {finding} is released to SARIF and DefectDojo.");
+    } else {
+        println!("Finding {finding} is held until its harness usage is reviewed.");
+    }
+    println!("{}", item.disposition.action_detail);
+    Ok(())
+}
+
+/// Explain that finding review was excluded from this build.
+#[cfg(not(feature = "triage-disposition"))]
+pub(crate) async fn cmd_usage_review(
+    _project: PathBuf,
+    _finding: uuid::Uuid,
+    _accepted: bool,
+) -> anyhow::Result<()> {
+    anyhow::bail!("finding review is not included in this build")
+}
+
 pub(crate) async fn cmd_triage(project: PathBuf, target: &str, ai: AiOption) -> anyhow::Result<()> {
     let container = crate::approval::bootstrap().await;
     let crashes = container.triage(&project, target, ai.into()).await?;

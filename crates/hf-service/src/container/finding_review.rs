@@ -150,6 +150,7 @@ impl ServiceContainer {
             })?;
             let latest = latest_run_by_target.get(&target.id).map(|run| run.id) == Some(run.id);
             let target_selector = retained_run_target_selector(run, target)?;
+            let crash_for_state = crash.clone();
             let item = FindingReviewItem {
                 crash,
                 project_root: run.project_root.clone(),
@@ -158,6 +159,7 @@ impl ServiceContainer {
                 target_selector,
                 target_language: target.language,
                 engine: run.engine,
+                usage_review: crate::finding_proof::finding_usage_review_state(&crash_for_state),
                 proof: review.proof,
                 disposition: review.disposition,
                 latest_scoped_actions_allowed: latest,
@@ -192,6 +194,62 @@ impl ServiceContainer {
             .into_iter()
             .find(|item| item.crash.id == owner.crash.id)
             .ok_or_else(|| ClassifiedError::Validation(format!("finding {crash_id} not found")))
+    }
+
+    /// Record or withdraw a person's decision that a held input-independent
+    /// fault uses the target's API validly. Recording it releases the finding
+    /// to SARIF and `DefectDojo`, so it takes the publication approval.
+    ///
+    /// # Errors
+    /// Returns a validation error for a finding outside `project` or one that
+    /// control replay does not show as input-independent.
+    pub async fn finding_usage_review(
+        &self,
+        project: &Path,
+        crash_id: Uuid,
+        accepted: bool,
+    ) -> Result<FindingReviewItem, ClassifiedError> {
+        use crate::finding_proof::{finding_usage_review_state, FindingUsageReviewState};
+
+        self.authorize_recorded(
+            hf_guardrails::Action::PublishFindings {
+                destination: "finding_usage_review".to_owned(),
+            },
+            "finding_usage_review",
+            Some(project),
+        )
+        .await?;
+        let owner = self.crash_owner_for_project(project, crash_id).await?;
+        let store = self.store().ok_or_else(|| {
+            ClassifiedError::Validation("finding review requires persistent storage".to_owned())
+        })?;
+        {
+            // Serialized with triage of this run, which rewrites the same row.
+            let run_lock = self.triage_run_lock(owner.run.id);
+            let _run_triage = run_lock.lock_owned().await;
+            let mut crash = store.get_crash(crash_id).await?.ok_or_else(|| {
+                ClassifiedError::Validation(format!("finding {crash_id} not found"))
+            })?;
+            let state = finding_usage_review_state(&crash);
+            if state == FindingUsageReviewState::NotApplicable {
+                return Err(ClassifiedError::Validation(format!(
+                    "finding {crash_id} is not held for a usage review"
+                )));
+            }
+            if accepted != (state == FindingUsageReviewState::Released) {
+                let controls = crash.control_replay.as_mut().ok_or_else(|| {
+                    ClassifiedError::Internal("held finding has no control evidence".to_owned())
+                })?;
+                controls.usage_review = accepted.then(|| hf_core::crash::CrashUsageReview {
+                    version: 1,
+                    input_sha256: controls.input_sha256.clone(),
+                    binary_sha256: controls.binary_sha256.clone(),
+                    reviewed_at: chrono::Utc::now(),
+                });
+                store.upsert_crash(&crash).await?;
+            }
+        }
+        self.finding_review_for_project(project, crash_id).await
     }
 }
 

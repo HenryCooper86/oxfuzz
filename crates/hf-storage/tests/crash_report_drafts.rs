@@ -18,6 +18,7 @@ async fn store_with_crash(project: &str) -> (tempfile::TempDir, Store, Crash) {
     );
     store.insert_run(&run).await.unwrap();
     let crash = Crash {
+        control_replay: None,
         reproduction: None,
         id: Uuid::new_v4(),
         run_id: run.id,

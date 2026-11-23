@@ -12,6 +12,8 @@ use super::harness_workspace::container_input_path;
 use super::ServiceContainer;
 
 const MAX_REPLAY_LOG_BYTES: usize = 32 * 1024;
+/// Replays of the crash input that must agree before controls are meaningful.
+const CONTROL_BASELINE_RUNS: usize = 2;
 
 #[derive(PartialEq, Eq)]
 struct FailureIdentity {
@@ -289,7 +291,165 @@ pub(crate) fn assess_reproduction(
     }
 }
 
-fn input_digest(path: &Path) -> Result<String, ClassifiedError> {
+/// What control-input replay showed about a confirmed failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ControlOutcome {
+    /// Every control reproduced the failure.
+    InputIndependent,
+    /// Some controls reproduced it and the others exited cleanly.
+    SizeOrContentSensitive,
+    /// Every control exited cleanly.
+    InputDependent,
+    /// The retained evidence cannot support a determination.
+    Inconclusive,
+}
+
+/// Recomputed support for retained control observations.
+pub(crate) struct ControlAssessment {
+    pub(crate) outcome: ControlOutcome,
+    pub(crate) reason: &'static str,
+}
+
+impl ControlAssessment {
+    const fn inconclusive(reason: &'static str) -> Self {
+        Self {
+            outcome: ControlOutcome::Inconclusive,
+            reason,
+        }
+    }
+}
+
+fn exited_cleanly(observation: &CrashReplayObservation) -> bool {
+    observation.termination == Some(CommandTermination::Completed)
+        && observation.exit_code == Some(0)
+        && observation.error.is_none()
+        && !hf_crash::looks_like_crash(&observation.log)
+}
+
+/// The one failure every baseline replay produced, if they agree.
+fn consistent_baseline(baseline: &[CrashReplayObservation]) -> Option<FailureIdentity> {
+    if baseline.len() != CONTROL_BASELINE_RUNS {
+        return None;
+    }
+    let first = failure_identity(baseline.first()?)?;
+    baseline[1..]
+        .iter()
+        .all(|observation| failure_identity(observation).as_ref() == Some(&first))
+        .then_some(first)
+}
+
+/// Assess retained control replay; `None` when no control evidence is retained.
+///
+/// Every match is recomputed from the retained logs and every digest from the
+/// control's kind and length, so a saved flag or digest cannot establish a
+/// result.
+pub(crate) fn assess_controls(crash: &Crash) -> Option<ControlAssessment> {
+    let controls = crash.control_replay.as_ref()?;
+    if controls.input_path != crash.input_path {
+        return Some(ControlAssessment::inconclusive(
+            "The retained control evidence does not describe this crash's input.",
+        ));
+    }
+    Some(assess_control_evidence(crash, controls))
+}
+
+/// Assess one control record on its own terms. A hold reads this rather than
+/// [`assess_controls`], so an interrupted re-triage that changes which input
+/// the crash names cannot release a fault the evidence still shows as
+/// input-independent.
+pub(crate) fn assess_control_evidence(
+    crash: &Crash,
+    controls: &hf_core::crash::CrashControlReplay,
+) -> ControlAssessment {
+    if controls.version != 1
+        || crash.origin != CrashOrigin::Target
+        || !valid_digest(&controls.input_sha256)
+        || !valid_digest(&controls.binary_sha256)
+        || hf_core::runtime::ImmutableImageReference::from_sha256_id(&controls.image).is_err()
+    {
+        return ControlAssessment::inconclusive(
+            "The retained control evidence does not describe this crash's input.",
+        );
+    }
+    let Some(reference) = consistent_baseline(&controls.baseline)
+        .filter(|identity| identity.origin == CrashOrigin::Target)
+    else {
+        return ControlAssessment::inconclusive(
+            "The crash did not reproduce one consistent target failure before the controls.",
+        );
+    };
+    if !controls
+        .baseline
+        .iter()
+        .all(|observation| observation.matches_reference)
+    {
+        return ControlAssessment::inconclusive(
+            "A saved matching flag contradicts the retained baseline.",
+        );
+    }
+    let limit = hf_corpus::DEFAULT_CORPUS_LIMITS.max_input_bytes;
+    let Some(input_len) = usize::try_from(controls.input_len)
+        .ok()
+        .filter(|len| *len > 0 && controls.input_len <= limit)
+    else {
+        return ControlAssessment::inconclusive("The retained input length is invalid.");
+    };
+    if !controls
+        .observations
+        .iter()
+        .map(|control| control.kind)
+        .eq(hf_core::crash::CrashControlKind::ALL)
+    {
+        return ControlAssessment::inconclusive(
+            "The retained control observations are incomplete.",
+        );
+    }
+    let mut reproduced = 0;
+    for control in &controls.observations {
+        let digest = format!("{:x}", Sha256::digest(control.kind.input(input_len)));
+        if control.input_sha256 != digest {
+            return ControlAssessment::inconclusive(
+                "A retained control digest does not match its specified bytes.",
+            );
+        }
+        if digest == controls.input_sha256 {
+            return ControlAssessment::inconclusive(
+                "A control is identical to the crashing input.",
+            );
+        }
+        let matches = failure_identity(&control.observation).as_ref() == Some(&reference);
+        if control.observation.matches_reference != matches {
+            return ControlAssessment::inconclusive(
+                "A saved matching flag contradicts the retained control outcome.",
+            );
+        }
+        if matches {
+            reproduced += 1;
+        } else if !exited_cleanly(&control.observation) {
+            return ControlAssessment::inconclusive(
+                "A control timed out, failed to run, or produced a different failure.",
+            );
+        }
+    }
+    if reproduced == controls.observations.len() {
+        ControlAssessment {
+            outcome: ControlOutcome::InputIndependent,
+            reason: "Every benign control input reproduced the same failure.",
+        }
+    } else if reproduced == 0 {
+        ControlAssessment {
+            outcome: ControlOutcome::InputDependent,
+            reason: "No benign control input reproduced the failure.",
+        }
+    } else {
+        ControlAssessment {
+            outcome: ControlOutcome::SizeOrContentSensitive,
+            reason: "Some benign control inputs reproduced the failure; the others exited cleanly.",
+        }
+    }
+}
+
+fn read_bounded_input(path: &Path) -> Result<Vec<u8>, ClassifiedError> {
     let limit = hf_corpus::DEFAULT_CORPUS_LIMITS.max_input_bytes;
     let file = std::fs::File::open(path).map_err(|e| ClassifiedError::Storage(e.to_string()))?;
     let mut bytes = Vec::new();
@@ -301,7 +461,11 @@ fn input_digest(path: &Path) -> Result<String, ClassifiedError> {
             "crash confirmation input is empty or oversized".to_owned(),
         ));
     }
-    Ok(format!("{:x}", Sha256::digest(&bytes)))
+    Ok(bytes)
+}
+
+fn input_digest(path: &Path) -> Result<String, ClassifiedError> {
+    Ok(format!("{:x}", Sha256::digest(read_bounded_input(path)?)))
 }
 
 fn bounded_log(stdout: &str, stderr: &str) -> String {
@@ -316,7 +480,196 @@ fn bounded_log(stdout: &str, stderr: &str) -> String {
     log
 }
 
+fn replay_limits(policy: &crate::config::TriageSettings) -> ResourceLimits {
+    ResourceLimits {
+        max_mem_mb: 2048,
+        max_cpus: 1,
+        max_duration_secs: policy.replay_timeout_secs,
+        env: std::collections::HashMap::new(),
+        ptrace: false,
+    }
+}
+
+fn replay_sandbox(image: &hf_core::runtime::ImmutableImageReference) -> SandboxOptions {
+    SandboxOptions {
+        workspace_read_only: true,
+        image: Some(image.reference().to_owned()),
+        ..SandboxOptions::default()
+    }
+}
+
 impl ServiceContainer {
+    async fn replay_observation(
+        &self,
+        command: &[String],
+        workspace: &Path,
+        limits: &ResourceLimits,
+        sandbox: &SandboxOptions,
+    ) -> CrashReplayObservation {
+        match self
+            .runtime
+            .run_command_opts(command, workspace, limits, sandbox)
+            .await
+        {
+            Ok(result) => CrashReplayObservation {
+                exit_code: Some(result.exit_code),
+                termination: Some(result.termination),
+                log: bounded_log(&result.stdout, &result.stderr),
+                matches_reference: false,
+                error: None,
+            },
+            Err(error) => CrashReplayObservation {
+                exit_code: None,
+                termination: None,
+                log: String::new(),
+                matches_reference: false,
+                error: Some(bounded_log("", &error.to_string())),
+            },
+        }
+    }
+
+    /// Replay controls for each target-origin crash, whether or not it was
+    /// minimized: an input-independent fault can minimize to an empty input,
+    /// which the minimization path rejects. A failure to stage leaves the crash
+    /// without control evidence, because this experiment is optional.
+    #[cfg(feature = "control-replay")]
+    pub(super) async fn replay_triaged_controls(
+        &self,
+        workspace: &Path,
+        run: &hf_storage::RunRecord,
+        engine: hf_core::engine::EngineKind,
+        binary: &Path,
+        image: &hf_core::runtime::ImmutableImageReference,
+        policy: &crate::config::TriageSettings,
+        crashes: &mut [Crash],
+    ) -> Result<(), ClassifiedError> {
+        use hf_core::engine::EngineKind;
+
+        if !matches!(engine, EngineKind::LibFuzzer | EngineKind::AflPlusPlus) {
+            return Ok(());
+        }
+        for crash in crashes
+            .iter_mut()
+            .take(crate::crash_minimization::MAX_CRASH_MINIMIZATIONS)
+            .filter(|crash| crash.origin == CrashOrigin::Target)
+        {
+            match self
+                .replay_crash_controls(workspace, run, binary, image, policy, crash)
+                .await
+            {
+                Ok(mut controls) => {
+                    // An experiment that could not finish says nothing new, so
+                    // it must not replace evidence that is holding this crash.
+                    let inconclusive = assess_control_evidence(crash, &controls).outcome
+                        == ControlOutcome::Inconclusive;
+                    if inconclusive && crash.control_replay.is_some() {
+                        tracing::warn!(
+                            crash_id = %crash.id,
+                            "crash control replay was inconclusive; keeping retained evidence"
+                        );
+                        continue;
+                    }
+                    controls.usage_review = crash
+                        .control_replay
+                        .as_ref()
+                        .and_then(|retained| retained.usage_review.clone());
+                    crash.control_replay = Some(controls);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        crash_id = %crash.id,
+                        "crash control replay could not be staged: {error}"
+                    );
+                    continue;
+                }
+            }
+            if let Some(store) = &self.store {
+                store
+                    .upsert_crash(crash)
+                    .await
+                    .map_err(|e| ClassifiedError::Storage(e.to_string()))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Replay the crash input, then each control when the baseline agrees.
+    ///
+    /// # Errors
+    /// Returns an error when the input changes or controls cannot be staged.
+    /// A replay that fails to run is retained as an observation instead.
+    #[cfg(feature = "control-replay")]
+    async fn replay_crash_controls(
+        &self,
+        workspace: &Path,
+        run: &hf_storage::RunRecord,
+        binary: &Path,
+        image: &hf_core::runtime::ImmutableImageReference,
+        policy: &crate::config::TriageSettings,
+        crash: &Crash,
+    ) -> Result<hf_core::crash::CrashControlReplay, ClassifiedError> {
+        let input = read_bounded_input(&crash.input_path)?;
+        let input_sha256 = format!("{:x}", Sha256::digest(&input));
+        let limits = replay_limits(policy);
+        let sandbox = replay_sandbox(image);
+        let binary_path = container_input_path(workspace, binary);
+        let command = vec![
+            binary_path.clone(),
+            container_input_path(workspace, &crash.input_path),
+        ];
+        let mut baseline = Vec::with_capacity(CONTROL_BASELINE_RUNS);
+        for _ in 0..CONTROL_BASELINE_RUNS {
+            baseline.push(
+                self.replay_observation(&command, workspace, &limits, &sandbox)
+                    .await,
+            );
+        }
+        if input_digest(&crash.input_path)? != input_sha256 {
+            return Err(ClassifiedError::Validation(
+                "crash control input changed during replay".to_owned(),
+            ));
+        }
+        let reference = consistent_baseline(&baseline);
+        for observation in &mut baseline {
+            observation.matches_reference = reference.is_some();
+        }
+        let mut replay = hf_core::crash::CrashControlReplay {
+            version: 1,
+            input_path: crash.input_path.clone(),
+            input_sha256,
+            input_len: input.len() as u64,
+            binary_sha256: run.binary_rev.clone().ok_or_else(|| {
+                ClassifiedError::Validation("missing retained binary identity".to_owned())
+            })?,
+            image: image.reference().to_owned(),
+            baseline,
+            observations: Vec::new(),
+            usage_review: None,
+        };
+        let Some(reference) = reference else {
+            return Ok(replay);
+        };
+        let staged =
+            crate::crash_minimization::stage_controls(workspace, run.id, crash.id, input.len())?;
+        for control in staged.inputs() {
+            let command = vec![binary_path.clone(), control.container_path.clone()];
+            let mut observation = self
+                .replay_observation(&command, workspace, &limits, &sandbox)
+                .await;
+            observation.matches_reference =
+                failure_identity(&observation).as_ref() == Some(&reference);
+            replay
+                .observations
+                .push(hf_core::crash::CrashControlObservation {
+                    kind: control.kind,
+                    input_sha256: control.sha256.clone(),
+                    observation,
+                });
+        }
+        super::staging::run_binary_path(workspace, run, "")?;
+        Ok(replay)
+    }
+
     pub(super) async fn confirm_minimized_crash(
         &self,
         workspace: &Path,
@@ -352,18 +705,8 @@ impl ServiceContainer {
             candidate: Vec::new(),
             confirmed: false,
         };
-        let limits = ResourceLimits {
-            max_mem_mb: 2048,
-            max_cpus: 1,
-            max_duration_secs: policy.replay_timeout_secs,
-            env: std::collections::HashMap::new(),
-            ptrace: false,
-        };
-        let sandbox = SandboxOptions {
-            workspace_read_only: true,
-            image: Some(image.reference().to_owned()),
-            ..SandboxOptions::default()
-        };
+        let limits = replay_limits(policy);
+        let sandbox = replay_sandbox(image);
         for (input, observations) in [
             (inputs.0, &mut evidence.original),
             (inputs.1, &mut evidence.candidate),
@@ -373,27 +716,10 @@ impl ServiceContainer {
                 container_input_path(workspace, input),
             ];
             for _ in 0..policy.confirmation_runs {
-                let observation = match self
-                    .runtime
-                    .run_command_opts(&command, workspace, &limits, &sandbox)
-                    .await
-                {
-                    Ok(result) => CrashReplayObservation {
-                        exit_code: Some(result.exit_code),
-                        termination: Some(result.termination),
-                        log: bounded_log(&result.stdout, &result.stderr),
-                        matches_reference: false,
-                        error: None,
-                    },
-                    Err(error) => CrashReplayObservation {
-                        exit_code: None,
-                        termination: None,
-                        log: String::new(),
-                        matches_reference: false,
-                        error: Some(bounded_log("", &error.to_string())),
-                    },
-                };
-                observations.push(observation);
+                observations.push(
+                    self.replay_observation(&command, workspace, &limits, &sandbox)
+                        .await,
+                );
             }
         }
         if input_digest(inputs.0)? != evidence.original_sha256
@@ -462,6 +788,7 @@ mod tests {
             error: None,
         };
         Crash {
+            control_replay: None,
             reproduction: Some(CrashReproduction {
                 version: 1,
                 run_id,

@@ -133,6 +133,7 @@ fn ingest_with_mode(
             .as_deref()
             .map_or(CrashOrigin::Unknown, crate::frames::crash_origin);
         crashes.push(Crash {
+            control_replay: None,
             reproduction: None,
             id: Uuid::new_v4(),
             run_id,
@@ -245,6 +246,7 @@ pub fn ingest_syzkaller(
             .unwrap_or(report_path);
         let summary = read_description(&bug_dir).unwrap_or_else(|| parsed.title.clone());
         result.crashes.push(Crash {
+            control_replay: None,
             reproduction: None,
             id: Uuid::new_v4(),
             run_id,

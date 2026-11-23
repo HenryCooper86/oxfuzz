@@ -1219,6 +1219,21 @@ async fn finding_review_routes_require_an_approved_project_and_do_not_start_work
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    let response = hf_web::router::build()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/findings/{}/usage-review", uuid::Uuid::new_v4()))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"project": "/etc", "accepted": true}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]

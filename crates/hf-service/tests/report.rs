@@ -41,6 +41,7 @@ fn sample_target() -> TargetCandidate {
 
 fn sample_crash() -> Crash {
     Crash {
+        control_replay: None,
         reproduction: None,
         id: Uuid::nil(),
         run_id: Uuid::nil(),

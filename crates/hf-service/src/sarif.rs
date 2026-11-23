@@ -250,9 +250,19 @@ pub fn crashes_to_sarif(
     // root frame is the generated harness is a harness defect, so it is dropped
     // here -- before the per-CWE maximum below, which would otherwise let a
     // harness defect raise a rule's severity even with no result of its own.
+    // An input-independent fault is held until a person reviews the harness's
+    // API usage. The run records how many were held, so an empty report cannot
+    // be read as a clean one.
+    let held = crashes
+        .iter()
+        .filter(|crash| crate::finding_proof::held_for_usage_review(crash))
+        .count();
     let crashes: Vec<&Crash> = crashes
         .iter()
-        .filter(|crash| crash.origin != CrashOrigin::Harness)
+        .filter(|crash| {
+            crash.origin != CrashOrigin::Harness
+                && !crate::finding_proof::held_for_usage_review(crash)
+        })
         .collect();
 
     // Rule-level `security-severity` must reflect the MOST severe finding for a
@@ -341,19 +351,23 @@ pub fn crashes_to_sarif(
         results.push(result);
     }
 
+    let mut run = json!({
+        "tool": {
+            "driver": {
+                "name": "oxfuzz",
+                "version": tool_version,
+                "informationUri": "https://github.com/HenryCooper86/oxfuzz",
+                "rules": rules,
+            },
+        },
+        "results": results,
+    });
+    if held > 0 {
+        run["properties"] = json!({ "heldForUsageReview": held });
+    }
     json!({
         "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
         "version": "2.1.0",
-        "runs": [{
-            "tool": {
-                "driver": {
-                    "name": "oxfuzz",
-                    "version": tool_version,
-                    "informationUri": "https://github.com/HenryCooper86/oxfuzz",
-                    "rules": rules,
-                },
-            },
-            "results": results,
-        }],
+        "runs": [run],
     })
 }

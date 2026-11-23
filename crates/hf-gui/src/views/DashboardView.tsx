@@ -1377,7 +1377,7 @@ function DispositionLine({ disposition }: { disposition: TriageDisposition }) {
   const tone =
     disposition.disposition === "resolved" || disposition.disposition === "report_ready"
       ? "ok"
-      : disposition.disposition === "harness_defect" || disposition.disposition === "runtime_artifact"
+      : disposition.disposition === "harness_defect" || disposition.disposition === "runtime_artifact" || disposition.disposition === "input_independent_fault"
         ? undefined
         : "warn";
   return (

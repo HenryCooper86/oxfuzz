@@ -1072,6 +1072,37 @@ pub async fn finding_review(
     Err("triage-disposition finding review is not included in this application build".to_owned())
 }
 
+/// Record or withdraw the review that releases a held finding to exports.
+#[cfg(feature = "triage-disposition")]
+#[tauri::command]
+pub async fn finding_usage_review(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+    finding_id: String,
+    accepted: bool,
+) -> Result<serde_json::Value, String> {
+    let finding_id = uuid::Uuid::parse_str(&finding_id).map_err(|error| error.to_string())?;
+    let item = state
+        .container
+        .finding_usage_review(std::path::Path::new(&project), finding_id, accepted)
+        .await
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(item).map_err(|error| error.to_string())
+}
+
+/// Explain that finding review was excluded from this build.
+#[cfg(not(feature = "triage-disposition"))]
+#[tauri::command]
+pub async fn finding_usage_review(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+    finding_id: String,
+    accepted: bool,
+) -> Result<serde_json::Value, String> {
+    let _ = (state, project, finding_id, accepted);
+    Err("triage-disposition finding review is not included in this application build".to_owned())
+}
+
 /// Build an issue draft/prefilled URL for a triaged crash, targeting the fuzzed
 /// project's configured GitHub/GitLab repository.
 #[tauri::command]

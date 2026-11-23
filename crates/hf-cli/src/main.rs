@@ -37,7 +37,7 @@ use crate::commands::discovery::cmd_discover;
 use crate::commands::fuzz::cmd_fuzz;
 #[cfg(feature = "unreached-surface")]
 use crate::commands::harness::{cmd_attribution, cmd_unreached};
-use crate::commands::harness::{cmd_corpus, cmd_harness, cmd_run, cmd_triage};
+use crate::commands::harness::{cmd_corpus, cmd_harness, cmd_run, cmd_triage, cmd_usage_review};
 #[cfg(feature = "run-closeout")]
 use crate::commands::runs::{cmd_runs_capture_edges, cmd_runs_diff};
 use crate::commands::runs::{cmd_runs_list, cmd_runs_status, cmd_runs_stop};
@@ -299,7 +299,13 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
             project,
             target,
             ai,
-        }) => cmd_triage(project, &target, ai).await?,
+            accept_usage,
+            hold_usage,
+        }) => match (accept_usage, hold_usage) {
+            (Some(finding), _) => cmd_usage_review(project, finding, true).await?,
+            (None, Some(finding)) => cmd_usage_review(project, finding, false).await?,
+            (None, None) => cmd_triage(project, &target, ai).await?,
+        },
         Commands::Corpus(args::CorpusArgs {
             project,
             target,

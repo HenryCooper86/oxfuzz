@@ -950,6 +950,7 @@ impl ServiceContainer {
                 "no triaged crashes to push to DefectDojo".to_owned(),
             ));
         }
+        let findings_held = crate::defectdojo::findings_held(&crashes)?;
         let findings = crate::defectdojo::crashes_to_generic(&crashes);
         let client = crate::defectdojo::DefectDojoClient::from_config(&cfg, &token)?;
         let product_name = cfg
@@ -976,7 +977,9 @@ impl ServiceContainer {
             // shorter/non-deterministic run happened not to rediscover.
             close_old_findings: false,
         };
-        client.import(&import, &findings).await
+        let mut outcome = client.import(&import, &findings).await?;
+        outcome.findings_held = findings_held;
+        Ok(outcome)
     }
 }
 

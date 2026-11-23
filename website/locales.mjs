@@ -153,7 +153,7 @@ export const locales = {
     term_python_caption:
       "A real session on a sample Python module. Pauses and long paths are shortened; every line is what the command printed.",
     new_status:
-      'These features are in the desktop packages below from v0.9.9. The <code>oxfuzz</code> command-line tool is not in those packages; <a href="https://github.com/HenryCooper86/oxfuzz/blob/main/docs/guides/INSTALL.md" rel="noopener">install it from source</a> at the v0.9.9 tag. The <a href="https://github.com/HenryCooper86/oxfuzz/blob/main/CHANGELOG.md" rel="noopener">changelog</a> lists every change, including fixes on the main branch since v0.9.9 (crash minimization, honggfuzz replay and more) that will ship in the next release.',
+      'These features are in the desktop packages below from v0.9.9. The <code>oxfuzz</code> command-line tool is not in those packages; <a href="https://github.com/HenryCooper86/oxfuzz/blob/main/docs/guides/INSTALL.md" rel="noopener">install it from source</a> at the v0.9.9 tag. The <a href="https://github.com/HenryCooper86/oxfuzz/blob/main/CHANGELOG.md" rel="noopener">changelog</a> lists every change, including fixes on the main branch since v0.9.9 (crash minimization, honggfuzz replay, control-input triage and more) that will ship in the next release.',
 
     control_title: "The fuzzer runs untrusted code. You stay in charge of it.",
     control_1_title: "Sandboxed",
@@ -372,7 +372,7 @@ export const locales = {
     term_python_caption:
       "真实的运行过程，对象是一个 Python 示例模块。停顿和过长的路径做了缩短，每一行都是命令的原始输出。",
     new_status:
-      '从 v0.9.9 起，下方的桌面安装包已包含这些功能。<code>oxfuzz</code> 命令行工具不在安装包内，请在 v0.9.9 标签处<a href="https://github.com/HenryCooper86/oxfuzz/blob/main/docs/guides/INSTALL.md" rel="noopener">从源码安装</a>。全部改动见<a href="https://github.com/HenryCooper86/oxfuzz/blob/main/CHANGELOG.md" rel="noopener">更新日志</a>，其中也包括 v0.9.9 之后已合入 main 分支、将随下一版本发布的修复（崩溃最小化、honggfuzz 重放等）。',
+      '从 v0.9.9 起，下方的桌面安装包已包含这些功能。<code>oxfuzz</code> 命令行工具不在安装包内，请在 v0.9.9 标签处<a href="https://github.com/HenryCooper86/oxfuzz/blob/main/docs/guides/INSTALL.md" rel="noopener">从源码安装</a>。全部改动见<a href="https://github.com/HenryCooper86/oxfuzz/blob/main/CHANGELOG.md" rel="noopener">更新日志</a>，其中也包括 v0.9.9 之后已合入 main 分支、将随下一版本发布的修复（崩溃最小化、honggfuzz 重放、对照输入分诊等）。',
 
     control_title: "模糊测试运行的是不可信代码，控制权始终在你手里。",
     control_1_title: "沙箱隔离",

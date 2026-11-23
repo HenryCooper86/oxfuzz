@@ -309,6 +309,7 @@ pub async fn patch_to_proof_fixture(
     let finding_id = uuid::Uuid::new_v4();
     store
         .upsert_crash(&Crash {
+            control_replay: None,
             reproduction: None,
             id: finding_id,
             run_id: run.id,
@@ -560,6 +561,7 @@ pub async fn change_aware_fixture() -> Result<ChangeAwareTestFixture, Box<dyn Er
     store.insert_run(&head).await?;
 
     let crash = |run_id: uuid::Uuid, signature: &str| Crash {
+        control_replay: None,
         reproduction: None,
         id: uuid::Uuid::new_v4(),
         run_id,

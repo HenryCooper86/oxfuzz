@@ -224,6 +224,7 @@ async fn crash_attribution_reaches_the_triage_gate() {
     // One attributed, one not: the claim that every crash is triaged fails.
     for origin in [CrashOrigin::Target, CrashOrigin::Unknown] {
         let crash = Crash {
+            control_replay: None,
             reproduction: None,
             id: Uuid::new_v4(),
             run_id: record.id,

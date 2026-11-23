@@ -1194,6 +1194,7 @@ async fn remediation_fixture(store: &Store, project: &str) -> RemediationOperati
     let finding_id = Uuid::new_v4();
     store
         .upsert_crash(&Crash {
+            control_replay: None,
             reproduction: None,
             id: finding_id,
             run_id: run.id,
@@ -2713,6 +2714,7 @@ async fn dedupe_crashes_collapses_same_run_and_signature() {
     store.insert_run(&run).await.unwrap();
     let target = Uuid::new_v4();
     let mk = |sig: &str| Crash {
+        control_replay: None,
         reproduction: None,
         id: Uuid::new_v4(),
         run_id: run.id,
@@ -2765,6 +2767,7 @@ async fn list_all_crashes_is_newest_first_by_insertion_order() {
     store.insert_run(&run).await.unwrap();
     let target_id = Uuid::new_v4();
     let crash = |id: &str, summary: &str| Crash {
+        control_replay: None,
         reproduction: None,
         id: Uuid::parse_str(id).unwrap(),
         run_id: run.id,
@@ -2800,6 +2803,7 @@ async fn list_all_crashes_is_newest_first_by_insertion_order() {
     // crash does not jump to the top just because it was re-processed.
     store
         .upsert_crash(&Crash {
+            control_replay: None,
             reproduction: None,
             summary: "oldest-retriaged".to_owned(),
             ..oldest.clone()
@@ -3100,6 +3104,7 @@ async fn crash_batch_persistence_is_atomic() {
     store.insert_run(&run).await.unwrap();
     let target_id = Uuid::new_v4();
     let crash = |summary: &str| Crash {
+        control_replay: None,
         reproduction: None,
         id: Uuid::new_v4(),
         run_id: run.id,
@@ -3648,6 +3653,7 @@ async fn clear_knowledge_empties_all_domain_tables() {
     let run = RunRecord::new("/proj".to_owned(), EngineKind::LibFuzzer, None, Utc::now());
     store.insert_run(&run).await.unwrap();
     let crash = Crash {
+        control_replay: None,
         reproduction: None,
         id: Uuid::new_v4(),
         run_id: run.id,
@@ -3822,6 +3828,7 @@ async fn delete_project_cascades_and_isolates_other_projects() {
             store.insert_run(&run).await.unwrap();
             store
                 .upsert_crash(&Crash {
+                    control_replay: None,
                     reproduction: None,
                     id: Uuid::new_v4(),
                     run_id,
@@ -3944,6 +3951,7 @@ async fn delete_orphans_removes_dangling_children_keeps_valid() {
     let run_id = Uuid::new_v4();
     store
         .upsert_crash(&Crash {
+            control_replay: None,
             reproduction: None,
             id: Uuid::new_v4(),
             run_id,
@@ -3977,6 +3985,7 @@ async fn crash_and_corpus_roundtrip() {
     let run_id = Uuid::new_v4();
     let target_id = Uuid::new_v4();
     let crash = Crash {
+        control_replay: None,
         reproduction: None,
         id: Uuid::new_v4(),
         run_id,
@@ -8059,6 +8068,7 @@ async fn crashes_by_target_span_runs_newest_run_first() {
     store.insert_run(&older).await.unwrap();
     store.insert_run(&newer).await.unwrap();
     let crash_for = |run: &RunRecord, target_id: Uuid, signature: &str| Crash {
+        control_replay: None,
         reproduction: None,
         id: Uuid::new_v4(),
         run_id: run.id,
