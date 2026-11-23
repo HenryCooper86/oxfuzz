@@ -30,6 +30,37 @@ describe("service-owned finding proof card", () => {
     );
   });
 
+  it("shows control-replay evidence and its disposition from the service view", () => {
+    const types = source("../types/index.ts");
+    const card = source("../components/FindingProofCard.tsx");
+    const triage = source("../views/TriageView.tsx");
+    const translations = extraTranslationDictionariesJson;
+    expect(types).toContain("input_dependence: FindingProofClaim<InputDependenceDetermination>");
+    expect(types).toContain('"input_independent_fault"');
+    expect(types).toContain('"review_harness_usage"');
+    expect(types).toContain('"target_frames_fault"');
+    expect(card).toContain("claim: proof.input_dependence");
+    expect(triage).toContain('"input_independent_fault"');
+    for (const key of [
+      "triage.disposition.input_independent_fault",
+      "findingProof.inputDependence",
+      "findingProof.value.input_independent",
+      "findingProof.value.size_or_content_sensitive",
+      "findingProof.value.input_dependent",
+      "findingProof.detail.input_dependence_not_run",
+      "findingProof.detail.input_dependence_independent",
+      "findingProof.detail.input_dependence_sensitive",
+      "findingProof.detail.input_dependence_dependent",
+      "findingProof.detail.input_dependence_inconclusive",
+      "findingProof.detail.input_dependence_reviewed",
+      "triage.acceptUsage",
+      "triage.holdUsage",
+      "triage.pushHeld",
+    ]) {
+      expect(translations.split(`"${key}"`).length - 1).toBe(2);
+    }
+  });
+
   it("keeps English and Chinese proof labels paired", () => {
     const translations = extraTranslationDictionariesJson;
     expect(translations).toContain('"findingProof.title": "Finding Proof"');

@@ -253,6 +253,7 @@ async fn fixture() -> (
     let crash_path = run_root.join("out/crash-proof");
     std::fs::write(&crash_path, b"crash").unwrap();
     let crash = Crash {
+        control_replay: None,
         reproduction: None,
         id: Uuid::new_v4(),
         run_id: run.id,

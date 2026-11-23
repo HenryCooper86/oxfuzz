@@ -126,6 +126,7 @@ mod tests {
     #[test]
     fn an_unparseable_answer_is_titled_by_the_crash_itself() {
         let crash = Crash {
+            control_replay: None,
             reproduction: None,
             id: uuid::Uuid::nil(),
             run_id: uuid::Uuid::nil(),

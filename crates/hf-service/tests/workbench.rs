@@ -154,6 +154,7 @@ async fn dashboard_summarizes_targets_harnesses_runs_and_crashes() {
     let harness = sample_harness(target.id);
     let run = sample_run("/proj", harness.id);
     let crash = Crash {
+        control_replay: None,
         reproduction: None,
         id: Uuid::new_v4(),
         run_id: run.id,
@@ -230,6 +231,7 @@ async fn the_agent_is_told_what_the_store_retains_for_a_project() {
     let harness = sample_harness(target.id);
     let run = sample_run("/proj", harness.id);
     let crash = Crash {
+        control_replay: None,
         reproduction: None,
         id: Uuid::new_v4(),
         run_id: run.id,
@@ -278,6 +280,7 @@ async fn finding_proof_preserves_harness_origin_and_undefined_casr() {
     let harness = sample_harness(target.id);
     let run = sample_run("/proj", harness.id);
     let crash = Crash {
+        control_replay: None,
         reproduction: None,
         id: Uuid::new_v4(),
         run_id: run.id,
@@ -345,6 +348,7 @@ async fn finding_proof_preserves_harness_origin_and_undefined_casr() {
 #[test]
 fn finding_proof_maps_every_persisted_origin_and_casr_classification() {
     let mut crash = Crash {
+        control_replay: None,
         reproduction: None,
         id: Uuid::new_v4(),
         run_id: Uuid::new_v4(),
@@ -733,6 +737,7 @@ async fn run_history_counts_deduped_crashes_for_legacy_runs() {
     store.insert_run(&run).await.unwrap();
     for input in ["crash-1", "crash-2"] {
         let crash = Crash {
+            control_replay: None,
             reproduction: None,
             id: Uuid::new_v4(),
             run_id: run.id,
@@ -781,6 +786,7 @@ async fn run_history_dedups_legacy_crashes_within_each_run_not_across_runs() {
     store.insert_run(&second_run).await.unwrap();
     for (run, input) in [(&first_run, "crash-a"), (&second_run, "crash-b")] {
         let crash = Crash {
+            control_replay: None,
             reproduction: None,
             id: Uuid::new_v4(),
             run_id: run.id,
@@ -820,6 +826,7 @@ async fn dashboard_project_filter_does_not_leak_other_project_reviews() {
     let target = sample_target("/other");
     let run = RunRecord::new("/other", EngineKind::LibFuzzer, None, Utc::now());
     let crash = Crash {
+        control_replay: None,
         reproduction: None,
         id: Uuid::new_v4(),
         run_id: run.id,
@@ -911,6 +918,7 @@ async fn issue_export_returns_reviewable_payload() {
     let target = sample_target("/proj");
     let run = RunRecord::new("/proj", EngineKind::LibFuzzer, None, Utc::now());
     let crash = Crash {
+        control_replay: None,
         reproduction: None,
         id: Uuid::new_v4(),
         run_id: run.id,
@@ -1045,6 +1053,7 @@ async fn the_crash_queue_is_ordered_by_disposition_and_carries_one_next_action()
         (CrashOrigin::Target, true, Disposition::ReachabilityUnproven),
     ] {
         let crash = Crash {
+            control_replay: None,
             reproduction: None,
             id: Uuid::new_v4(),
             run_id: run.id,
@@ -1113,6 +1122,7 @@ async fn actual_workbench_enrichment_places_three_actionable_findings_before_one
 
     for index in 0..103_u128 {
         let crash = Crash {
+            control_replay: None,
             reproduction: None,
             id: Uuid::from_u128(index + 1),
             run_id: run.id,

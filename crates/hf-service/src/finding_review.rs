@@ -6,7 +6,9 @@ use hf_core::target::TargetLanguage;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::finding_proof::{CasrExploitabilityDetermination, FindingProofCard};
+use crate::finding_proof::{
+    CasrExploitabilityDetermination, FindingProofCard, FindingUsageReviewState,
+};
 use crate::triage_disposition::{Disposition, TriageDisposition};
 
 /// Which dispositions a review queue includes.
@@ -46,6 +48,8 @@ pub struct FindingReviewItem {
     pub engine: EngineKind,
     pub proof: FindingProofCard,
     pub disposition: TriageDisposition,
+    /// Whether this finding is held out of SARIF and `DefectDojo`.
+    pub usage_review: FindingUsageReviewState,
     /// Current report, reproduction, and `DefectDojo` operations all select the
     /// latest target run. Presentations must disable them for older evidence.
     pub latest_scoped_actions_allowed: bool,

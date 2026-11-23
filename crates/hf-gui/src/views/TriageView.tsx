@@ -26,6 +26,7 @@ const DISPOSITIONS: TriageDisposition["disposition"][] = [
   "report_ready",
   "reachability_unproven",
   "minimization_pending",
+  "input_independent_fault",
   "symbolization_pending",
   "runtime_artifact",
   "harness_defect",
@@ -69,6 +70,7 @@ function ScopedTriageView({ embedded, initialRunId, onNavigate }: { embedded: bo
   const selection = savedSelection && (!runFilter || savedSelection.runId === runFilter) ? savedSelection : null;
   const [targetFilter, setTargetFilter] = useState("");
   const [reloadVersion, setReloadVersion] = useState(0);
+  const [reviewingUsage, setReviewingUsage] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [stoppingScan, setStoppingScan] = useState(false);
   const [scanProgress, setScanProgress] = useState<ScanProgress | null>(null);
@@ -435,14 +437,34 @@ function ScopedTriageView({ embedded, initialRunId, onNavigate }: { embedded: bo
     const request = ++actionRequest.current;
     setPushing(true);
     try {
-      const outcome = await getTransport().invoke<{ findings_pushed: number }>("push_to_defectdojo", { project: activeProject || ".", target: activeFinding.target_selector, expectedRunId: activeFinding.crash.run_id });
-      if (request === actionRequest.current && mounted.current) setMessage(t("triage.pushed", { n: outcome.findings_pushed, reimport: "", where: "" }));
+      const outcome = await getTransport().invoke<{ findings_pushed: number; findings_held: number }>("push_to_defectdojo", { project: activeProject || ".", target: activeFinding.target_selector, expectedRunId: activeFinding.crash.run_id });
+      if (request === actionRequest.current && mounted.current) {
+        const pushed = t("triage.pushed", { n: outcome.findings_pushed, reimport: "", where: "" });
+        setMessage(outcome.findings_held > 0 ? `${pushed} ${t("triage.pushHeld", { n: outcome.findings_held })}` : pushed);
+      }
     } catch (error) {
       if (request === actionRequest.current && mounted.current) setMessage(t("triage.pushFailed", { error: String(error) }));
     } finally {
       if (request === actionRequest.current && mounted.current) setPushing(false);
     }
   }, [activeFinding, activeProject, t]);
+
+  const reviewUsage = useCallback(async (item: FindingReviewItem, accepted: boolean) => {
+    const request = ++actionRequest.current;
+    setReviewingUsage(true);
+    try {
+      const updated = await getTransport().invoke<FindingReviewItem>("finding_usage_review", { project: item.project_root, findingId: item.crash.id, accepted });
+      if (request === actionRequest.current && mounted.current) {
+        setSelectedFinding(updated);
+        setReloadVersion((version) => version + 1);
+        setMessage(t(accepted ? "triage.usageReleased" : "triage.usageHeldAgain"));
+      }
+    } catch (error) {
+      if (request === actionRequest.current && mounted.current) setMessage(t("triage.usageReviewFailed", { error: String(error) }));
+    } finally {
+      if (request === actionRequest.current && mounted.current) setReviewingUsage(false);
+    }
+  }, [t]);
 
   const verifyCrash = useCallback(async (item: FindingReviewItem) => {
     if (!item.latest_scoped_actions_allowed) return;
@@ -547,7 +569,7 @@ function ScopedTriageView({ embedded, initialRunId, onNavigate }: { embedded: bo
         <div className="surface-card flex-1 min-w-0" style={{ padding: "var(--space-md)" }}>
           {detailLoading && <div role="status" className="text-xs text-text-muted">{t("triage.loadingFinding")}</div>}
           {detailError && <div role="alert" className="text-xs" style={{ color: "var(--error)" }}>{t("triage.findingUnavailable", { id: selection?.findingId ?? "", error: detailError })}</div>}
-          {activeFinding && <CrashDetail item={activeFinding} verdict={verdicts[activeFinding.crash.id]} onVerify={() => void verifyCrash(activeFinding)} actionBusy={actionsBusy} />}
+          {activeFinding && <CrashDetail item={activeFinding} verdict={verdicts[activeFinding.crash.id]} onVerify={() => void verifyCrash(activeFinding)} onUsageReview={(accepted) => void reviewUsage(activeFinding, accepted)} reviewingUsage={reviewingUsage} actionBusy={actionsBusy} />}
         </div>
       </div>}
       {reportMd !== null && <Suspense fallback={null}><ReportPreview markdown={reportMd} onClose={() => setReportMd(null)} onExport={(format) => void exportReport(format)} formats={formats} /></Suspense>}
@@ -556,7 +578,7 @@ function ScopedTriageView({ embedded, initialRunId, onNavigate }: { embedded: bo
   );
 }
 
-function CrashDetail({ item, verdict, onVerify, actionBusy }: { item: FindingReviewItem; verdict: CrashVerdict | "loading" | "none" | undefined; onVerify: () => void; actionBusy: boolean }) {
+function CrashDetail({ item, verdict, onVerify, onUsageReview, reviewingUsage, actionBusy }: { item: FindingReviewItem; verdict: CrashVerdict | "loading" | "none" | undefined; onVerify: () => void; onUsageReview: (accepted: boolean) => void; reviewingUsage: boolean; actionBusy: boolean }) {
   const { t } = useI18n();
   const { crash } = item;
   // Fix verification is a deliberate next step, not part of reading a crash.
@@ -589,6 +611,10 @@ function CrashDetail({ item, verdict, onVerify, actionBusy }: { item: FindingRev
       {item.disposition.action_detail && <span className="text-text-secondary">{t("triage.nextStep")}: {item.disposition.action_detail}</span>}
       {item.disposition.claim_limit && <span className="text-text-muted">{item.disposition.claim_limit}</span>}
     </div>
+    {item.usage_review !== "not_applicable" && <div data-testid="usage-review" className="rounded-md border border-border text-xs flex flex-col gap-2" style={{ padding: "var(--space-sm)" }}>
+      <span className="text-text-secondary">{t(item.usage_review === "held" ? "triage.usageHeldDetail" : "triage.usageReleasedDetail")}</span>
+      <div><Button size="sm" variant="outline" loading={reviewingUsage} disabled={actionBusy} onClick={() => onUsageReview(item.usage_review === "held")}>{t(item.usage_review === "held" ? "triage.acceptUsage" : "triage.holdUsage")}</Button></div>
+    </div>}
     {crash.casr && <div className="border-t border-border pt-3">
       <div className="flex flex-wrap items-center gap-2 mb-2">
         <SeverityBadge severity={crash.casr.severity} title={crash.casr.severity_short || crash.casr.severity} />

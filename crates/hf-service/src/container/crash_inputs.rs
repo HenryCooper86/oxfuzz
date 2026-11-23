@@ -467,6 +467,7 @@ mod cluster_bucketing_tests {
 
     fn crash(signature: &str, cluster: Option<u32>) -> Crash {
         Crash {
+            control_replay: None,
             reproduction: None,
             id: Uuid::new_v4(),
             run_id: Uuid::nil(),

@@ -60,6 +60,11 @@ export function FindingProofCard({
       claim: proof.deterministic_reproduction,
     },
     {
+      key: "inputDependence",
+      label: t("findingProof.inputDependence"),
+      claim: proof.input_dependence,
+    },
+    {
       key: "casrExploitability",
       label: t("findingProof.casrExploitability"),
       claim: proof.casr_exploitability,

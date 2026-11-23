@@ -789,6 +789,7 @@ fn triage_disposition_routes() -> Router<AppState> {
     Router::new()
         .route("/findings/review", post(finding_review_queue))
         .route("/findings/{id}/review", get(finding_review))
+        .route("/findings/{id}/usage-review", post(finding_usage_review))
 }
 
 #[cfg(not(feature = "triage-disposition"))]
@@ -1990,6 +1991,28 @@ async fn finding_review(
     let item = state
         .container
         .finding_review_for_project(&project, id)
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(item)?))
+}
+
+#[cfg(feature = "triage-disposition")]
+#[derive(Debug, Deserialize)]
+struct FindingUsageReviewRequest {
+    project: PathBuf,
+    accepted: bool,
+}
+
+#[cfg(feature = "triage-disposition")]
+async fn finding_usage_review(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+    Json(request): Json<FindingUsageReviewRequest>,
+) -> ApiResult<serde_json::Value> {
+    let project = approved_project(&state, &request.project)?;
+    let item = state
+        .container
+        .finding_usage_review(&project, id, request.accepted)
         .await
         .map_err(classified_api_error)?;
     Ok(Json(public_value(item)?))

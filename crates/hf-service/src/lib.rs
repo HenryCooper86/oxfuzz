@@ -223,10 +223,11 @@ pub use defectdojo_lifecycle::{DefectDojoState, DefectDojoStatus};
 #[cfg(feature = "patch-to-proof")]
 pub use finding_proof::enrich_fix_verification;
 pub use finding_proof::{
-    finding_proof_card, CasrExploitabilityDetermination, FindingEvidenceKind,
-    FindingEvidenceReference, FindingProofCard, FindingProofClaim, FindingProofStatus,
-    FixVerificationDetermination, ReachabilityDetermination, ReproductionDetermination,
-    FINDING_PROOF_SCHEMA_VERSION,
+    finding_proof_card, finding_usage_review_state, held_for_usage_review,
+    CasrExploitabilityDetermination, FindingEvidenceKind, FindingEvidenceReference,
+    FindingProofCard, FindingProofClaim, FindingProofStatus, FindingUsageReviewState,
+    FixVerificationDetermination, InputDependenceDetermination, ReachabilityDetermination,
+    ReproductionDetermination, FINDING_PROOF_SCHEMA_VERSION,
 };
 #[cfg(feature = "triage-disposition")]
 pub use finding_review::{FindingDispositionFilter, FindingReviewFilter, FindingReviewItem};

@@ -120,6 +120,92 @@ pub struct CrashReplayObservation {
     pub error: Option<String>,
 }
 
+/// One benign input replayed to test whether a fault depends on the fuzzed bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CrashControlKind {
+    /// The candidate's length, every byte `0x00`.
+    SameLengthZeros,
+    /// The candidate's length, every byte `0x41`.
+    SameLengthFill,
+    /// One byte, `0x01`.
+    SingleByte,
+}
+
+impl CrashControlKind {
+    /// Every control, in replay order.
+    pub const ALL: [Self; 3] = [
+        Self::SameLengthZeros,
+        Self::SameLengthFill,
+        Self::SingleByte,
+    ];
+
+    /// The exact control bytes for a candidate of `candidate_len` bytes.
+    #[must_use]
+    pub fn input(self, candidate_len: usize) -> Vec<u8> {
+        match self {
+            Self::SameLengthZeros => vec![0x00; candidate_len],
+            Self::SameLengthFill => vec![0x41; candidate_len],
+            Self::SingleByte => vec![0x01],
+        }
+    }
+}
+
+/// One retained replay of a control input.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CrashControlObservation {
+    /// Which control was replayed.
+    pub kind: CrashControlKind,
+    /// Digest of the exact bytes replayed.
+    pub input_sha256: String,
+    /// What the sandbox observed.
+    pub observation: CrashReplayObservation,
+}
+
+/// A person's recorded decision that a held input-independent fault uses the
+/// target's API validly, bound to the exact evidence they reviewed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CrashUsageReview {
+    /// Evidence format.
+    pub version: u32,
+    /// Digest of the crash input the reviewed controls replayed.
+    pub input_sha256: String,
+    /// Digest of the run binary the reviewed controls replayed.
+    pub binary_sha256: String,
+    /// When the decision was recorded.
+    pub reviewed_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Control-input replay retained for a crash.
+///
+/// The baseline replays the crash's own input first, so the controls are
+/// compared with what this binary does now rather than with a stored label.
+/// Control inputs are derived from `kind` and `input_len`, so only their
+/// digests are kept.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CrashControlReplay {
+    /// Evidence format.
+    pub version: u32,
+    /// The crash input the baseline replayed.
+    pub input_path: PathBuf,
+    /// Digest of that input.
+    pub input_sha256: String,
+    /// Length of that input.
+    pub input_len: u64,
+    /// Digest of the immutable run binary used for every attempt.
+    pub binary_sha256: String,
+    /// Exact sandbox image used for every attempt.
+    pub image: String,
+    /// Replays of the crash input.
+    pub baseline: Vec<CrashReplayObservation>,
+    /// One observation per control, in [`CrashControlKind::ALL`] order. Empty
+    /// when the baseline did not reproduce one consistent failure.
+    pub observations: Vec<CrashControlObservation>,
+    /// The review that released this fault to exports, when one is recorded.
+    #[serde(default)]
+    pub usage_review: Option<CrashUsageReview>,
+}
+
 /// Empirical evidence retained by independent crash-minimization confirmation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrashReproduction {
@@ -173,6 +259,9 @@ pub struct Crash {
     /// Observed reproduction evidence; absent on older or unconfirmed runs.
     #[serde(default)]
     pub reproduction: Option<CrashReproduction>,
+    /// Control-input replay; absent when it did not run or predates this field.
+    #[serde(default)]
+    pub control_replay: Option<CrashControlReplay>,
     pub bug_report: Option<BugReport>,
     /// CASR severity/analysis report, when triage ran CASR.
     #[serde(default)]

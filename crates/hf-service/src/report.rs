@@ -1929,6 +1929,7 @@ mod ensure_required_evidence_tests {
             kind: CrashKind::Asan,
             summary: "heap-buffer-overflow".to_owned(),
             minimized: true,
+            control_replay: None,
             reproduction: with_reproduction.then(|| CrashReproduction {
                 version: 2,
                 run_id: uuid::Uuid::new_v4(),

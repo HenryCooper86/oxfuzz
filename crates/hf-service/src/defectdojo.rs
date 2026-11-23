@@ -360,13 +360,42 @@ pub fn crashes_to_generic(crashes: &[Crash]) -> serde_json::Value {
     // whose root frame is the generated harness is a harness bug to fix, not a
     // finding to file against the project, so it is dropped here rather than at
     // the call site -- this is the only mapper, and filing is not reversible.
+    // An input-independent fault is held here for the same reason until a
+    // person reviews the harness's API usage.
     serde_json::json!({
         "findings": crashes
             .iter()
-            .filter(|crash| crash.origin != CrashOrigin::Harness)
+            .filter(|crash| {
+                crash.origin != CrashOrigin::Harness
+                    && !crate::finding_proof::held_for_usage_review(crash)
+            })
             .map(finding_for)
             .collect::<Vec<_>>(),
     })
+}
+
+/// How many of `crashes` a push leaves out for a usage review.
+///
+/// # Errors
+/// Returns a validation error when held findings are all the push would carry,
+/// so the operator sees why nothing was filed instead of an empty import.
+pub fn findings_held(crashes: &[Crash]) -> Result<usize, ClassifiedError> {
+    let held = crashes
+        .iter()
+        .filter(|crash| crate::finding_proof::held_for_usage_review(crash))
+        .count();
+    if held > 0
+        && crashes.iter().all(|crash| {
+            crash.origin == CrashOrigin::Harness
+                || crate::finding_proof::held_for_usage_review(crash)
+        })
+    {
+        return Err(ClassifiedError::Validation(format!(
+            "{held} finding(s) are held for a harness usage review; repair the harness or record \
+             the review before pushing to DefectDojo"
+        )));
+    }
+    Ok(held)
 }
 
 /// Where a set of findings is filed in `DefectDojo`'s product/engagement/test tree.
@@ -394,6 +423,8 @@ pub struct PushOutcome {
     pub engagement_id: Option<i64>,
     /// Number of findings sent in this push.
     pub findings_pushed: usize,
+    /// Number of findings left out until a harness usage review is recorded.
+    pub findings_held: usize,
     /// Whether this went through reimport-scan (vs a fresh import-scan).
     pub reimported: bool,
     /// Deep link to the test in the `DefectDojo` UI, when a test id is known.
@@ -568,6 +599,7 @@ impl DefectDojoClient {
             test_id,
             engagement_id,
             findings_pushed: count,
+            findings_held: 0,
             reimported: target.reimport,
             url: link,
         })
@@ -583,6 +615,7 @@ mod tests {
 
     fn base_crash() -> Crash {
         Crash {
+            control_replay: None,
             reproduction: None,
             id: Uuid::nil(),
             run_id: Uuid::nil(),

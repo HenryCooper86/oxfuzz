@@ -183,6 +183,95 @@ pub(crate) fn prepare(
     })))
 }
 
+/// One control input staged for a sandbox replay.
+#[cfg(feature = "control-replay")]
+pub(crate) struct StagedControlInput {
+    pub(crate) kind: hf_core::crash::CrashControlKind,
+    pub(crate) container_path: String,
+    pub(crate) sha256: String,
+}
+
+/// Control inputs in a private run-owned directory, removed on drop: they are
+/// derivable from their kind and the candidate length.
+#[cfg(feature = "control-replay")]
+pub(crate) struct StagedControls {
+    root: PathBuf,
+    inputs: Vec<StagedControlInput>,
+}
+
+#[cfg(feature = "control-replay")]
+impl StagedControls {
+    pub(crate) fn inputs(&self) -> &[StagedControlInput] {
+        &self.inputs
+    }
+}
+
+#[cfg(feature = "control-replay")]
+impl Drop for StagedControls {
+    fn drop(&mut self) {
+        // A leftover directory holds only benign derived bytes and is ignored
+        // by later replays, which always stage a fresh directory.
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+/// Write each control input for a candidate of `candidate_len` bytes.
+///
+/// # Errors
+/// Returns an error when a run-owned path is not a regular directory or a
+/// control cannot be written.
+#[cfg(feature = "control-replay")]
+pub(crate) fn stage_controls(
+    workspace: &Path,
+    run_id: Uuid,
+    crash_id: Uuid,
+    candidate_len: usize,
+) -> Result<StagedControls, ClassifiedError> {
+    use sha2::{Digest, Sha256};
+    use std::io::Write;
+
+    let workspace = canonical_directory(workspace, "workspace")?;
+    let run_root = canonical_directory(
+        &workspace.join("runs").join(run_id.to_string()),
+        "run evidence",
+    )?;
+    require_below(&workspace, &run_root, "run evidence")?;
+    let triage = ensure_child_directory(&run_root, "triage")?;
+    let controls = ensure_child_directory(&triage, "controls")?;
+    let root = controls.join(format!("{crash_id}-{}", Uuid::new_v4()));
+    std::fs::create_dir(&root).map_err(|error| {
+        ClassifiedError::Storage(format!(
+            "create control directory {}: {error}",
+            root.display()
+        ))
+    })?;
+    let mut staged = StagedControls {
+        root,
+        inputs: Vec::with_capacity(hf_core::crash::CrashControlKind::ALL.len()),
+    };
+    for (index, kind) in hf_core::crash::CrashControlKind::ALL
+        .into_iter()
+        .enumerate()
+    {
+        let bytes = kind.input(candidate_len);
+        let path = staged.root.join(format!("control-{index}"));
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .and_then(|mut file| file.write_all(&bytes))
+            .map_err(|error| {
+                ClassifiedError::Storage(format!("write control {}: {error}", path.display()))
+            })?;
+        staged.inputs.push(StagedControlInput {
+            kind,
+            container_path: container_path(&workspace, &path)?,
+            sha256: format!("{:x}", Sha256::digest(&bytes)),
+        });
+    }
+    Ok(staged)
+}
+
 fn canonical_directory(path: &Path, label: &str) -> Result<PathBuf, ClassifiedError> {
     let metadata = std::fs::symlink_metadata(path).map_err(|error| {
         ClassifiedError::Validation(format!("inspect {label} {}: {error}", path.display()))

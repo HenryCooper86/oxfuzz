@@ -54,6 +54,13 @@ the default queue; an operator can include it explicitly.
 - **`MinimizationPending`** -- fault origin is `Target` and the input is not
   minimized. Minimization is the cheapest next step and every downstream
   analysis is worth more after it.
+- **`InputIndependentFault`** -- fault origin is `Target`, minimized or not, but
+  the proof card's
+  `input_dependence` claim is a supported `InputIndependent`: the same failure
+  reproduced on every benign control input (section 4.1). Either the harness
+  violates an API precondition or the target fails on nearly any input. The
+  retained evidence does not distinguish the two, so a person reviews the
+  harness call sequence before this is treated as a target finding.
 - **`SymbolizationPending`** -- fault origin is `Unknown`. The crash has no
   symbolized frames, so it cannot be attributed to target, harness, or runtime.
   This ranks below every attributed target fault and above the two attributed
@@ -77,6 +84,78 @@ evidence can support would be the same fabrication
 reachability evidence is retained, the ladder already has the correct place for
 it and no consumer changes.
 
+### 4.1 Control-Input Replay
+
+Stack frames cannot separate a target bug from a harness that misuses the
+target's API, because the fault lands in target frames in both cases. The
+`control-replay` feature adds one deterministic experiment. For each
+target-origin AFL++ or libFuzzer crash, after the minimization attempt, triage
+replays the crash's current input twice with the retained binary in the same
+immutable image, read-only and without network. When both replays produce one
+failure identity, it replays each control once:
+
+- `same_length_zeros` -- the candidate's length, every byte `0x00`;
+- `same_length_fill` -- the candidate's length, every byte `0x41`;
+- `single_byte` -- one byte, `0x01`.
+
+Controls keep the candidate's length where a harness may have a minimum-size
+guard. There is no empty control because the AFL++ driver may not invoke the
+target for an empty file, which would make the result engine-dependent.
+
+Controls do not require successful minimization. An input-independent fault can
+minimize to an empty file, which the minimization path rejects, so requiring it
+would skip the crashes this experiment exists to identify. Those crashes keep
+their original input, and `InputIndependentFault` takes precedence over
+`MinimizationPending`.
+
+The proof card recomputes `input_dependence` from the retained logs, using the
+same failure identity as reproduction confirmation. Saved flags never establish
+a match, and each control's digest is recomputed from its kind and length.
+
+| Observed | Determination | Status |
+| --- | --- | --- |
+| Every control reproduces the failure | `input_independent` | `supported` |
+| Some reproduce, the others exit cleanly | `size_or_content_sensitive` | `supported` |
+| Every control exits cleanly | `input_dependent` | `supported` |
+| Timeout, runtime error, different failure, invalid evidence, or a control identical to the candidate | `inconclusive` | `not_verified` |
+| No control evidence retained | `not_verified` | `not_verified` |
+
+Only `input_independent` changes the disposition. `input_dependent` does not
+raise any claim: a harness can misuse an API in a way that depends on input.
+Control replay never changes `CrashOrigin` and never removes a crash from the
+triage queue or the campaign report.
+
+### 4.2 Export Hold and Usage Review
+
+SARIF and `DefectDojo` publish outside oxfuzz, so an input-independent fault is
+held out of both until a person reviews the harness's API usage. The mappers
+`crashes_to_sarif` and `crashes_to_generic` enforce the hold, so every caller
+gets it. A SARIF run records the held count in
+`properties.heldForUsageReview`, because an empty result list must not read as
+a clean run. A `DefectDojo` push reports `findings_held`, and a push that would
+carry only held findings is refused with the reason.
+
+The reviewer resolves a hold in one of two ways:
+
+- repair the harness and re-run, after which the fault no longer reproduces; or
+- record that the usage is valid with `oxfuzz triage --accept-usage <id>`, the
+  REST route `POST /findings/{id}/usage-review`, or the Triage view. The finding
+  returns to the ordinary target ladder and to exports.
+
+Recording a review takes the `PublishFindings` approval. The record is bound to
+the digests of the reviewed input and run binary, survives re-triage of the same
+evidence, and stops applying when either digest changes. `--hold-usage <id>`
+withdraws it.
+
+The hold fails closed across re-triage. A retained finding keeps its control
+evidence until a later replay replaces it, an inconclusive replay does not
+replace evidence that is holding a finding, and a change to the input path the
+crash names does not release it. Crashes triaged before this feature have no
+control evidence and are not held.
+
+Issue filing and webhook notifications are not covered: each is outside this
+decision, and issue filing is already an explicit per-finding action.
+
 ## 5. Next Action
 
 Exactly one per disposition, from a fixed vocabulary. The action is a typed
@@ -91,6 +170,7 @@ because a second identifier for the same meaning would be a second home for it
 | `ReportReady` | `write_report` | Draft the finding from retained evidence. |
 | `ReachabilityUnproven` | `demonstrate_reachability` | Establish a path from an external input to the fault. |
 | `MinimizationPending` | `minimize_input` | Reduce the input before further analysis. |
+| `InputIndependentFault` | `review_harness_usage` | Check the harness call sequence against the API's preconditions. |
 | `SymbolizationPending` | `rebuild_with_symbols` | Rebuild the target with symbols and re-triage. |
 | `RuntimeArtifact` | `review_engine_configuration` | Inspect engine and sanitizer settings. |
 | `HarnessDefect` | `repair_harness` | Fix the generated harness and re-run. |
@@ -113,6 +193,8 @@ Ceilings, ordered:
   claimed about the project under test.
 - **`FaultObserved`** -- `SymbolizationPending`. A fault occurred; it is not
   attributed to any layer.
+- **`TargetFramesFault`** -- `InputIndependentFault`. The fault is in target
+  frames, but valid API usage is not established.
 - **`TargetFaultObserved`** -- an attributed target fault whose input is not
   minimized.
 - **`TargetFaultMinimized`** -- an attributed, minimized target fault.
@@ -187,6 +269,11 @@ workspace.
 - **Treating `Unknown` origin as a target fault** -- it is exactly the
   substitution of a negative determination for a missing one that rule 2 of the
   Tier 2 plan forbids.
+- **Reassigning an input-independent fault to `CrashOrigin::Harness`** -- it
+  would exclude a possibly real, shallow target bug from reports on an inference
+  the evidence does not establish.
+- **Asking a model whether the crash is API misuse** -- the disposition must be
+  reconstructable from retained observations.
 - **Ranking `SymbolizationPending` below `HarnessDefect`** -- an unattributed
   fault may become a target finding after a cheap rebuild; an attributed harness
   defect never will.
@@ -199,6 +286,13 @@ workspace.
   `NoTargetClaim`.
 - A crash whose origin is `Unknown` yields `SymbolizationPending` and
   `FaultObserved`, and is never attributed to the target.
+- A target fault reproduced by its baseline and every control yields
+  `InputIndependentFault` and `TargetFramesFault`, even when CASR classified it
+  or minimization did not complete.
+- Partial, clean, inconclusive, tampered, or absent control evidence leaves the
+  disposition unchanged.
+- A held finding is absent from SARIF and `DefectDojo` until a review of its
+  exact evidence is recorded, and returns to being held when it is withdrawn.
 - An unminimized target fault yields `MinimizationPending`; the same crash
   minimized yields `ReachabilityUnproven`.
 - A verified remediation yields `Resolved` and `RemediationVerified`, sorts

@@ -338,6 +338,7 @@ async fn service_assembles_a_manifest_from_durable_run_and_approval_evidence() {
     let crash_input = directory.path().join("crash-input");
     std::fs::write(&crash_input, b"crash").unwrap();
     let mut crash = Crash {
+        control_replay: None,
         reproduction: None,
         id: Uuid::from_u128(12),
         run_id: run.id,
@@ -395,6 +396,7 @@ async fn service_assembles_a_manifest_from_durable_run_and_approval_evidence() {
     store.upsert_crash(&crash).await.unwrap();
 
     let harness_crash = Crash {
+        control_replay: None,
         reproduction: None,
         id: Uuid::from_u128(13),
         run_id: run.id,
@@ -624,6 +626,7 @@ async fn manifest_resolves_crash_files_under_the_qualified_workspace() {
         .join("out");
     std::fs::create_dir_all(&run_output).unwrap();
     let crash = hf_core::crash::Crash {
+        control_replay: None,
         reproduction: None,
         id: Uuid::from_u128(33),
         run_id: run.id,

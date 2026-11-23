@@ -442,6 +442,13 @@ export type CasrExploitabilityDetermination =
   | "not_exploitable"
   | "undefined"
   | "unavailable";
+export type InputDependenceDetermination =
+  | "input_independent"
+  | "size_or_content_sensitive"
+  | "input_dependent"
+  | "inconclusive"
+  | "not_verified";
+export type FindingUsageReviewState = "not_applicable" | "held" | "released";
 export type ReachabilityDetermination = "demonstrated" | "not_verified";
 export type FixVerificationDetermination =
   | "verified"
@@ -466,6 +473,7 @@ export interface FindingProofCard {
   schema_version: number;
   fault_origin: FindingProofClaim<FaultOriginDetermination>;
   deterministic_reproduction: FindingProofClaim<ReproductionDetermination>;
+  input_dependence: FindingProofClaim<InputDependenceDetermination>;
   casr_exploitability: FindingProofClaim<CasrExploitabilityDetermination>;
   external_reachability: FindingProofClaim<ReachabilityDetermination>;
   fix_verification: FindingProofClaim<FixVerificationDetermination>;
@@ -952,6 +960,7 @@ export interface TriageDisposition {
     | "report_ready"
     | "reachability_unproven"
     | "minimization_pending"
+    | "input_independent_fault"
     | "symbolization_pending"
     | "runtime_artifact"
     | "harness_defect";
@@ -960,6 +969,7 @@ export interface TriageDisposition {
     | "write_report"
     | "demonstrate_reachability"
     | "minimize_input"
+    | "review_harness_usage"
     | "rebuild_with_symbols"
     | "review_engine_configuration"
     | "repair_harness";
@@ -967,6 +977,7 @@ export interface TriageDisposition {
   claim_ceiling:
     | "no_target_claim"
     | "fault_observed"
+    | "target_frames_fault"
     | "target_fault_observed"
     | "target_fault_minimized"
     | "exploitability_classified"
@@ -1013,6 +1024,8 @@ export interface FindingReviewItem {
   engine: string;
   proof: FindingProofCard;
   disposition: TriageDisposition;
+  /** Whether SARIF and DefectDojo leave this finding out (service-derived). */
+  usage_review: FindingUsageReviewState;
   latest_scoped_actions_allowed: boolean;
   latest_scoped_action_reason: string | null;
   /** Equal for findings of this target that are the same bug (service-derived). */

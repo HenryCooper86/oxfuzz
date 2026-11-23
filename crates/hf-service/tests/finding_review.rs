@@ -127,6 +127,7 @@ fn run(project: &str, harness_id: Uuid, engine: EngineKind, offset_minutes: i64)
 
 fn crash(run: &RunRecord, target: &TargetCandidate, origin: CrashOrigin) -> Crash {
     Crash {
+        control_replay: None,
         reproduction: None,
         id: Uuid::new_v4(),
         run_id: run.id,
@@ -540,6 +541,7 @@ async fn detail_rejects_wrong_project_and_names_missing_durable_records() {
 async fn queue_names_a_missing_run_referenced_by_a_project_finding() {
     let (container, _directory, target, _harness) = fixture().await;
     let orphan = Crash {
+        control_replay: None,
         reproduction: None,
         id: Uuid::new_v4(),
         run_id: Uuid::new_v4(),
@@ -575,6 +577,7 @@ async fn queue_names_a_missing_target_referenced_by_a_project_run() {
     let run = run("/project-a", harness.id, EngineKind::LibFuzzer, 0);
     let missing_target = Uuid::new_v4();
     let retained = Crash {
+        control_replay: None,
         reproduction: None,
         id: Uuid::new_v4(),
         run_id: run.id,

@@ -63,6 +63,7 @@ function finding(id: string, runId: string, project: string, input: string): Fin
       schema_version: 1,
       fault_origin: { ...claim, determination: "target", status: "supported" },
       deterministic_reproduction: claim,
+      input_dependence: claim,
       casr_exploitability: { ...claim, determination: "unavailable", status: "unavailable" },
       external_reachability: claim,
       fix_verification: claim,
@@ -76,6 +77,7 @@ function finding(id: string, runId: string, project: string, input: string): Fin
       claim_limit: "not shown exploitable",
       evidence: [],
     },
+    usage_review: "not_applicable",
     latest_scoped_actions_allowed: false,
     latest_scoped_action_reason: "This finding belongs to a historical run.",
   };
@@ -279,6 +281,36 @@ describe("retained finding navigation", () => {
     // The list row no longer repeats the raw CASR determination.
     const rows = [...container.querySelectorAll("button")].filter((button) => button.textContent?.startsWith("parse_packet ·"));
     expect(rows.every((row) => !row.textContent?.includes("· unavailable"))).toBe(true);
+  });
+
+  it("releases and re-holds a finding only through the explicit usage review", async () => {
+    const held = { ...older, usage_review: "held", disposition: { ...older.disposition, disposition: "input_independent_fault" } } as FindingReviewItem;
+    const released = { ...older, usage_review: "released" } as FindingReviewItem;
+    let current = held;
+    invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "finding_review_queue") return Promise.resolve([current]);
+      if (command === "finding_review") return Promise.resolve(current);
+      if (command === "finding_usage_review") {
+        current = args?.accepted ? released : held;
+        return Promise.resolve(current);
+      }
+      throw new Error(`unexpected command ${command}`);
+    });
+    await act(async () => root.render(<Providers><TriageView /></Providers>));
+    await flush();
+    const panel = () => container.querySelector<HTMLElement>('[data-testid="usage-review"]');
+    expect(panel()?.textContent).toContain("triage.usageHeldDetail");
+    expect(invoke).not.toHaveBeenCalledWith("finding_usage_review", expect.anything());
+
+    await act(async () => panel()?.querySelector("button")?.click());
+    await flush();
+    expect(invoke).toHaveBeenCalledWith("finding_usage_review", { project: PROJECT_A, findingId: older.crash.id, accepted: true });
+    expect(panel()?.textContent).toContain("triage.usageReleasedDetail");
+
+    await act(async () => panel()?.querySelector("button")?.click());
+    await flush();
+    expect(invoke).toHaveBeenCalledWith("finding_usage_review", { project: PROJECT_A, findingId: older.crash.id, accepted: false });
+    expect(panel()?.textContent).toContain("triage.usageHeldDetail");
   });
 
   it("reloads the open finding after a full triage changed it", async () => {

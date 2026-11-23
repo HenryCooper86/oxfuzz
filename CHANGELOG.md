@@ -10,8 +10,20 @@ retain only the current release; older entries remain here as the record.
 
 ## Unreleased
 
+### Added
+
+- Triage: an AFL++ or libFuzzer crash in target code is replayed on benign
+  control inputs. A fault that every control reproduces is queued as an
+  input-independent fault for a harness usage review, because a harness that
+  misuses an API also faults in target frames. These faults stay in the triage
+  queue and report but are held out of SARIF and DefectDojo until you repair the
+  harness or record a review (`oxfuzz triage --accept-usage <id>`, or the Triage
+  view).
+
 ### Fixed
 
+- Triage: without CASR, a crash's origin now comes from its symbolized replay
+  log. It previously stayed unknown unless the engine had written a report.
 - Triage: a finding classified by CASR can now be recorded as minimized. The
   native minimizer ran and both inputs were replayed, but the confirmation had
   no reference log to compare against, so `minimized` never became true. The

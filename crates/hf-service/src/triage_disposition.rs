@@ -19,12 +19,12 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::finding_proof::{
-    CasrExploitabilityDetermination, FindingEvidenceReference, FindingProofCard,
-    FindingProofStatus, FixVerificationDetermination, ReachabilityDetermination,
+    held_for_usage_review, CasrExploitabilityDetermination, FindingEvidenceReference,
+    FindingProofCard, FindingProofStatus, FixVerificationDetermination, ReachabilityDetermination,
 };
 
 /// Current serialized Triage Disposition schema.
-pub const TRIAGE_DISPOSITION_SCHEMA_VERSION: u32 = 1;
+pub const TRIAGE_DISPOSITION_SCHEMA_VERSION: u32 = 2;
 
 /// What a crash needs next, ordered by descending operator attention.
 ///
@@ -48,6 +48,10 @@ pub enum Disposition {
     ReachabilityUnproven,
     /// An attributed target fault whose input is not minimized.
     MinimizationPending,
+    /// A target-frame fault that every benign control input reproduced. Either
+    /// the harness violates an API precondition or the target fails on nearly
+    /// any input; the retained evidence does not distinguish the two.
+    InputIndependentFault,
     /// A fault with no symbolized frames, so it is attributed to no layer.
     /// Ranked above the two attributed non-findings because a cheap rebuild can
     /// promote it and cannot promote them.
@@ -83,6 +87,8 @@ pub enum DispositionAction {
     DemonstrateReachability,
     /// Reduce the input before further analysis.
     MinimizeInput,
+    /// Check the harness call sequence against the API's preconditions.
+    ReviewHarnessUsage,
     /// Rebuild the target with symbols and re-triage.
     RebuildWithSymbols,
     /// Inspect engine and sanitizer settings.
@@ -102,6 +108,8 @@ pub enum ClaimCeiling {
     NoTargetClaim,
     /// A fault occurred and is attributed to no layer.
     FaultObserved,
+    /// A fault in target frames whose API usage is not established.
+    TargetFramesFault,
     /// An attributed target fault whose input is not minimized.
     TargetFaultObserved,
     /// An attributed, minimized target fault.
@@ -192,6 +200,7 @@ fn disposition_of(crash: &Crash, card: &FindingProofCard) -> Disposition {
         CrashOrigin::Harness => Disposition::HarnessDefect,
         CrashOrigin::Runtime => Disposition::RuntimeArtifact,
         CrashOrigin::Unknown => Disposition::SymbolizationPending,
+        CrashOrigin::Target if held_for_usage_review(crash) => Disposition::InputIndependentFault,
         CrashOrigin::Target if !crash.minimized => Disposition::MinimizationPending,
         CrashOrigin::Target
             if is_supported(card.external_reachability.status)
@@ -215,6 +224,7 @@ fn claim_ceiling(disposition: Disposition, card: &FindingProofCard) -> ClaimCeil
         Disposition::Resolved => ClaimCeiling::RemediationVerified,
         Disposition::HarnessDefect | Disposition::RuntimeArtifact => ClaimCeiling::NoTargetClaim,
         Disposition::SymbolizationPending => ClaimCeiling::FaultObserved,
+        Disposition::InputIndependentFault => ClaimCeiling::TargetFramesFault,
         Disposition::MinimizationPending => ClaimCeiling::TargetFaultObserved,
         Disposition::ReachabilityUnproven | Disposition::ReportReady => {
             if is_supported(card.casr_exploitability.status) {
@@ -232,6 +242,7 @@ fn action_for(disposition: Disposition) -> DispositionAction {
         Disposition::ReportReady => DispositionAction::WriteReport,
         Disposition::ReachabilityUnproven => DispositionAction::DemonstrateReachability,
         Disposition::MinimizationPending => DispositionAction::MinimizeInput,
+        Disposition::InputIndependentFault => DispositionAction::ReviewHarnessUsage,
         Disposition::SymbolizationPending => DispositionAction::RebuildWithSymbols,
         Disposition::RuntimeArtifact => DispositionAction::ReviewEngineConfiguration,
         Disposition::HarnessDefect => DispositionAction::RepairHarness,
@@ -253,6 +264,11 @@ fn action_detail(disposition: Disposition) -> &'static str {
              the desktop app; a crash scan alone does not minimize). Triage reduces AFL++ and \
              libFuzzer inputs and keeps the result only when replays confirm the same fault; an \
              input from another engine stays as recorded."
+        }
+        Disposition::InputIndependentFault => {
+            "Check the harness call sequence against the API's preconditions. Repair the harness \
+             if it misuses the API; if the usage is valid, this is a target bug that nearly any \
+             input triggers."
         }
         Disposition::SymbolizationPending => {
             "Rebuild the target with symbols and re-triage; the fault cannot be attributed \
@@ -277,6 +293,10 @@ fn claim_limit(ceiling: ClaimCeiling) -> &'static str {
         ClaimCeiling::FaultObserved => {
             "The fault is attributed to no layer, so it must not be described as a target \
              defect, and exploitability is unclassified."
+        }
+        ClaimCeiling::TargetFramesFault => {
+            "Benign control inputs reproduce this fault, so valid API usage is not established; \
+             do not describe it as a target defect until the harness usage is reviewed."
         }
         ClaimCeiling::TargetFaultObserved => {
             "The input is not minimized; do not describe \
@@ -306,6 +326,9 @@ fn evidence_for(
     let mut evidence = card.fault_origin.evidence.clone();
     if disposition == Disposition::Resolved {
         extend_unique(&mut evidence, &card.fix_verification.evidence);
+    }
+    if disposition == Disposition::InputIndependentFault {
+        extend_unique(&mut evidence, &card.input_dependence.evidence);
     }
     if ceiling == ClaimCeiling::ExploitabilityClassified {
         extend_unique(&mut evidence, &card.casr_exploitability.evidence);

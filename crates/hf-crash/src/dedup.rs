@@ -161,6 +161,7 @@ mod tests {
 
     fn crash(crashline: &str, frames: &[&str]) -> Crash {
         Crash {
+            control_replay: None,
             reproduction: None,
             id: Uuid::new_v4(),
             run_id: Uuid::nil(),

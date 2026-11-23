@@ -122,6 +122,7 @@ impl hf_core::provider::ProviderPool for CapturingPool {
 
 fn asan_crash(run_id: Uuid) -> Crash {
     Crash {
+        control_replay: None,
         reproduction: None,
         id: Uuid::new_v4(),
         run_id,
