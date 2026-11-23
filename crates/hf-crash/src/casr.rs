@@ -161,6 +161,32 @@ pub fn parse_casrep(json: &str) -> Result<CasrReport, serde_json::Error> {
     })
 }
 
+/// The sanitizer report fields of a `.casrep`, in the order CASR fills them.
+#[derive(serde::Deserialize)]
+struct RawSanitizerReports {
+    #[serde(rename = "AsanReport", default)]
+    asan: Vec<String>,
+    #[serde(rename = "UbsanReport", default)]
+    ubsan: Vec<String>,
+    #[serde(rename = "MsanReport", default)]
+    msan: Vec<String>,
+}
+
+/// The sanitizer output CASR captured while it analyzed the crash, as one log.
+///
+/// This is the text the classification in the same report was derived from,
+/// so a later replay can be compared against it. `None` when the document is
+/// not a CASR report or carries no sanitizer output (a plain signal analyzed
+/// under the debugger).
+#[must_use]
+pub fn casrep_sanitizer_log(json: &str) -> Option<String> {
+    let raw: RawSanitizerReports = serde_json::from_str(json).ok()?;
+    [raw.asan, raw.ubsan, raw.msan]
+        .into_iter()
+        .find(|lines| !lines.is_empty())
+        .map(|lines| lines.join("\n"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,6 +217,31 @@ mod tests {
         assert_eq!(r.crashline, "chunk.c:20:5");
         assert_eq!(r.stack.len(), 2);
         assert!(r.stack[0].contains("copy_chunk"));
+    }
+
+    #[test]
+    fn the_sanitizer_report_of_a_casrep_is_returned_as_one_log() {
+        let json = r#"{
+            "CrashLine": "chunk.c:20:5",
+            "AsanReport": [
+                "==9==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1",
+                "    #0 0x4ff in copy_chunk chunk.c:20:5"
+            ],
+            "UbsanReport": []
+        }"#;
+        assert_eq!(
+            casrep_sanitizer_log(json).as_deref(),
+            Some(
+                "==9==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1\n    #0 0x4ff in copy_chunk chunk.c:20:5"
+            )
+        );
+    }
+
+    #[test]
+    fn a_casrep_without_a_sanitizer_report_has_no_log() {
+        assert_eq!(casrep_sanitizer_log(SAMPLE), None);
+        assert_eq!(casrep_sanitizer_log(r#"{"AsanReport":[]}"#), None);
+        assert_eq!(casrep_sanitizer_log("not json"), None);
     }
 
     #[test]

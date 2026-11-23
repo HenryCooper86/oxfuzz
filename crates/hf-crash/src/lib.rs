@@ -14,7 +14,10 @@ pub mod minimize;
 pub mod remediation;
 pub mod report;
 
-pub use casr::{casr_command, cluster_from_path, kind_from_short, parse_casrep, severity_from_str};
+pub use casr::{
+    casr_command, casrep_sanitizer_log, cluster_from_path, kind_from_short, parse_casrep,
+    severity_from_str,
+};
 pub use classify::{classify, looks_like_crash};
 pub use dedup::{bug_keys, dedup, identity_keys};
 pub use frames::is_harness_function;

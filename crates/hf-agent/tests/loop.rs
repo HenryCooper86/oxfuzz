@@ -482,6 +482,33 @@ async fn malformed_json_final_does_not_leak_thought_to_user() {
 }
 
 #[tokio::test]
+async fn unescaped_quotes_inside_a_final_answer_do_not_cut_it_short() {
+    // A model that quotes a phrase without escaping it produces invalid JSON.
+    // The recovered answer must run to the string's real end, not stop at the
+    // first inner quote.
+    let raw = "{\"thought\":\"summarize\",\"final\":\"The readiness gate says `triage_required` — \"Triage the new crashes first.\" Open Triage next.\"}";
+    let agent = agent_with(vec![raw], None);
+    let sink = CollectingSink::new();
+    let out = agent.run_turn(vec![], "what next", &sink).await.unwrap();
+    assert_eq!(
+        out,
+        "The readiness gate says `triage_required` — \"Triage the new crashes first.\" Open Triage next."
+    );
+}
+
+#[tokio::test]
+async fn unescaped_quotes_do_not_swallow_a_later_step_field() {
+    let raw = "{\"final\":\"It printed \"ok\", then {\"code\":\"0\"} and stopped.\",\"thought\":\"report it\"}";
+    let agent = agent_with(vec![raw], None);
+    let sink = CollectingSink::new();
+    let out = agent
+        .run_turn(vec![], "what happened", &sink)
+        .await
+        .unwrap();
+    assert_eq!(out, "It printed \"ok\", then {\"code\":\"0\"} and stopped.");
+}
+
+#[tokio::test]
 async fn thought_only_step_continues_instead_of_leaking_json() {
     // A protocol-shaped step with a thought but neither `tool` nor `final` is an
     // incomplete emission. The agent must NOT surface the raw JSON as the answer

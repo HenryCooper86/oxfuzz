@@ -176,6 +176,71 @@ pub fn build_run_args(
     Ok(args)
 }
 
+/// Arguments that run one retained input once, unmutated, under honggfuzz.
+///
+/// The standalone driver of a honggfuzz binary reads an input into a buffer
+/// larger than the input, so a short over-read exits cleanly there. Only
+/// honggfuzz poisons the bytes after the input. A fault is recorded in
+/// `<out>/HONGGFUZZ.REPORT.TXT`; honggfuzz itself exits 0 either way.
+#[must_use]
+pub fn build_replay_args(binary: &str, input_dir: &str, out: &str) -> Vec<String> {
+    [
+        "honggfuzz",
+        "--input",
+        input_dir,
+        "--output",
+        out,
+        "--workspace",
+        "/dev/shm",
+        "--crashdir",
+        out,
+        "--report",
+        &format!("{out}/HONGGFUZZ.REPORT.TXT"),
+        "--threads",
+        "1",
+        "--iterations",
+        "1",
+        "--mutations_per_run",
+        "0",
+        "--timeout",
+        "5",
+        "--exit_upon_crash",
+        "--linux_keep_aslr",
+        "--",
+        binary,
+    ]
+    .map(str::to_owned)
+    .to_vec()
+}
+
 /// The honggfuzz engine adapter. See [`build_run_args`] and the
 /// [`EngineAdapter`](crate::registry::EngineAdapter) impl in `registry`.
 pub struct Honggfuzz;
+
+#[cfg(test)]
+mod replay_args_tests {
+    use super::build_replay_args;
+
+    #[test]
+    fn a_replay_runs_the_input_once_without_mutating_it() {
+        let args = build_replay_args("/work/fuzz", "/work/replay/in", "/work/replay/out");
+        assert_eq!(args[0], "honggfuzz");
+        let joined = args.join(" ");
+        for expected in [
+            "--input /work/replay/in",
+            "--crashdir /work/replay/out",
+            "--report /work/replay/out/HONGGFUZZ.REPORT.TXT",
+            "--threads 1",
+            "--iterations 1",
+            "--mutations_per_run 0",
+            "--exit_upon_crash",
+            "--linux_keep_aslr",
+        ] {
+            assert!(
+                joined.contains(expected),
+                "{expected} missing from {joined}"
+            );
+        }
+        assert_eq!(&args[args.len() - 2..], ["--", "/work/fuzz"]);
+    }
+}

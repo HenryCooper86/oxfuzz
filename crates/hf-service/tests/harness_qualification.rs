@@ -869,6 +869,51 @@ async fn smoke_profile_requests_and_directories_follow_feature_availability() {
     }
 }
 
+#[cfg(feature = "proof-carrying")]
+#[tokio::test]
+async fn smoke_stages_the_mountpoint_its_profile_export_binds() {
+    let (project, store, container) = qualified_fixture().await;
+    let source = "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }";
+    container
+        .harness_compile(
+            source.to_owned(),
+            project.path(),
+            EngineKind::LibFuzzer,
+            "parse_entry",
+            TargetLanguage::C,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+    container
+        .harness_smoke(
+            project.path(),
+            "parse_entry",
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+        )
+        .await
+        .unwrap();
+
+    // The profile export runs with the retained input workspace mounted
+    // read-only at `/work` and binds the run's inputs at
+    // `/work/runs/<id>/input`. The sandbox cannot create that directory under
+    // a read-only mount, so it has to be staged on the host, as a campaign
+    // stages it. Without it every qualification export failed to start.
+    let run = sole_smoke_run(&store, project.path()).await;
+    let workspace = hf_service::workspace_dir(project.path(), "parse_entry");
+    let mountpoint = workspace.join(format!(
+        "runs/{id}/input/workspace/runs/{id}/input",
+        id = run.id
+    ));
+    assert!(
+        mountpoint.is_dir(),
+        "missing mountpoint {}",
+        mountpoint.display()
+    );
+}
+
 #[tokio::test]
 async fn smoke_retains_measured_profiles_or_explicitly_unavailable_evidence() {
     let (project, store, container) = qualified_fixture().await;

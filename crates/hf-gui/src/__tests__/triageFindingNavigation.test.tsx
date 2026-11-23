@@ -281,6 +281,25 @@ describe("retained finding navigation", () => {
     expect(rows.every((row) => !row.textContent?.includes("· unavailable"))).toBe(true);
   });
 
+  it("reloads the open finding after a full triage changed it", async () => {
+    let triaged = false;
+    const minimized = { ...older, disposition: { ...older.disposition, action_detail: "minimized and confirmed" } } as FindingReviewItem;
+    invoke.mockImplementation((command: string) => {
+      if (command === "finding_review_queue") return Promise.resolve([newer, older]);
+      if (command === "finding_review") return Promise.resolve(triaged ? minimized : older);
+      if (command === "triage") { triaged = true; return Promise.resolve([older.crash]); }
+      throw new Error(`unexpected command ${command}`);
+    });
+    await act(async () => root.render(<Providers><TriageView /></Providers>));
+    await flush();
+    expect(container.querySelector('[data-testid="finding-status"]')?.textContent).toContain("show reachability");
+    const aiTriage = [...container.querySelectorAll("button")].find((button) => button.textContent === "parity.analysis.triage.ai");
+    await act(async () => aiTriage?.click());
+    await flush();
+    await flush();
+    expect(container.querySelector('[data-testid="finding-status"]')?.textContent).toContain("minimized and confirmed");
+  });
+
   it("requests all dispositions for the exact run opened from history", async () => {
     localStorage.clear();
     await act(async () => root.render(<Providers><TriageView initialRunId="older-run" /></Providers>));

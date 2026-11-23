@@ -249,7 +249,10 @@ fn action_detail(disposition: Disposition) -> &'static str {
              security finding."
         }
         Disposition::MinimizationPending => {
-            "Minimize the input; every later analysis is worth more against a reduced testcase."
+            "Minimize the input with a full triage of this run (`oxfuzz triage`, or AI triage in \
+             the desktop app; a crash scan alone does not minimize). Triage reduces AFL++ and \
+             libFuzzer inputs and keeps the result only when replays confirm the same fault; an \
+             input from another engine stays as recorded."
         }
         Disposition::SymbolizationPending => {
             "Rebuild the target with symbols and re-triage; the fault cannot be attributed \

@@ -438,7 +438,11 @@ pub(super) fn bucket_by_cluster(crashes: Vec<hf_core::crash::Crash>) -> Vec<hf_c
     kept
 }
 
-pub(super) fn collect_casreps(dir: &Path) -> Vec<(PathBuf, hf_core::crash::CasrReport)> {
+/// One parsed CASR report: where it lies, what it classified, and the
+/// sanitizer output it was derived from when CASR captured any.
+pub(super) type CollectedCasrep = (PathBuf, hf_core::crash::CasrReport, Option<String>);
+
+pub(super) fn collect_casreps(dir: &Path) -> Vec<CollectedCasrep> {
     let mut collection = CasrepCollection::default();
     if is_regular_directory(dir) {
         collect_casreps_into(dir, 0, &mut collection);
@@ -557,7 +561,7 @@ const MAX_CASREP_DEPTH: usize = 8;
 
 #[derive(Default)]
 struct CasrepCollection {
-    reports: Vec<(PathBuf, hf_core::crash::CasrReport)>,
+    reports: Vec<CollectedCasrep>,
     bytes: usize,
     truncated: bool,
 }
@@ -627,7 +631,8 @@ fn collect_casreps_into(dir: &Path, depth: usize, collection: &mut CasrepCollect
             // cluster id so triage can bucket by it.
             report.cluster = hf_crash::cluster_from_path(&path);
             collection.bytes += content.len();
-            collection.reports.push((path, report));
+            let sanitizer_log = hf_crash::casrep_sanitizer_log(&content);
+            collection.reports.push((path, report, sanitizer_log));
             if collection.reports.len() >= hf_crash::MAX_CRASH_ARTIFACTS {
                 collection.truncated = true;
             }

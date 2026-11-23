@@ -1389,3 +1389,23 @@ async fn harness_review_items_state_missing_evidence_rather_than_hiding_it() {
     assert_eq!(item.binary_sha256, None);
     assert!(item.lint.is_empty(), "{:?}", item.lint);
 }
+
+#[tokio::test]
+async fn dashboard_finds_a_project_named_by_a_non_canonical_path() {
+    let (container, dir) = test_container().await;
+    let store = container.store().unwrap();
+    let project = std::fs::canonicalize(dir.path()).unwrap().join("proj");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    let target = sample_target(project.to_str().unwrap());
+    store.upsert_target(&target, Utc::now()).await.unwrap();
+
+    // The spelling a user types on the command line: the same directory,
+    // reached through a `..` component instead of its canonical path.
+    let typed = project.join("src").join("..");
+    let dashboard = container
+        .workbench_dashboard(Some(typed.as_path()), None)
+        .await
+        .unwrap();
+
+    assert_eq!(dashboard.totals.targets, 1);
+}

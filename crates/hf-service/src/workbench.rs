@@ -1291,9 +1291,16 @@ fn issue_filing_key(crash: &Crash) -> String {
 
 fn issue_description(crash: &Crash, target: Option<&TargetCandidate>) -> String {
     let target_name = target.map_or("unknown".to_owned(), |t| t.symbol.clone());
+    // The body is posted to a tracker other people read: name the project
+    // and the input by their last path component, never by a host path.
     let project_root = target
-        .map(|t| t.project_root.to_string_lossy().to_string())
+        .and_then(|t| t.project_root.file_name())
+        .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
+    let input_name = crash.input_path.file_name().map_or_else(
+        || crash.input_path.to_string_lossy().into_owned(),
+        |name| name.to_string_lossy().into_owned(),
+    );
     let severity = crash.casr.as_ref().map_or_else(
         || "Unclassified".to_owned(),
         |c| format!("{:?}", c.severity),
@@ -1315,7 +1322,7 @@ fn issue_description(crash: &Crash, target: Option<&TargetCandidate>) -> String 
     let _ = writeln!(body, "- Severity: `{severity}`");
     let _ = writeln!(body, "- Crash id: `{}`", crash.id);
     let _ = writeln!(body, "- Run id: `{}`", crash.run_id);
-    let _ = writeln!(body, "- Input: `{}`", crash.input_path.display());
+    let _ = writeln!(body, "- Input: `{input_name}`");
     let _ = writeln!(body, "- Minimized: `{}`", crash.minimized);
     if !crash.stack_signature.is_empty() {
         let _ = writeln!(body, "- Stack signature: `{}`", crash.stack_signature);
@@ -1664,6 +1671,55 @@ mod tests {
             .await;
             assert!(retry.is_err());
         }
+    }
+
+    #[test]
+    fn an_issue_body_names_the_project_and_input_without_host_paths() {
+        // The body is posted to a tracker other people read; an absolute
+        // path would publish the operator's home directory layout.
+        let target = TargetCandidate {
+            id: Uuid::new_v4(),
+            project_root: "/Users/someone/code/libwidget".into(),
+            language: hf_core::target::TargetLanguage::C,
+            symbol: "parse_widget".to_owned(),
+            kind: hf_core::target::TargetKind::Parser,
+            location: hf_core::target::SourceLocation {
+                file: "widget.c".into(),
+                line: 1,
+                col: 1,
+                end_line: None,
+                end_col: None,
+            },
+            signature: None,
+            input_surface: hf_core::target::InputSurface::Bytes,
+            complexity: 1,
+            fit_score: 1.0,
+            sanitizers: Vec::new(),
+            rationale: String::new(),
+            reachable_functions: Vec::new(),
+            accumulated_complexity: 1,
+        };
+        let crash = Crash {
+            id: Uuid::new_v4(),
+            run_id: Uuid::new_v4(),
+            target_id: target.id,
+            input_path: "/Users/someone/Library/oxfuzz/workspaces/libwidget/runs/r/out/crash-abc"
+                .into(),
+            stack_signature: String::new(),
+            kind: hf_core::crash::CrashKind::Asan,
+            summary: "heap-buffer-overflow".to_owned(),
+            minimized: false,
+            reproduction: None,
+            bug_report: None,
+            casr: None,
+            origin: hf_core::crash::CrashOrigin::Unknown,
+        };
+
+        let body = issue_description(&crash, Some(&target));
+
+        assert!(body.contains("- Project: `libwidget`"), "{body}");
+        assert!(body.contains("- Input: `crash-abc`"), "{body}");
+        assert!(!body.contains("/Users/someone"), "{body}");
     }
 
     #[tokio::test]

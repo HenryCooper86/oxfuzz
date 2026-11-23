@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { X, Download, Copy, Check, ChevronDown } from "lucide-react";
@@ -36,6 +36,16 @@ export function ReportPreview({
   const [exportOpen, setExportOpen] = useState(false);
   const { triggerRef, menuRef, onMenuKey, onTriggerKey } = useListboxNav(exportOpen, () => setExportOpen(false));
 
+  // Escape closes the preview; while the export menu is open the key belongs
+  // to that menu, which closes itself.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !exportOpen) onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [exportOpen, onClose]);
+
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(markdown);
@@ -54,6 +64,8 @@ export function ReportPreview({
     >
       <div
         className="surface-card flex flex-col"
+        role="dialog"
+        aria-modal="true"
         style={{
           width: "min(900px, 92vw)",
           height: "min(88vh, 900px)",

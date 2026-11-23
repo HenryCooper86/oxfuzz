@@ -37,6 +37,11 @@ it("labels registered definitions without claiming free execution slots or verif
   io.invoke.mockResolvedValue(snapshot("pool-one")); await render(<ObservabilityPanel />);
   expect(host.textContent).toContain("Definitions"); expect(host.textContent).not.toContain("SLOTS"); expect(host.textContent).not.toContain("OK");
 });
+it("says a provider's usage is not priced instead of showing a zero cost", async () => {
+  const used = snapshot("unpriced"); Object.assign(used.providers[0], { total_requests: 4, total_input_tokens: 900, total_output_tokens: 100 });
+  io.invoke.mockResolvedValue(used); await render(<ObservabilityPanel />);
+  expect(host.textContent).toContain("Not priced"); expect(host.textContent).not.toContain("$0.0000");
+});
 it("shows artifact load failures without asking to select an already selected project", async () => {
   io.invoke.mockRejectedValue(new Error("artifact read failed")); await render(<InfoPanel />);
   expect(host.textContent).toContain("artifact read failed"); expect(host.querySelector('button[aria-label="Refresh"]')).not.toBeNull();

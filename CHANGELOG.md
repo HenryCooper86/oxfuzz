@@ -10,6 +10,35 @@ retain only the current release; older entries remain here as the record.
 
 ## Unreleased
 
+### Fixed
+
+- Triage: a finding classified by CASR can now be recorded as minimized. The
+  native minimizer ran and both inputs were replayed, but the confirmation had
+  no reference log to compare against, so `minimized` never became true. The
+  sanitizer output in the finding's own CASR report is now that reference, and
+  it must name the report's crash line and failure class.
+- Triage: a honggfuzz finding keeps the engine's classification when its
+  replay exits cleanly, and a crash file named after a signal is no longer
+  read as a fault. honggfuzz reports are summarized by their description.
+- `oxfuzz regress` replays a honggfuzz input through honggfuzz, so a short
+  over-read that the standalone driver cannot expose is still reported as
+  crashing.
+- `oxfuzz regress` and the desktop regression replay label a clean replay
+  `NO CRASH ON REPLAY` instead of `fixed`: a replay cannot show that a bug was
+  fixed.
+- A finding waiting for minimization now says which operation minimizes it.
+- Assistant replies containing quotation marks are no longer cut short.
+- The dashboard finds a project given by a relative or non-canonical path.
+- A smoke run no longer warns about a missing coverage mount point.
+- Issue drafts name the project and input without host paths.
+- `oxfuzz harness` no longer suggests a promotion that will refuse after a
+  smoke run that found a crash, and `oxfuzz work-order qualify` says when a
+  completed smoke stage has a failing verdict.
+- `oxfuzz model-budget` says why there is nothing to report.
+- Desktop app: provider usage without a known price reads "Not priced", the
+  report preview closes on Escape, and the open finding refreshes after a
+  scan or a full triage.
+
 ## 0.9.9 - 2026-11-23
 
 ### Added

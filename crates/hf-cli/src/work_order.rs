@@ -297,8 +297,15 @@ where
             let attempt = container
                 .qualify_harness_work_order_submission(submission)
                 .await?;
+            let note = attempt
+                .result
+                .as_ref()
+                .and_then(|result| failed_smoke_note(result.smoke_verdict, result.crashes));
             let value = serde_json::to_value(attempt)?;
             print_json(&value)?;
+            if let Some(note) = note {
+                eprintln!("{note}");
+            }
         }
         WorkOrderCommand::Rank { attempt } => {
             let container = bootstrap().await;
@@ -316,6 +323,22 @@ where
         }
     }
     Ok(())
+}
+
+/// What to tell the operator when the smoke stage ran to completion but its
+/// verdict is a failure: the attempt status alone (`smoke_passed`) reads as
+/// qualified, and promotion will refuse it.
+fn failed_smoke_note(
+    verdict: Option<hf_service::VerdictLevel>,
+    crashes: Option<u32>,
+) -> Option<String> {
+    (verdict == Some(hf_service::VerdictLevel::Fail)).then(|| {
+        format!(
+            "note: the smoke stage completed, but its verdict is fail ({} crash(es)); \
+             `oxfuzz work-order promote` refuses this attempt.",
+            crashes.unwrap_or(0)
+        )
+    })
 }
 
 fn import_submission_request(
@@ -478,6 +501,21 @@ mod tests {
             };
             assert_eq!(actual, expected);
         }
+    }
+
+    #[test]
+    fn a_completed_smoke_stage_with_a_failing_verdict_is_called_out() {
+        use hf_service::VerdictLevel;
+
+        let note = super::failed_smoke_note(Some(VerdictLevel::Fail), Some(2)).unwrap();
+        assert!(note.contains("verdict is fail"), "{note}");
+        assert!(note.contains("2 crash(es)"), "{note}");
+        assert!(note.contains("work-order promote"), "{note}");
+        assert_eq!(
+            super::failed_smoke_note(Some(VerdictLevel::Pass), Some(0)),
+            None
+        );
+        assert_eq!(super::failed_smoke_note(None, None), None);
     }
 
     #[test]

@@ -9,8 +9,9 @@ use uuid::Uuid;
 
 use super::crash_inputs::is_regular_file;
 use super::guards::StagingDirectoryGuard;
+use super::project_identity::project_lookup_identity;
 #[cfg(feature = "semgrep-enrichment")]
-use super::project_identity::{project_lookup_identity, stored_project_matches};
+use super::project_identity::stored_project_matches;
 use super::workspace::{document_staging_dir, prepare_configured_workspace_root};
 use super::{
     AgentInstanceSnapshot, AgentPoolSnapshot, MemorySnapshot, ProviderSnapshot, ServiceContainer,
@@ -159,6 +160,10 @@ impl ServiceContainer {
         project: Option<&Path>,
         target: Option<&str>,
     ) -> Result<crate::workbench::WorkbenchDashboard, ClassifiedError> {
+        // Stored project roots are canonical, so a relative or `..` spelling
+        // of the same directory must be resolved before it is compared.
+        let project = project.map(project_lookup_identity);
+        let project = project.as_deref();
         #[cfg(feature = "semgrep-enrichment")]
         let mut effective_score_by_target = std::collections::HashMap::new();
         #[cfg(not(feature = "semgrep-enrichment"))]

@@ -708,6 +708,19 @@ pub(crate) async fn cmd_ingest(project: PathBuf, file: &std::path::Path) -> anyh
     Ok(())
 }
 
+/// The label for one replayed reproducer. A clean replay is reported as what
+/// was observed, not as a fix: an input that only faults under its engine's
+/// own instrumentation also replays cleanly against unchanged code.
+fn regression_tag(still_crashes: bool, verified: bool) -> &'static str {
+    if still_crashes {
+        "STILL CRASHES"
+    } else if verified {
+        "NO CRASH ON REPLAY"
+    } else {
+        "INCONCLUSIVE"
+    }
+}
+
 pub(crate) async fn cmd_regress(project: PathBuf, target: &str) -> anyhow::Result<()> {
     let container = crate::approval::bootstrap().await;
     let results = container.verify_regressions(&project, target).await?;
@@ -722,17 +735,11 @@ pub(crate) async fn cmd_regress(project: PathBuf, target: &str) -> anyhow::Resul
         .count();
     let inconclusive = results.iter().filter(|r| !r.verified).count();
     println!(
-        "Replayed {} crash(es): {still} still crashing, {fixed} fixed, {inconclusive} inconclusive.",
+        "Replayed {} crash(es): {still} still crashing, {fixed} no longer crashing, {inconclusive} inconclusive.",
         results.len(),
     );
     for r in &results {
-        let tag = if r.still_crashes {
-            "STILL CRASHES"
-        } else if !r.verified {
-            "INCONCLUSIVE"
-        } else {
-            "fixed"
-        };
+        let tag = regression_tag(r.still_crashes, r.verified);
         let id = if r.crash_id.is_empty() {
             ""
         } else {
@@ -1114,6 +1121,13 @@ mod binary_summary_tests {
     use std::path::PathBuf;
 
     use hf_service::{BinaryFinding, BinaryFuzzOutcome, MinimizedInput};
+
+    #[test]
+    fn a_clean_replay_is_not_labelled_as_a_fix() {
+        assert_eq!(super::regression_tag(true, true), "STILL CRASHES");
+        assert_eq!(super::regression_tag(false, true), "NO CRASH ON REPLAY");
+        assert_eq!(super::regression_tag(false, false), "INCONCLUSIVE");
+    }
 
     #[test]
     fn the_summary_groups_findings_and_names_the_minimized_input() {

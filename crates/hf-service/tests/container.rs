@@ -2041,6 +2041,104 @@ impl hf_core::runtime::RuntimeAdapter for RegressionReplayRuntime {
     }
 }
 
+/// A runtime whose crash replay exits cleanly after echoing the path of the
+/// input it was given, as the honggfuzz standalone driver does.
+struct EchoingCleanReplayRuntime;
+
+#[async_trait::async_trait]
+impl hf_core::runtime::RuntimeAdapter for EchoingCleanReplayRuntime {
+    async fn resolve_image_reference(
+        &self,
+        _image: &str,
+    ) -> Result<Option<hf_core::runtime::ImmutableImageReference>, hf_core::error::ClassifiedError>
+    {
+        Ok(Some(hf_test_utils::immutable_test_image()?))
+    }
+
+    async fn run_command(
+        &self,
+        cmd: &[String],
+        cwd: &std::path::Path,
+        limits: &hf_core::runtime::ResourceLimits,
+    ) -> Result<hf_core::runtime::CommandResult, hf_core::error::ClassifiedError> {
+        self.run_command_opts(
+            cmd,
+            cwd,
+            limits,
+            &hf_core::runtime::SandboxOptions::default(),
+        )
+        .await
+    }
+
+    async fn run_command_opts(
+        &self,
+        cmd: &[String],
+        cwd: &std::path::Path,
+        _limits: &hf_core::runtime::ResourceLimits,
+        _opts: &hf_core::runtime::SandboxOptions,
+    ) -> Result<hf_core::runtime::CommandResult, hf_core::error::ClassifiedError> {
+        let input = cmd.get(1).map(String::as_str).unwrap_or_default();
+        Ok(hf_core::runtime::CommandResult {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: format!("Accepting input from '{input}'\n"),
+            workspace: cwd.to_path_buf(),
+            termination: hf_core::runtime::CommandTermination::Completed,
+        })
+    }
+
+    async fn write_file(
+        &self,
+        _path: &std::path::Path,
+        _content: &str,
+    ) -> Result<(), hf_core::error::ClassifiedError> {
+        Ok(())
+    }
+
+    async fn read_file(
+        &self,
+        _path: &std::path::Path,
+    ) -> Result<String, hf_core::error::ClassifiedError> {
+        Ok(String::new())
+    }
+}
+
+#[tokio::test]
+async fn a_clean_replay_of_an_input_named_after_a_signal_is_not_a_regression() {
+    use std::fs;
+    isolate_workspace();
+
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("regress_signal_name");
+    fs::create_dir_all(&project).unwrap();
+    let target = "demo";
+    let ws = hf_service::workspace_dir(&project, target);
+    let out = ws.join("out");
+    fs::create_dir_all(&out).unwrap();
+    fs::write(ws.join(format!("fuzz_{target}")), b"bin").unwrap();
+    // honggfuzz names a crash file after the signal that ended the run.
+    fs::write(
+        out.join("SIGABRT.PC.0.STACK.17966f6a6.CODE.-6.ADDR.0.INSTR.nop.fuzz"),
+        b"boom",
+    )
+    .unwrap();
+
+    let container = ServiceContainer::new(Arc::new(EchoingCleanReplayRuntime), None);
+    let results = container
+        .verify_regressions(&project, target)
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 1, "the staged crash input is replayed");
+    assert!(results[0].verified);
+    assert!(
+        !results[0].still_crashes,
+        "the signal name in the echoed path is not a fault report"
+    );
+
+    let _ = fs::remove_dir_all(&ws);
+}
+
 #[tokio::test]
 async fn verify_regressions_reports_observations_without_claiming_a_fix() {
     use std::fs;

@@ -307,8 +307,9 @@ impl ServiceContainer {
         // severity, and clusters/deduplicates -- all in the sandbox. Fall back to
         // the built-in reproduce/classify/dedup path when CASR is unavailable (no
         // harness binary, native runtime without casr, or the tool errored). The
-        // captured sanitizer traces (`logs`) feed bug-report drafting; CASR-path
-        // crashes carry their summary instead.
+        // captured sanitizer traces (`logs`) feed bug-report drafting and are
+        // the reference a minimized input is confirmed against; a CASR-path
+        // crash has the sanitizer output of its own report, when CASR kept any.
         let (mut deduped, mut logs): (
             Vec<hf_core::crash::Crash>,
             std::collections::HashMap<PathBuf, String>,
@@ -316,8 +317,8 @@ impl ServiceContainer {
             .run_casr_triage_locked(&workspace, &out_dir, &run_binary, engine, run_id, target_id)
             .await?
         {
-            Some(crashes) if !crashes.is_empty() || self.scan_cancelled() => {
-                (crashes, std::collections::HashMap::new())
+            Some((crashes, logs)) if !crashes.is_empty() || self.scan_cancelled() => {
+                (crashes, logs)
             }
             _ => {
                 self.legacy_triage_locked(
@@ -523,7 +524,10 @@ impl ServiceContainer {
             ) {
                 Ok(prepared) => prepared,
                 Err(error) => {
-                    eprintln!("DBG staging failed: {error}");
+                    tracing::warn!(
+                        crash_id = %crash.id,
+                        "crash minimization could not be staged: {error}"
+                    );
                     continue;
                 }
             };
@@ -774,6 +778,102 @@ impl ServiceContainer {
         }
     }
 
+    /// Replay one input under honggfuzz, whose input buffer is what exposes a
+    /// short over-read. Returns the fault report, an empty string when no
+    /// fault was reported, or `None` when the replay did not complete.
+    async fn replay_through_honggfuzz_locked(
+        &self,
+        workspace: &Path,
+        binary_host: &Path,
+        input: &Path,
+        run_id: Uuid,
+    ) -> Option<String> {
+        let root = workspace
+            .join("runs")
+            .join(run_id.to_string())
+            .join("triage")
+            .join("regress_replay");
+        let trace = self
+            .run_honggfuzz_replay(workspace, binary_host, input, &root)
+            .await;
+        // Best effort: the directory is recreated empty by the next replay.
+        let _ = std::fs::remove_dir_all(&root);
+        match trace {
+            Ok(trace) => trace,
+            Err(error) => {
+                tracing::warn!("honggfuzz replay could not be staged: {error}");
+                None
+            }
+        }
+    }
+
+    async fn run_honggfuzz_replay(
+        &self,
+        workspace: &Path,
+        binary_host: &Path,
+        input: &Path,
+        root: &Path,
+    ) -> std::io::Result<Option<String>> {
+        // A previous replay may have been interrupted; nothing in it is kept.
+        let _ = std::fs::remove_dir_all(root);
+        let input_dir = root.join("in");
+        let out_dir = root.join("out");
+        std::fs::create_dir_all(&input_dir)?;
+        std::fs::create_dir_all(&out_dir)?;
+        std::fs::copy(input, input_dir.join("input"))?;
+        let out_container = container_input_path(workspace, &out_dir);
+        let cmd = hf_engine::honggfuzz::build_replay_args(
+            &container_input_path(workspace, binary_host),
+            &container_input_path(workspace, &input_dir),
+            &out_container,
+        );
+        let limits = hf_core::runtime::ResourceLimits {
+            max_mem_mb: 2048,
+            max_cpus: 1,
+            max_duration_secs: 30,
+            env: std::collections::HashMap::new(),
+            ptrace: false,
+        };
+        let sandbox = hf_core::runtime::SandboxOptions {
+            workspace_read_only: true,
+            extra_mounts: vec![hf_core::runtime::SandboxMount::writable(
+                out_dir.clone(),
+                out_container,
+            )],
+            ..hf_core::runtime::SandboxOptions::default()
+        };
+        match self.scan_command(&cmd, workspace, &limits, &sandbox).await {
+            Ok(result)
+                if result.termination == hf_core::runtime::CommandTermination::Completed
+                    && result.exit_code == 0 => {}
+            Ok(result) => {
+                tracing::warn!(
+                    termination = ?result.termination,
+                    exit_code = result.exit_code,
+                    "honggfuzz replay did not complete"
+                );
+                return Ok(None);
+            }
+            Err(error) => {
+                tracing::warn!("honggfuzz replay failed: {error}");
+                return Ok(None);
+            }
+        }
+        let report = match std::fs::File::open(out_dir.join("HONGGFUZZ.REPORT.TXT")) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Some(String::new()));
+            }
+            Err(error) => return Err(error),
+        };
+        let mut text = Vec::new();
+        std::io::Read::read_to_end(
+            &mut std::io::Read::take(report, hf_crash::MAX_SANITIZER_REPORT_BYTES as u64),
+            &mut text,
+        )?;
+        Ok(Some(String::from_utf8_lossy(&text).into_owned()))
+    }
+
     /// Run CASR over the crash dir in the sandbox, returning one `Crash` per
     /// unique (clustered) report with its severity/analysis. Returns `None` when
     /// CASR is unavailable or produced nothing, so the caller can fall back.
@@ -786,7 +886,13 @@ impl ServiceContainer {
         engine: EngineKind,
         run_id: Uuid,
         target_id: Uuid,
-    ) -> Result<Option<Vec<hf_core::crash::Crash>>, ClassifiedError> {
+    ) -> Result<
+        Option<(
+            Vec<hf_core::crash::Crash>,
+            std::collections::HashMap<PathBuf, String>,
+        )>,
+        ClassifiedError,
+    > {
         // CASR replays a libFuzzer- or AFL-shaped binary under a sanitizer
         // and a debugger. A Go test binary is neither; its failures are
         // replayed by name and classified from the Go runtime's own report.
@@ -940,10 +1046,14 @@ impl ServiceContainer {
         // The actual crash inputs, including AFL++'s nested
         // out/<instance>/crashes/ layout, so each casrep resolves to a real file.
         let crash_inputs = collect_crash_inputs(engine, out_dir);
+        let mut logs = std::collections::HashMap::new();
         let mut crashes = reports
             .into_iter()
-            .map(|(path, casr)| {
+            .map(|(path, casr, sanitizer_log)| {
                 let input_path = casrep_input_path(out_dir, &path, &crash_inputs);
+                if let Some(log) = sanitizer_log {
+                    logs.insert(input_path.clone(), log);
+                }
                 let signature = if casr.crashline.is_empty() {
                     casr.stack.first().cloned().unwrap_or_default()
                 } else {
@@ -975,7 +1085,7 @@ impl ServiceContainer {
         // Crashes CASR did not cluster (cluster=None) all pass through.
         crashes = bucket_by_cluster(crashes);
         tracing::info!("casr triaged {} unique crash(es)", crashes.len());
-        Ok(Some(crashes))
+        Ok(Some((crashes, logs)))
     }
 
     /// Built-in triage fallback: replay crashes in the sandbox until the set of
@@ -1039,6 +1149,15 @@ impl ServiceContainer {
             if self.scan_cancelled() {
                 break;
             }
+            // A replay that reports no fault is not evidence against the
+            // report the engine wrote when the input crashed: honggfuzz
+            // poisons the bytes after the input only while fuzzing, so a
+            // short over-read replays cleanly through the standalone driver.
+            // Classifying that output would replace the engine's description
+            // with whatever the clean exit happened to print.
+            let log = log.filter(|value| {
+                crash.summary.is_empty() || replay_reports_a_fault(value, &crash.input_path)
+            });
             if log.as_deref().is_none_or(|value| value.trim().is_empty()) {
                 since_new_signature += 1;
             } else if let Some(log) = log.as_deref() {
@@ -1482,23 +1601,38 @@ impl ServiceContainer {
                 .collect();
         }
 
+        let honggfuzz_run = latest_run
+            .as_ref()
+            .filter(|run| run.engine == EngineKind::Honggfuzz)
+            .map(|run| run.id);
         let mut results = Vec::with_capacity(inputs.len());
         for (crash_id, input) in inputs {
             if !is_regular_file(&input) {
                 continue;
             }
             let binary = workspace.join(harness_binary_name(target));
-            let trace = self
-                .reproduce_crash_locked(&workspace, &binary, &input)
-                .await;
+            let trace = match honggfuzz_run {
+                Some(run_id) => {
+                    self.replay_through_honggfuzz_locked(&workspace, &binary, &input, run_id)
+                        .await
+                }
+                None => {
+                    self.reproduce_crash_locked(&workspace, &binary, &input)
+                        .await
+                }
+            };
             let verified = trace.is_some();
-            let still_crashes = trace.as_deref().is_some_and(hf_crash::looks_like_crash);
+            let still_crashes = trace
+                .as_deref()
+                .is_some_and(|trace| replay_reports_a_fault(trace, &input));
             let summary = match trace.as_deref() {
                 Some(trace) if still_crashes => trace
                     .lines()
                     .find(|l| {
                         let s = l.to_ascii_lowercase();
-                        s.contains("error") || s.contains("summary")
+                        s.starts_with("description:")
+                            || s.contains("error")
+                            || s.contains("summary")
                     })
                     .unwrap_or("still crashes")
                     .trim()
@@ -1772,5 +1906,16 @@ impl ServiceContainer {
             blockers,
             experiment,
         })
+    }
+}
+
+/// Whether a replay's output reports a fault. The input's own file name is
+/// left out of the check: honggfuzz names a crash file after the signal that
+/// ended the run (`SIGABRT.PC...`), and its standalone driver echoes the path
+/// of the input it was given.
+fn replay_reports_a_fault(log: &str, input: &Path) -> bool {
+    match input.file_name().and_then(|name| name.to_str()) {
+        Some(name) if !name.is_empty() => hf_crash::looks_like_crash(&log.replace(name, "")),
+        _ => hf_crash::looks_like_crash(log),
     }
 }

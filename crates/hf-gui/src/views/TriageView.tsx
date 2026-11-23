@@ -229,6 +229,26 @@ function ScopedTriageView({ embedded, initialRunId, onNavigate }: { embedded: bo
       });
   }, [activeProject, selection]);
 
+  // A scan or a full triage rewrites the retained findings in place (their
+  // ids are stable), so the open one is fetched again when the queue reloads.
+  // This keeps the selection and any message on screen; only the evidence
+  // shown for the finding is replaced.
+  const reloadedDetail = useRef(reloadVersion);
+  useEffect(() => {
+    if (reloadedDetail.current === reloadVersion) return;
+    reloadedDetail.current = reloadVersion;
+    if (!activeProject || !selection) return;
+    const request = detailRequest.current;
+    getTransport().invoke<FindingReviewItem>("finding_review", { project: activeProject, findingId: selection.findingId })
+      .then((item) => {
+        if (request === detailRequest.current && mounted.current) setSelectedFinding(item);
+      })
+      .catch((error) => {
+        if (request !== detailRequest.current || !mounted.current) return;
+        if (/finding \S+ (was )?not found/.test(String(error))) setGoneFindingId(selection.findingId);
+      });
+  }, [activeProject, reloadVersion, selection]);
+
   useEffect(() => {
     if (!goneFindingId || queueLoading) return;
     if (selection?.findingId !== goneFindingId) {

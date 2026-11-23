@@ -170,8 +170,11 @@ finding's fix-verification determination.
   normalized stack signature, crash kind, failure class, and origin on every
   attempt, and that identity must match the retained log and classification of
   the finding being minimized. The report retains that bounded reference log,
-  run/finding identities, version, and requested repetition count. CASR findings
-  without a comparable original sanitizer log remain explicitly unconfirmed.
+  run/finding identities, version, and requested repetition count. For a CASR
+  finding the reference log is the sanitizer output retained in its own CASR
+  report, and it must name the report's crash line and failure class. CASR
+  findings without a comparable original sanitizer log remain explicitly
+  unconfirmed.
   Failure categories exclude variable process IDs, addresses, and operand values;
   unrecognized categories cannot support confirmation. Clean exits, different failures, incomplete runs, and frameless
   reports cannot confirm identity. Native minimizer success alone is insufficient.

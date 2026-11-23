@@ -2344,6 +2344,14 @@ impl ServiceContainer {
                     input_workspace.display()
                 ))
             })?;
+            // The profile export mounts that workspace read-only at `/work`
+            // and binds the run's inputs beneath it, so the mountpoints have
+            // to exist on the host, exactly as a campaign stages them.
+            super::retained_inputs::stage_run_mountpoints(
+                &artifacts.input_host,
+                smoke_record.id,
+                None,
+            )?;
             super::function_coverage::stage_input_workspace(
                 &smoke_config,
                 &input_workspace,

@@ -94,17 +94,35 @@ fn default_log_filter(command: &Commands) -> &'static str {
     }
 }
 
+/// Print the model budget status as JSON, with a note on standard error when
+/// there is nothing to report.
+#[cfg(feature = "model-budgets")]
+async fn print_model_budget_status() -> anyhow::Result<()> {
+    let status = hf_service::model_budget::model_budget_status()
+        .await
+        .map_err(anyhow::Error::msg)?;
+    if status.is_none() {
+        let settings =
+            hf_service::config::effective_model_budget_settings().map_err(anyhow::Error::msg)?;
+        match settings.scope_id {
+            Some(scope) => {
+                eprintln!("No spending is recorded yet for model budget workflow '{scope}'.");
+            }
+            None => eprintln!(
+                "No [model_budget] workflow is configured in oxfuzz.toml; there is no spending to report."
+            ),
+        }
+    }
+    println!("{}", serde_json::to_string_pretty(&status)?);
+    Ok(())
+}
+
 async fn dispatch(command: Commands) -> anyhow::Result<()> {
     match command {
         #[cfg(feature = "managed-mutators")]
         Commands::Mutator(args) => commands::mutator::run(args).await?,
         #[cfg(feature = "model-budgets")]
-        Commands::ModelBudget => {
-            let status = hf_service::model_budget::model_budget_status()
-                .await
-                .map_err(anyhow::Error::msg)?;
-            println!("{}", serde_json::to_string_pretty(&status)?);
-        }
+        Commands::ModelBudget => print_model_budget_status().await?,
         Commands::Init => {
             let report = hf_service::init_workspace().await?;
             println!("Initialized oxfuzz workspace.");

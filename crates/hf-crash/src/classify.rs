@@ -482,6 +482,9 @@ fn strip_module_suffix(frame: &str) -> String {
 /// The line Atheris prints before the exception a fuzz callback raised.
 const ATHERIS_EXCEPTION_MARK: &str = "=== Uncaught Python exception: ===";
 
+/// The `HONGGFUZZ.REPORT.TXT` field that carries the crash headline.
+const HONGGFUZZ_DESCRIPTION_FIELD: &str = "DESCRIPTION:";
+
 fn extract_summary(log: &str, kind: CrashKind) -> String {
     if kind == CrashKind::Panic {
         // A Go panic leads with `panic: <message>`; a Python traceback ends with
@@ -530,6 +533,16 @@ fn extract_summary(log: &str, kind: CrashKind) -> String {
         if let Some(last) = log.lines().map(str::trim).rev().find(|t| !t.is_empty()) {
             return last.to_owned();
         }
+    }
+    // honggfuzz copies the sanitizer's headline into the `DESCRIPTION` field
+    // of its report, without the `ERROR:` prefix the scan below keys on.
+    if let Some(description) = log
+        .lines()
+        .find_map(|line| line.strip_prefix(HONGGFUZZ_DESCRIPTION_FIELD))
+        .map(str::trim)
+        .filter(|description| !description.is_empty())
+    {
+        return description.to_owned();
     }
     for line in log.lines() {
         let lower = line.to_ascii_lowercase();
@@ -1143,6 +1156,30 @@ Executed /work/out/crash-b084b39be118ed218c2cf935548563d2f01c05f6 in 5 ms\n";
         assert!(looks_like_crash(
             "src/x.c:3:5: runtime error: signed integer overflow"
         ));
+    }
+
+    /// The fields of a honggfuzz 2.6 `HONGGFUZZ.REPORT.TXT` entry for an
+    /// `ASan` abort (captured in sandbox image 0.2.3). honggfuzz copies the
+    /// sanitizer's headline into `DESCRIPTION`, without the `ERROR:` prefix
+    /// the sanitizer itself prints.
+    const HONGGFUZZ_ASAN_REPORT: &str = "\
+CRASH:
+DESCRIPTION: AddressSanitizer: use-after-poison on address 0xffff91b00001 at pc 0xaaaac3242320
+SIGNAL: SIGABRT (6)
+FAULT ADDRESS: 0x0
+STACK HASH: 000000017966f6a6
+STACK:
+ <0x0000aaaac324231c> [func:decode_utf8 file:/work/utf8.c line:31 module:]
+";
+
+    #[test]
+    fn a_honggfuzz_report_is_summarized_by_its_description() {
+        let (kind, _, summary) = classify(HONGGFUZZ_ASAN_REPORT);
+        assert_eq!(kind, CrashKind::Asan);
+        assert_eq!(
+            summary,
+            "AddressSanitizer: use-after-poison on address 0xffff91b00001 at pc 0xaaaac3242320"
+        );
     }
 
     #[test]

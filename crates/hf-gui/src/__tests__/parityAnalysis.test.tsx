@@ -104,9 +104,9 @@ it("renders each stored-crash replay result with the CLI's counts", async () => 
   await click("Replay stored crashes (regression check)");
   expect(mocks.invoke).toHaveBeenCalledWith("verify_regressions", { project: "/p", target: "decode" });
   const text = host.querySelector('[data-testid="regression-results"]')!.textContent!;
-  expect(text).toContain("Replayed 3 crash(es): 1 still crashing, 1 fixed, 1 inconclusive.");
+  expect(text).toContain("Replayed 3 crash(es): 1 still crashing, 1 no longer crashing, 1 inconclusive.");
   expect(text).toContain("[STILL CRASHES] aaaaaaaa crash-1 -- SEGV");
-  expect(text).toContain("[fixed] bbbbbbbb crash-2 -- clean exit");
+  expect(text).toContain("[NO CRASH ON REPLAY] bbbbbbbb crash-2 -- clean exit");
   expect(text).toContain("[INCONCLUSIVE]  crash-3 -- sandbox down");
 });
 

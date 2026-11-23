@@ -293,6 +293,20 @@ fn promotion_required_message() -> &'static str {
     "promotion required: review this harness before a full campaign; rerunning `oxfuzz harness` creates a new draft. To approve a retained source after separate review, use the Work Order import/qualify flow and `oxfuzz work-order promote --attempt <attempt UUID>`"
 }
 
+/// What the operator can do when the smoke run itself crashed. Promotion from
+/// the command line takes clean smoke evidence only; approving a harness with
+/// known findings is a desktop-app decision.
+fn smoke_crash_guidance(project: &std::path::Path, target: &str, crashes: u32) -> String {
+    let noun = if crashes == 1 { "crash" } else { "crashes" };
+    format!(
+        "not promoted: the smoke run found {crashes} {noun}, and command-line promotion takes \
+         clean smoke evidence only. Inspect the finding with `oxfuzz triage {} --target {target}`; \
+         then fix the bug and rerun, or approve the harness with known findings in the desktop \
+         app's Harness step.",
+        project.display()
+    )
+}
+
 /// Smoke-qualify the active harness. `smoke_repairs` is the number of
 /// smoke-failure repairs the service may make (the `--repair` budget; 0 on a
 /// plain draft); each repaired revision is reviewed and approved again. `ai`
@@ -368,6 +382,11 @@ async fn qualify_harness(
     if promote {
         let harness = container.harness_promote(project, target, engine).await?;
         println!("promotion: {:?} ({})", harness.status, harness.id);
+    } else if smoke.summary.crashes > 0 {
+        println!(
+            "{}",
+            smoke_crash_guidance(project, target, smoke.summary.crashes)
+        );
     } else {
         println!("{}", promotion_required_message());
     }
@@ -775,7 +794,23 @@ pub(crate) async fn cmd_attribution(project: PathBuf, lang: &str) -> anyhow::Res
 
 #[cfg(test)]
 mod promotion_guidance_tests {
-    use super::promotion_required_message;
+    use super::{promotion_required_message, smoke_crash_guidance};
+
+    #[test]
+    fn a_crashing_smoke_run_is_not_pointed_at_a_promotion_that_will_refuse() {
+        // `work-order promote` accepts clean smoke evidence only, so naming it
+        // after a crashing smoke run sent the operator to a refusal.
+        let message = smoke_crash_guidance(std::path::Path::new("/proj"), "parse_number", 1);
+
+        assert!(message.contains("found 1 crash"), "{message}");
+        assert!(
+            message.contains("oxfuzz triage /proj --target parse_number"),
+            "{message}"
+        );
+        assert!(message.contains("known findings"), "{message}");
+        assert!(!message.contains("work-order promote"), "{message}");
+        assert!(smoke_crash_guidance(std::path::Path::new("/p"), "t", 2).contains("2 crashes"));
+    }
 
     #[test]
     fn non_promoting_harness_run_explains_that_rerunning_creates_a_new_draft() {

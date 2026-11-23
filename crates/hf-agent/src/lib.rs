@@ -1041,36 +1041,86 @@ fn extract_relaxed_string_field(content: &str, field: &str) -> Option<String> {
     read_relaxed_quoted_string(after_colon)
 }
 
-/// Read a JSON-style quoted string, with common escapes decoded and literal
-/// newlines accepted. Returns `None` when `value` does not start with a quote.
-fn read_relaxed_quoted_string(value: &str) -> Option<String> {
-    let mut chars = value.chars();
-    if chars.next()? != '"' {
-        return None;
-    }
+/// The field names of a [`Step`] as the protocol spells them.
+const STEP_FIELDS: [&str; 4] = ["thought", "tool", "args", "final"];
 
-    let mut out = String::new();
+/// Read a JSON-style quoted string, with common escapes decoded and literal
+/// newlines and unescaped inner quotes accepted. Returns `None` when `value`
+/// does not start with a quote or the string never closes.
+fn read_relaxed_quoted_string(value: &str) -> Option<String> {
+    let body = value.strip_prefix('"')?;
+    let end = relaxed_string_end(body)?;
+    Some(decode_relaxed_escapes(&body[..end]))
+}
+
+/// Byte offset of the quote that closes a relaxed string.
+///
+/// A model that quotes a phrase without escaping it leaves quotes inside the
+/// string, so the first unescaped quote is not necessarily the end. The string
+/// ends at the first quote followed by another step field or by the end of the
+/// reply; failing that, at the last quote followed by a closing brace, because
+/// an answer can itself contain `"..."}` (a JSON example).
+fn relaxed_string_end(body: &str) -> Option<usize> {
     let mut escaped = false;
-    for ch in chars {
+    let mut last_before_brace = None;
+    for (index, ch) in body.char_indices() {
         if escaped {
-            match ch {
-                '"' => out.push('"'),
-                '\\' => out.push('\\'),
-                'n' => out.push('\n'),
-                'r' => out.push('\r'),
-                't' => out.push('\t'),
-                other => out.push(other),
-            }
             escaped = false;
             continue;
         }
         match ch {
             '\\' => escaped = true,
-            '"' => return Some(out),
-            other => out.push(other),
+            '"' => {
+                let rest = body[index + 1..].trim_start();
+                if rest.is_empty() || starts_next_step_field(rest) {
+                    return Some(index);
+                }
+                if rest.starts_with('}') {
+                    last_before_brace = Some(index);
+                }
+            }
+            _ => {}
         }
     }
-    None
+    last_before_brace
+}
+
+/// Whether `rest` (the text after a quote) is `,"<step field>":`.
+fn starts_next_step_field(rest: &str) -> bool {
+    let Some(key) = rest
+        .strip_prefix(',')
+        .and_then(|after_comma| after_comma.trim_start().strip_prefix('"'))
+    else {
+        return false;
+    };
+    STEP_FIELDS.iter().any(|field| {
+        key.strip_prefix(field)
+            .and_then(|after_field| after_field.strip_prefix('"'))
+            .is_some_and(|after_key| after_key.trim_start().starts_with(':'))
+    })
+}
+
+/// Decode the common JSON escapes of a relaxed string body; an unknown escape
+/// keeps its character.
+fn decode_relaxed_escapes(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut escaped = false;
+    for ch in body.chars() {
+        if escaped {
+            out.push(match ch {
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                other => other,
+            });
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 /// Truncate a string to `max` chars with an ellipsis, for event summaries.

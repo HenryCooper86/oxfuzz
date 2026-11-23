@@ -122,6 +122,30 @@ fn minimization_is_what_separates_the_two_unresolved_target_dispositions() {
 }
 
 #[test]
+fn a_pending_minimization_names_the_operation_that_performs_it() {
+    // "Minimize the input" alone names no command or button: triage is the
+    // operation that minimizes, and only for the engines that have a minimizer.
+    let pending = crash(CrashOrigin::Target, false);
+    let view = triage_disposition(&pending, &finding_proof_card(&pending));
+    assert_eq!(view.disposition, Disposition::MinimizationPending);
+    assert!(
+        view.action_detail.contains("triage"),
+        "{}",
+        view.action_detail
+    );
+    assert!(
+        view.action_detail.contains("AFL++"),
+        "{}",
+        view.action_detail
+    );
+    assert!(
+        view.action_detail.contains("libFuzzer"),
+        "{}",
+        view.action_detail
+    );
+}
+
+#[test]
 fn demonstrated_reachability_is_what_makes_a_finding_report_ready() {
     let crash = crash(CrashOrigin::Target, true);
     let card = card_with_reachability(&crash);

@@ -98,6 +98,15 @@ struct TriageFixture {
 /// `crash_minimization.rs` fixture: `binary_rev` is set (so the minimization
 /// phase engages) but `harness_rev` is not (no source context).
 async fn triage_fixture(name: &str, crash_files: &[String]) -> TriageFixture {
+    triage_fixture_for(name, EngineKind::LibFuzzer, crash_files).await
+}
+
+/// [`triage_fixture`] for a run of the named engine.
+async fn triage_fixture_for(
+    name: &str,
+    engine: EngineKind,
+    crash_files: &[String],
+) -> TriageFixture {
     common::install_managed_workspace("oxfuzz_crash_triage_paths");
     let root = tempfile::tempdir().unwrap();
     let project = root.path().join(format!("{name}-{}", Uuid::new_v4()));
@@ -129,7 +138,7 @@ async fn triage_fixture(name: &str, crash_files: &[String]) -> TriageFixture {
     let harness = Harness {
         id: Uuid::new_v4(),
         target_id: target.id,
-        engine: EngineKind::LibFuzzer,
+        engine,
         source: "int LLVMFuzzerTestOneInput(const unsigned char *d, unsigned long n) { return n && d[0]; }".to_owned(),
         language: TargetLanguage::C,
         build_cmd: BuildCommand {
@@ -146,10 +155,10 @@ async fn triage_fixture(name: &str, crash_files: &[String]) -> TriageFixture {
     };
     let mut run = hf_storage::RunRecord::new(
         project.to_string_lossy(),
-        EngineKind::LibFuzzer,
+        engine,
         Some(FuzzRunConfig {
             harness_id: harness.id,
-            engine: EngineKind::LibFuzzer,
+            engine,
             duration: Some(std::time::Duration::from_secs(1)),
             max_mem_mb: 512,
             max_cpus: 1,
@@ -676,6 +685,121 @@ async fn legacy_triage_saturates_on_repeated_signatures() {
         persisted.len(),
         1,
         "only the single deduped crash is persisted"
+    );
+}
+
+/// The crash input honggfuzz 2.6 retained for a one-byte over-read, and the
+/// report it wrote beside it (captured from sandbox image 0.2.3, trimmed to
+/// the fields and frames the classifier reads).
+const HONGGFUZZ_CRASH: &str =
+    "SIGABRT.PC.0.STACK.17966f6a6.CODE.-6.ADDR.0.INSTR.ldr_w9,_[sp,_#4].fuzz";
+const HONGGFUZZ_REPORT: &str = "\
+CRASH:
+DESCRIPTION: AddressSanitizer: use-after-poison on address 0xffff91b00001 at pc 0xaaaac3242320 bp 0xffffeae65160 sp 0xffffeae65158
+SIGNAL: SIGABRT (6)
+PC: 0x0
+FAULT ADDRESS: 0x0
+STACK HASH: 000000017966f6a6
+STACK:
+ <0x0000aaaac324231c> [func:decode_utf8 file:/work/utf8.c line:31 module:]
+ <0x0000aaaac3242088> [func:LLVMFuzzerTestOneInput file:/work/harness.c line:7 module:]
+";
+
+/// What the same harness prints when the input is replayed outside
+/// honggfuzz: the standalone driver does not poison the bytes after the
+/// input, so the over-read goes unreported and the process exits cleanly.
+/// The driver echoes the input's path, and honggfuzz names a crash file after
+/// the signal that ended the run.
+const HONGGFUZZ_CLEAN_REPLAY: &str = "\
+Accepting input from '/work/runs/out/SIGABRT.PC.0.STACK.17966f6a6.CODE.-6.ADDR.0.INSTR.ldr_w9,_[sp,_#4].fuzz'
+Usage for fuzzing: honggfuzz -P [flags] -- /work/runs/input/harness
+LLVM Profile Error: Failed to write file \"default.profraw\": Read-only file system
+";
+
+/// Replays every crash input cleanly, with CASR unavailable.
+struct CleanReplayRuntime;
+
+#[async_trait]
+impl RuntimeAdapter for CleanReplayRuntime {
+    async fn resolve_image_reference(
+        &self,
+        _image: &str,
+    ) -> Result<Option<hf_core::runtime::ImmutableImageReference>, ClassifiedError> {
+        Ok(Some(hf_test_utils::immutable_test_image()?))
+    }
+
+    async fn run_command(
+        &self,
+        cmd: &[String],
+        cwd: &Path,
+        limits: &ResourceLimits,
+    ) -> Result<CommandResult, ClassifiedError> {
+        self.run_command_opts(cmd, cwd, limits, &SandboxOptions::default())
+            .await
+    }
+
+    async fn write_file(&self, _path: &Path, _content: &str) -> Result<(), ClassifiedError> {
+        Ok(())
+    }
+
+    async fn read_file(&self, _path: &Path) -> Result<String, ClassifiedError> {
+        Ok(String::new())
+    }
+
+    async fn run_command_opts(
+        &self,
+        cmd: &[String],
+        cwd: &Path,
+        _limits: &ResourceLimits,
+        _opts: &SandboxOptions,
+    ) -> Result<CommandResult, ClassifiedError> {
+        if is_casr(cmd) {
+            return Err(ClassifiedError::Sandbox(
+                "CASR unavailable in test".to_owned(),
+            ));
+        }
+        if is_minimize(cmd) {
+            return Ok(timed_out(cwd));
+        }
+        if cmd.len() == 2 {
+            return Ok(completed(0, "", HONGGFUZZ_CLEAN_REPLAY, cwd));
+        }
+        Ok(completed(0, "", "", cwd))
+    }
+}
+
+#[tokio::test]
+async fn a_clean_replay_keeps_the_classification_of_the_engine_report() {
+    let fixture = triage_fixture_for(
+        "honggfuzz-clean-replay",
+        EngineKind::Honggfuzz,
+        &[HONGGFUZZ_CRASH.to_owned()],
+    )
+    .await;
+    let out_dir = hf_service::workspace_dir(&fixture.project, &fixture.symbol)
+        .join("runs")
+        .join(fixture.run_id.to_string())
+        .join("out");
+    std::fs::write(out_dir.join("HONGGFUZZ.REPORT.TXT"), HONGGFUZZ_REPORT).unwrap();
+    let container = ServiceContainer::new(Arc::new(CleanReplayRuntime), None)
+        .with_store(Arc::clone(&fixture.store));
+
+    let crashes = container
+        .triage_run(
+            &fixture.project,
+            &fixture.symbol,
+            fixture.run_id,
+            hf_service::AiPolicy::Off,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(crashes.len(), 1);
+    assert_eq!(crashes[0].kind, CrashKind::Asan);
+    assert!(
+        crashes[0].summary.contains("use-after-poison"),
+        "the summary is the engine's own description, not replay noise: {}",
+        crashes[0].summary
     );
 }
 
@@ -1218,4 +1342,111 @@ async fn scan_reports_when_artifact_collection_is_limited() {
     let last = events.last().unwrap();
     assert!(last.input_limit_reached);
     assert_eq!(last.total_inputs, Some(hf_crash::MAX_CRASH_ARTIFACTS));
+}
+
+/// How a fake honggfuzz replay ends.
+#[derive(Clone, Copy)]
+enum HonggfuzzReplay {
+    Faults,
+    Clean,
+    Fails,
+}
+
+/// A standalone replay is always clean, as it is for an over-read that only
+/// honggfuzz's input buffer exposes; only a replay through honggfuzz differs.
+struct HonggfuzzReplayRuntime(HonggfuzzReplay);
+
+#[async_trait]
+impl RuntimeAdapter for HonggfuzzReplayRuntime {
+    async fn resolve_image_reference(
+        &self,
+        _image: &str,
+    ) -> Result<Option<hf_core::runtime::ImmutableImageReference>, ClassifiedError> {
+        Ok(Some(hf_test_utils::immutable_test_image()?))
+    }
+
+    async fn run_command(
+        &self,
+        cmd: &[String],
+        cwd: &Path,
+        limits: &ResourceLimits,
+    ) -> Result<CommandResult, ClassifiedError> {
+        self.run_command_opts(cmd, cwd, limits, &SandboxOptions::default())
+            .await
+    }
+
+    async fn write_file(&self, _path: &Path, _content: &str) -> Result<(), ClassifiedError> {
+        Ok(())
+    }
+
+    async fn read_file(&self, _path: &Path) -> Result<String, ClassifiedError> {
+        Ok(String::new())
+    }
+
+    async fn run_command_opts(
+        &self,
+        cmd: &[String],
+        cwd: &Path,
+        _limits: &ResourceLimits,
+        _opts: &SandboxOptions,
+    ) -> Result<CommandResult, ClassifiedError> {
+        if cmd.first().map(String::as_str) != Some("honggfuzz") {
+            return Ok(completed(0, "", HONGGFUZZ_CLEAN_REPLAY, cwd));
+        }
+        match self.0 {
+            HonggfuzzReplay::Fails => Ok(completed(1, "", "honggfuzz could not start", cwd)),
+            HonggfuzzReplay::Clean => Ok(completed(0, "", "", cwd)),
+            HonggfuzzReplay::Faults => {
+                let at = cmd.iter().position(|arg| arg == "--report").unwrap();
+                let report = cmd[at + 1].strip_prefix("/work/").unwrap();
+                std::fs::write(cwd.join(report), HONGGFUZZ_REPORT).unwrap();
+                Ok(completed(0, "", "", cwd))
+            }
+        }
+    }
+}
+
+async fn regress_honggfuzz(replay: HonggfuzzReplay) -> hf_service::RegressionResult {
+    let fixture = triage_fixture_for(
+        &format!("honggfuzz-regress-{}", Uuid::new_v4()),
+        EngineKind::Honggfuzz,
+        &[HONGGFUZZ_CRASH.to_owned()],
+    )
+    .await;
+    let workspace = hf_service::workspace_dir(&fixture.project, &fixture.symbol);
+    std::fs::write(workspace.join(format!("fuzz_{}", fixture.symbol)), b"bin").unwrap();
+    let container = ServiceContainer::new(Arc::new(HonggfuzzReplayRuntime(replay)), None)
+        .with_store(Arc::clone(&fixture.store));
+    let mut results = container
+        .verify_regressions(&fixture.project, &fixture.symbol)
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 1);
+    results.remove(0)
+}
+
+#[tokio::test]
+async fn a_honggfuzz_reproducer_is_replayed_through_honggfuzz() {
+    let result = regress_honggfuzz(HonggfuzzReplay::Faults).await;
+    assert!(result.verified);
+    assert!(result.still_crashes, "{}", result.summary);
+    assert!(
+        result.summary.contains("AddressSanitizer"),
+        "{}",
+        result.summary
+    );
+}
+
+#[tokio::test]
+async fn a_honggfuzz_replay_without_a_report_is_clean() {
+    let result = regress_honggfuzz(HonggfuzzReplay::Clean).await;
+    assert!(result.verified);
+    assert!(!result.still_crashes);
+}
+
+#[tokio::test]
+async fn a_honggfuzz_replay_that_cannot_run_is_inconclusive() {
+    let result = regress_honggfuzz(HonggfuzzReplay::Fails).await;
+    assert!(!result.verified);
+    assert!(!result.still_crashes);
 }

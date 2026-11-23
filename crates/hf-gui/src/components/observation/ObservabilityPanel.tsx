@@ -10,6 +10,7 @@ import { Server, Bot, ChevronDown, ChevronRight } from "lucide-react";
 import { usePolledResource } from "../../hooks/usePolledResource";
 import { Button } from "../ui/Button";
 import { getTransport } from "../../lib";
+import { formatCost } from "../../lib/cost";
 import { useI18n } from "../../i18nContext";
 import "./ObservabilityPanel.css";
 
@@ -114,7 +115,7 @@ function ProviderCard({ p, onThawed }: { p: ProviderSnapshot; onThawed: () => vo
         <Metric label={t("obs.errRate")} value={`${(p.error_rate * 100).toFixed(1)}%`} />
         <Metric label={t("obs.inTokens")} value={n(p.total_input_tokens)} />
         <Metric label={t("obs.outTokens")} value={n(p.total_output_tokens)} />
-        <Metric label={t("obs.cost")} value={`$${p.estimated_cost_usd.toFixed(4)}`} />
+        <Metric label={t("obs.cost")} value={formatCost(p.estimated_cost_usd, p.total_input_tokens + p.total_output_tokens) ?? t("diag.notPriced")} />
       </div>
     </div>
   );

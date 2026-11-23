@@ -123,12 +123,36 @@ fn failure_identity(observation: &CrashReplayObservation) -> Option<FailureIdent
     log_identity(&observation.log)
 }
 
+/// Whether `log` is the sanitizer output behind a CASR classification: CASR
+/// names the class as `heap-buffer-overflow(read)` and the faulting source
+/// position as its crash line, and both must be what the log reports.
+fn describes_casr_classification(
+    casr: &hf_core::crash::CasrReport,
+    identity: &FailureIdentity,
+    log: &str,
+) -> bool {
+    !casr.crashline.is_empty()
+        && log.contains(&casr.crashline)
+        && casr.severity_short.split('(').next() == Some(identity.class.as_str())
+}
+
+/// The failure a finding's replays must reproduce: the identity of its
+/// retained classification log, provided that log agrees with the persisted
+/// classification. A CASR finding is classified by CASR's own description
+/// rather than by a signature of the log, so it is compared on that
+/// description.
 fn reference_identity(crash: &Crash, evidence: &CrashReproduction) -> Option<FailureIdentity> {
-    let identity = log_identity(evidence.reference_log.as_deref()?)?;
-    if crash.casr.is_some()
+    let log = evidence.reference_log.as_deref()?;
+    let identity = log_identity(log)?;
+    let classified_alike = match &crash.casr {
+        Some(casr) => describes_casr_classification(casr, &identity, log),
+        None => {
+            identity.signature == crash.stack_signature
+                && semantic_class(crash.kind, &crash.summary).as_ref() == Some(&identity.class)
+        }
+    };
+    if !classified_alike
         || identity.kind != crash.kind
-        || identity.signature != crash.stack_signature
-        || semantic_class(crash.kind, &crash.summary).as_ref() != Some(&identity.class)
         || (crash.origin != CrashOrigin::Unknown && identity.origin != crash.origin)
     {
         return None;
@@ -419,6 +443,91 @@ mod tests {
             };
             assert!(failure_identity(&observation).is_none());
         }
+    }
+
+    const CASR_LOG: &str = "==9==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x502000000033\nREAD of size 1\n    #0 0xaaaa in decode_utf8 /work/utf8.c:31:27\n    #1 0xbbbb in LLVMFuzzerTestOneInput /work/harness.c:7:11";
+
+    /// A finding classified by CASR, with replays of the original and the
+    /// minimized candidate that all print `replay_log`.
+    fn casr_finding(reference_log: Option<&str>, replay_log: &str) -> Crash {
+        let run_id = uuid::Uuid::new_v4();
+        let id = uuid::Uuid::new_v4();
+        let run = std::env::temp_dir().join("runs").join(run_id.to_string());
+        let original = run.join("out/crash-original");
+        let observation = CrashReplayObservation {
+            exit_code: Some(1),
+            termination: Some(CommandTermination::Completed),
+            log: replay_log.to_owned(),
+            matches_reference: true,
+            error: None,
+        };
+        Crash {
+            reproduction: Some(CrashReproduction {
+                version: 1,
+                run_id,
+                crash_id: id,
+                requested_runs: 2,
+                reference_log: reference_log.map(str::to_owned),
+                original_input: original.clone(),
+                original_sha256: "a".repeat(64),
+                candidate_input: run.join("triage/minimized").join(format!("{id}.min")),
+                candidate_sha256: "b".repeat(64),
+                binary_sha256: "c".repeat(64),
+                image: format!("sha256:{}", "d".repeat(64)),
+                original: vec![observation.clone(), observation.clone()],
+                candidate: vec![observation.clone(), observation],
+                confirmed: true,
+            }),
+            id,
+            run_id,
+            target_id: uuid::Uuid::new_v4(),
+            input_path: original,
+            stack_signature: "/work/utf8.c:31:27".to_owned(),
+            kind: CrashKind::Asan,
+            summary: "heap-buffer-overflow(read) at /work/utf8.c:31:27".to_owned(),
+            minimized: false,
+            bug_report: None,
+            origin: CrashOrigin::Target,
+            casr: Some(hf_core::crash::CasrReport {
+                severity: hf_core::crash::CrashSeverity::NotExploitable,
+                severity_short: "heap-buffer-overflow(read)".to_owned(),
+                crashline: "/work/utf8.c:31:27".to_owned(),
+                stack: vec!["#0 0xaaaa in decode_utf8 /work/utf8.c:31:27".to_owned()],
+                cluster: None,
+            }),
+        }
+    }
+
+    fn assessed(crash: &Crash) -> ReproductionAssessment {
+        assess_reproduction(crash, crash.reproduction.as_ref().unwrap())
+    }
+
+    #[test]
+    fn a_casr_finding_is_confirmed_against_the_sanitizer_log_of_its_report() {
+        let replay = format!("INFO: Seed: 1\n{CASR_LOG}");
+        let assessment = assessed(&casr_finding(Some(CASR_LOG), &replay));
+        assert!(assessment.confirmed, "{}", assessment.reason);
+        assert_eq!(assessment.candidate_matches, 2);
+    }
+
+    #[test]
+    fn a_casr_finding_without_a_sanitizer_log_stays_unconfirmed() {
+        let assessment = assessed(&casr_finding(None, CASR_LOG));
+        assert!(!assessment.confirmed);
+        assert!(assessment.reason.contains("No comparable retained"));
+    }
+
+    #[test]
+    fn a_log_that_does_not_describe_the_casr_classification_cannot_confirm_it() {
+        // The same failure everywhere, but at another line than CASR reported.
+        let elsewhere = CASR_LOG.replace("utf8.c:31:27", "utf8.c:12:3");
+        assert!(!assessed(&casr_finding(Some(&elsewhere), &elsewhere)).confirmed);
+        // Another class of fault than CASR reported.
+        let other = CASR_LOG.replace("heap-buffer-overflow", "heap-use-after-free");
+        assert!(!assessed(&casr_finding(Some(&other), &other)).confirmed);
+        // Replays that fail differently from the report's own log.
+        let moved = CASR_LOG.replace("decode_utf8", "another_function");
+        assert!(!assessed(&casr_finding(Some(CASR_LOG), &moved)).confirmed);
     }
 
     #[test]
