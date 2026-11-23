@@ -22,6 +22,8 @@ retain only the current release; older entries remain here as the record.
 
 ### Fixed
 
+- The Windows `oxfuzz` binary now has the same 8 MiB main-thread stack as Linux
+  and macOS. A debug build of `oxfuzz fuzz` could overflow the default 1 MiB.
 - Triage: without CASR, a crash's origin now comes from its symbolized replay
   log. It previously stayed unknown unless the engine had written a report.
 - Triage: a finding classified by CASR can now be recorded as minimized. The
