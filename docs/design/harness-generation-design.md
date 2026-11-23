@@ -395,7 +395,7 @@ the model to return a correct harness unchanged.
 | --- | --- | --- |
 | Changed source that compiles | `proposed` | `Compiled` revision in the proposal workspace |
 | Same source | `unchanged` | No revision |
-| No longer calls the target in a function body | `rejected` | Not compiled |
+| Defines its own copy of the target, or no longer calls it in a function body | `rejected` | Not compiled |
 | No code block, provider failure, or compile failure | `failed` | No revision |
 
 A proposal uses the workspace and adoption path of section 5.1. It replaces no
@@ -404,9 +404,13 @@ Adoption is a separate explicit action that creates a new revision, followed by
 the normal review, smoke qualification, and human promotion. A proposal does not
 count as a usage review, so a held finding stays out of SARIF and `DefectDojo`.
 
-The target-call check is a guard against an obvious way to make a crash vanish.
-It is not proof that the repair exercises the target; review, behavioral
-qualification, and promotion remain responsible for that. The operation does
+The target checks guard against two direct ways to make a crash vanish:
+dropping the call, and replacing the project's function with a local copy, which
+would still compile and appear to call it. They are not proof that the repair
+exercises the target, and they cannot tell whether its use of the API is right;
+a trial with a local model produced a compiling fix that passed unterminated
+input to a C-string API. Review, behavioral qualification, and promotion remain
+responsible for that. The operation does
 not replay the crash against the proposal, because that would execute source no
 one has reviewed.
 

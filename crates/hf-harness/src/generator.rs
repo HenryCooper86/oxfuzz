@@ -265,6 +265,75 @@ pub fn source_calls_symbol(source: &str, symbol: &str) -> bool {
     })
 }
 
+/// Whether C-family `source` defines `symbol` as a function body or a macro.
+///
+/// A harness that carries its own copy of the target compiles and runs while no
+/// longer testing the project's code, and [`source_calls_symbol`] cannot tell
+/// the copy from the real function.
+#[must_use]
+pub fn source_defines_symbol(source: &str, symbol: &str) -> bool {
+    let name = symbol.rsplit("::").next().unwrap_or(symbol);
+    if name.is_empty() {
+        return false;
+    }
+    let code = code_without_comments_or_literals(source);
+    let is_identifier = |c: char| c.is_alphanumeric() || c == '_';
+    let defines_macro = code.lines().any(|line| {
+        line.trim_start()
+            .strip_prefix('#')
+            .map(str::trim_start)
+            .and_then(|directive| directive.strip_prefix("define"))
+            .filter(|rest| rest.starts_with(char::is_whitespace))
+            .is_some_and(|rest| {
+                let rest = rest.trim_start();
+                rest.split(|c| !is_identifier(c)).next() == Some(name)
+            })
+    });
+    defines_macro
+        || code.match_indices(name).any(|(at, _)| {
+            !code[..at].chars().next_back().is_some_and(is_identifier)
+                && text_after_parameter_list(&code[at + name.len()..])
+                    .is_some_and(|rest| skip_function_qualifiers(rest).starts_with('{'))
+        })
+}
+
+/// The text after the balanced parameter list that opens `text`.
+fn text_after_parameter_list(text: &str) -> Option<&str> {
+    let text = text.trim_start();
+    if !text.starts_with('(') {
+        return None;
+    }
+    let mut depth = 0usize;
+    for (index, byte) in text.bytes().enumerate() {
+        match byte {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&text[index + 1..]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// `text` without the qualifiers that may separate a parameter list from a body.
+fn skip_function_qualifiers(mut text: &str) -> &str {
+    loop {
+        text = text.trim_start();
+        let Some(rest) = ["const", "noexcept", "override", "final", "volatile"]
+            .iter()
+            .find_map(|qualifier| text.strip_prefix(qualifier))
+            .filter(|rest| !rest.starts_with(|c: char| c.is_alphanumeric() || c == '_'))
+        else {
+            return text;
+        };
+        text = rest;
+    }
+}
+
 /// `source` with comments and string or character literals blanked, keeping
 /// every byte offset. Only ASCII delimiters are matched, so a multi-byte
 /// character is never split.
@@ -2571,6 +2640,35 @@ mod tests {
             "int f() { return ns::parse(1); }",
             "src/a.cc::ns::parse"
         ));
+    }
+
+    #[test]
+    fn a_copied_target_definition_is_detected_but_a_call_or_prototype_is_not() {
+        for defined in [
+            "int ring_sum(const char *d, size_t n) { return n; }",
+            "static int ring_sum(const char *d, size_t n)\n{\n  return n;\n}",
+            "namespace copy { int ring_sum(int n) noexcept { return n; } }",
+            "struct S { int ring_sum(int n) const { return n; } };",
+            "#define ring_sum(d, n) 0\nint f(void) { return ring_sum(0, 0); }",
+            "#  define ring_sum other",
+        ] {
+            assert!(source_defines_symbol(defined, "ring_sum"), "{defined}");
+        }
+        for not_defined in [
+            "int ring_sum(const char *d, size_t n);",
+            "int f(void) { return ring_sum(0, 0); }",
+            "int f(void) { if (ring_sum(0, 0)) { return 1; } return 0; }",
+            "int f(void) { while (ring_sum(0, 0) > 1) { break; } return 0; }",
+            "/* int ring_sum(int n) { return n; } */ int ring_sum(int);",
+            "const char *s = \"int ring_sum(int n) { return n; }\";",
+            "int my_ring_sum(int n) { return n; }",
+            "#define ring_sum_limit 4",
+        ] {
+            assert!(
+                !source_defines_symbol(not_defined, "ring_sum"),
+                "{not_defined}"
+            );
+        }
     }
 
     #[test]

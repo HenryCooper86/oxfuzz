@@ -6,7 +6,7 @@
 
 /// Version of [`render_finding_repair_section`], persisted with each repair so
 /// a retained prompt names the renderer that produced it.
-pub const FINDING_REPAIR_PROMPT_VERSION: u32 = 1;
+pub const FINDING_REPAIR_PROMPT_VERSION: u32 = 2;
 
 /// Characters of crash log shown to the model.
 pub const MAX_FINDING_REPAIR_LOG_CHARS: usize = 6000;
@@ -77,6 +77,9 @@ pub fn render_finding_repair_section(
          - Correct how the harness uses the API, for every call with the same mistake rather \
          than only the call in this crash.\n\
          - Keep calling the target function with data derived from the fuzz input.\n\
+         - Do not define or copy the target function or any project code in the harness.\n\
+         - The fuzz input is not NUL-terminated. Before passing it to an API that expects a C \
+         string, copy it into a buffer you allocate and terminate.\n\
          - Do not hide the fault: no skipping the target, no returning early for all inputs, no \
          signal handlers, no disabling sanitizers, and no check for the bytes of this crash.{unchanged}\n\
          \n\

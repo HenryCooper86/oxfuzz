@@ -297,13 +297,24 @@ impl ServiceContainer {
                 0,
             ));
         }
-        if hf_harness::source_calls_symbol(&active.source, &candidate.symbol)
-            && !hf_harness::source_calls_symbol(&source, &candidate.symbol)
+        let symbol = &candidate.symbol;
+        let rejection = if hf_harness::source_defines_symbol(&source, symbol)
+            && !hf_harness::source_defines_symbol(&active.source, symbol)
         {
-            let detail = format!(
-                "the repair no longer calls the target `{}`, so it was not compiled",
-                candidate.symbol
-            );
+            Some(format!(
+                "the repair defines its own copy of the target `{symbol}`, so it would not test \
+                 the project's code; it was not compiled"
+            ))
+        } else if hf_harness::source_calls_symbol(&active.source, symbol)
+            && !hf_harness::source_calls_symbol(&source, symbol)
+        {
+            Some(format!(
+                "the repair no longer calls the target `{symbol}`, so it was not compiled"
+            ))
+        } else {
+            None
+        };
+        if let Some(detail) = rejection {
             finish(
                 store,
                 record.id,

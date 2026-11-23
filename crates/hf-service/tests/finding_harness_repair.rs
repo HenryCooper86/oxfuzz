@@ -26,6 +26,7 @@ use sha2::{Digest, Sha256};
 const SOURCE: &str = "int parse_entry(const unsigned char *, unsigned long);\nint LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { (void)data; return parse_entry(0, size); }";
 const REPAIRED: &str = "```c\nint parse_entry(const unsigned char *, unsigned long);\nint LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return parse_entry(data, size); }\n```";
 const DROPS_TARGET: &str = "```c\nint parse_entry(const unsigned char *, unsigned long);\nint LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { (void)data; (void)size; /* parse_entry(data, size); */ return 0; }\n```";
+const COPIES_TARGET: &str = "```c\nstatic int parse_entry(const unsigned char *data, unsigned long size) { return size && data[0]; }\nint LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return parse_entry(data, size); }\n```";
 const TARGET_FAULT: &str = "==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x602000000118\n    #0 0x4f1a2b in parse_entry /work/parse.c:2:3\n    #1 0x51b3c4 in LLVMFuzzerTestOneInput /work/harness.c:2:5\n";
 
 struct CompilingRuntime;
@@ -390,6 +391,30 @@ async fn a_repair_that_stops_calling_the_target_is_rejected() {
         records[0].outcome,
         Some(FindingHarnessRepairOutcome::Rejected)
     );
+}
+
+#[tokio::test]
+async fn a_repair_that_defines_its_own_copy_of_the_target_is_rejected() {
+    let fixture = held_fixture(COPIES_TARGET).await;
+
+    let repair = fixture.repair().await.unwrap();
+
+    assert_eq!(repair.outcome, FindingHarnessRepairOutcome::Rejected);
+    assert_eq!(repair.harness_id, None);
+    assert!(repair.detail.contains("defines"), "{}", repair.detail);
+    assert!(repair.detail.contains("parse_entry"), "{}", repair.detail);
+    assert_eq!(fixture.active_marker(), fixture.active.to_string());
+}
+
+#[tokio::test]
+async fn the_prompt_forbids_copying_the_target_and_unterminated_strings() {
+    let fixture = fixture(REPAIRED, CrashOrigin::Harness).await;
+
+    fixture.repair().await.unwrap();
+
+    let prompt = fixture.repair_prompts().remove(0);
+    assert!(prompt.contains("Do not define or copy the target"));
+    assert!(prompt.contains("not NUL-terminated"));
 }
 
 #[tokio::test]
