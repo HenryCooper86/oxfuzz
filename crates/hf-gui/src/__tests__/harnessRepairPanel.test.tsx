@@ -69,7 +69,7 @@ it("drafts a proposal and adopts it only on a second explicit action", async () 
   expect(mocks.invoke).toHaveBeenCalledWith("finding_harness_repair", { project: "/project", findingId: "crash-1" });
   expect(host.textContent).toContain("parityHarness.findingRepairProposed");
 
-  await act(async () => button("parityHarness.findingAdopt")?.click());
+  await act(async () => button("parityHarness.adopt")?.click());
 
   expect(mocks.invoke).toHaveBeenCalledWith("harness_adopt_revision", { project: "/project", target: "parse.c::parse", engine: "libfuzzer", lang: "c", harnessId: HARNESS_ID });
   expect(host.textContent).toContain("parityHarness.findingAdopted");
@@ -81,6 +81,6 @@ it("offers no adoption when the model changed nothing or dropped the target", as
     await render(item("input_independent_fault"));
     await act(async () => button("parityHarness.findingRepair")?.click());
     expect(host.textContent).toContain(message);
-    expect(button("parityHarness.findingAdopt")).toBeUndefined();
+    expect(button("parityHarness.adopt")).toBeUndefined();
   }
 });

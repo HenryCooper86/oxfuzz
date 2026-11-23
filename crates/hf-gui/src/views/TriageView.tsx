@@ -458,7 +458,6 @@ function ScopedTriageView({ embedded, initialRunId, onNavigate }: { embedded: bo
       if (request === actionRequest.current && mounted.current) {
         setSelectedFinding(updated);
         setReloadVersion((version) => version + 1);
-        setMessage(t(accepted ? "triage.usageReleased" : "triage.usageHeldAgain"));
       }
     } catch (error) {
       if (request === actionRequest.current && mounted.current) setMessage(t("triage.usageReviewFailed", { error: String(error) }));
