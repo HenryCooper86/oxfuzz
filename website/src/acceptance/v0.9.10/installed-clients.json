@@ -1,0 +1,49 @@
+{
+  "schema_version": 3,
+  "claim": "installed_clients",
+  "candidate_commit": "009aafe1afadefafafb82ef3067bf8186445bf5a",
+  "tag": "v0.9.10",
+  "local_build_commit": "009aafe1afadefafafb82ef3067bf8186445bf5a",
+  "production_delta": "None known. The local build was made with scripts/build-app.sh in a separate worktree checked out at the tag commit, after the engine qualification in that worktree recorded an empty working-tree patch. No digest was taken for the build itself. The final release installer was built by the release workflow from the tag.",
+  "platform": "macOS arm64",
+  "version_observed": "0.9.10",
+  "local_executable_sha256": "c068ebb9d271ee2d7492274f540228e6190f950e8b5c1df3619795f6bbb4f005",
+  "observed_on": "2026-11-23",
+  "observed": {
+    "local_build": "codesign --verify --deep --strict passed and the DMG passed hdiutil verify.",
+    "not_observed": [
+      "The contents of the application window on any build",
+      "The new usage-review and harness-repair controls in the packaged app",
+      "A campaign, bisection or concolic enrichment completing from the desktop app",
+      "Go, Python, Java and JavaScript runs started from the desktop app",
+      "A launch against the existing per-user data, and any migration of earlier data",
+      "First-run setup wizard",
+      "Windows and Linux desktop installations",
+      "Physical-bench automotive operations",
+      "syzkaller campaigns from the desktop app"
+    ]
+  },
+  "final_release_installer": {
+    "workflow_run": 45168342185,
+    "candidate_commit": "009aafe1afadefafafb82ef3067bf8186445bf5a",
+    "file": "oxfuzz_0.9.10_aarch64.dmg",
+    "sha256": "c6e036beb58a905e281fa9fc2c07f235ec8bd821964a42aeddc0fc639208ef79",
+    "executable_sha256": "bf110d6b100fa499e4e6c5a467162850ff0cde5786198ef2eae1b07ab7f5e281",
+    "observed_on": "2026-11-23",
+    "checks": [
+      "Downloaded asset SHA-256 matches GitHub metadata, as do the other six installers and the two .app.tar.gz archives",
+      "DMG verification and read-only mount succeeded; the Intel DMG also passed verification",
+      "Copied app passes codesign --verify --deep --strict (ad-hoc signature); bundle version 0.9.10; arm64 executable",
+      "Started from the copy through LaunchServices against empty scratch data: the process stayed up, applied all 55 migrations, showed one on-screen 1200 by 800 window in the macOS window list, and exited on a termination request",
+      "Not installed to /Applications and not started against the existing per-user data",
+      "No project was opened and no harness, run or campaign was executed from the installer build"
+    ]
+  },
+  "limitations": [
+    "The window contents were not read. The accessibility interface did not expose the web view to the release session, and nobody looked at the window, so this record does not show that the interface rendered correctly.",
+    "The new desktop controls are covered by component and IPC tests, not by a walk of the final installer.",
+    "Only the macOS Apple silicon installer was started; the other packages were built and digest-checked only.",
+    "macOS packages are ad-hoc signed and not notarized; Windows packages are unsigned.",
+    "The oxfuzz command-line tool, its terminal interface and its JSON output are not in the desktop packages."
+  ]
+}
