@@ -111,24 +111,24 @@ export const locales = {
       "Linux kernel fuzzing in a VM. You supply the kernel and guest image.",
     engine_syzkaller_link: "syzkaller setup guide",
 
-    new_title: "New in 0.9.9: the desktop app does what the command line does",
+    new_title: "New in 0.9.10: triage that checks the harness first",
     new_intro:
-      "Released in November 2026. These features arrived in the command line in 0.9.8; from 0.9.9 the desktop app has them too. The two recordings are real command-line sessions on small sample programs with a planted bug.",
-    new_1_title: "Four more languages",
+      "Released in November 2026. The first two items are new in 0.9.10; the others arrived in 0.9.8 and 0.9.9. The two recordings are real command-line sessions on small sample programs with a planted bug.",
+    new_1_title: "Crashes that do not depend on the input",
     new_1_text:
-      "Go with native fuzzing, Python with Atheris, Java with Jazzer and JavaScript with Jazzer.js. Each is discovered, built and run in the same sandbox.",
-    new_2_title: "Programs without source",
+      "Triage replays each AFL++ and libFuzzer crash on harmless inputs. A fault they all reproduce may be harness misuse, so it stays out of SARIF and DefectDojo until you review it.",
+    new_2_title: "Harness repair proposals",
     new_2_text:
-      "<code>oxfuzz binary</code> fuzzes a compiled Linux program in AFL++ QEMU mode. It can feed a file, a TCP or UDP server, or a sequence of messages. Checked on Linux arm64 so far.",
-    new_3_title: "More sanitizers, better inputs",
+      "From a finding that points at the harness, the model drafts a fix. It compiles beside your harness and changes nothing until you adopt, test and promote it.",
+    new_3_title: "Four more languages",
     new_3_text:
-      "MemorySanitizer and ThreadSanitizer builds join AddressSanitizer and UBSan. Give a target its own dictionary, or generate a mutator from a BNF grammar.",
-    new_4_title: "From crash to commit to ticket",
+      "Go with native fuzzing, Python with Atheris, Java with Jazzer and JavaScript with Jazzer.js. Each is discovered, built and run in the same sandbox.",
+    new_4_title: "Programs without source",
     new_4_text:
-      "<code>oxfuzz bisect</code> finds the first commit where an input crashes. File the finding in GitHub, GitLab or Jira, and send new crashes to a webhook.",
-    new_5_title: "Coverage you can open",
+      "<code>oxfuzz binary</code> fuzzes a compiled Linux program in AFL++ QEMU mode. It can feed a file, a TCP or UDP server, or a sequence of messages. Checked on Linux arm64 so far.",
+    new_5_title: "From crash to commit to ticket",
     new_5_text:
-      "Line coverage as an lcov file or a single HTML page, so you can see which lines a corpus never reached.",
+      "<code>oxfuzz bisect</code> finds the first commit where an input crashes. File the finding in GitHub, GitLab or Jira, and send new crashes to a webhook.",
     new_6_title: "Kernel and build systems",
     new_6_text:
       "<code>oxfuzz kernel</code> runs a syzkaller campaign from the command line. Our 30-minute test campaign, under emulation, ran 1,698 programs and reached 3,634 coverage edges. Bazel projects build offline from a vendored directory.",
@@ -153,7 +153,7 @@ export const locales = {
     term_python_caption:
       "A real session on a sample Python module. Pauses and long paths are shortened; every line is what the command printed.",
     new_status:
-      'These features are in the desktop packages below from v0.9.9. The <code>oxfuzz</code> command-line tool is not in those packages; <a href="https://github.com/HenryCooper86/oxfuzz/blob/main/docs/guides/INSTALL.md" rel="noopener">install it from source</a> at the v0.9.9 tag. The <a href="https://github.com/HenryCooper86/oxfuzz/blob/main/CHANGELOG.md" rel="noopener">changelog</a> lists every change, including fixes on the main branch since v0.9.9 (crash minimization, honggfuzz replay, control-input triage and more) that will ship in the next release.',
+      'These features are in the desktop packages below from v0.9.10. The <code>oxfuzz</code> command-line tool is not in those packages; <a href="https://github.com/HenryCooper86/oxfuzz/blob/main/docs/guides/INSTALL.md" rel="noopener">install it from source</a> at the v0.9.10 tag. The <a href="https://github.com/HenryCooper86/oxfuzz/blob/main/CHANGELOG.md" rel="noopener">changelog</a> lists every change.',
 
     control_title: "The fuzzer runs untrusted code. You stay in charge of it.",
     control_1_title: "Sandboxed",
@@ -330,24 +330,24 @@ export const locales = {
       "在虚拟机中对 Linux 内核做模糊测试。内核和客户机镜像由你提供。",
     engine_syzkaller_link: "syzkaller 配置指南",
 
-    new_title: "0.9.9 新功能：命令行能做的，桌面应用也能做",
+    new_title: "0.9.10 新功能：分诊时先检查测试桩",
     new_intro:
-      "2026 年 11 月发布。以下功能在 0.9.8 加入命令行，从 0.9.9 起桌面应用也可以使用。下面两段录屏是真实的命令行运行过程，对象是带有预埋缺陷的小型示例程序。",
-    new_1_title: "新增四种语言",
+      "2026 年 11 月发布。前两项是 0.9.10 的新功能，其余功能在 0.9.8 和 0.9.9 加入。下面两段录屏是真实的命令行运行过程，对象是带有预埋缺陷的小型示例程序。",
+    new_1_title: "与输入无关的崩溃",
     new_1_text:
-      "Go（原生模糊测试）、Python（Atheris）、Java（Jazzer）和 JavaScript（Jazzer.js）。它们都在同一个沙箱里完成目标发现、构建和运行。",
-    new_2_title: "没有源码的程序",
+      "分诊时会用无害输入重放每个 AFL++ 和 libFuzzer 崩溃。如果它们都能复现，可能是测试桩误用 API，因此在你审查前不会进入 SARIF 和 DefectDojo。",
+    new_2_title: "测试桩修复提案",
     new_2_text:
-      "<code>oxfuzz binary</code> 以 AFL++ QEMU 模式对已编译的 Linux 程序做模糊测试，输入可以是文件、TCP 或 UDP 服务，也可以是一串消息。目前只在 Linux arm64 上验证过。",
-    new_3_title: "更多 sanitizer，更好的输入",
+      "对于指向测试桩的发现项，模型会起草修复。它在你的测试桩旁编译，在你采用、测试并晋升之前不会改变任何内容。",
+    new_3_title: "新增四种语言",
     new_3_text:
-      "在 AddressSanitizer 和 UBSan 之外，新增 MemorySanitizer 和 ThreadSanitizer 构建。可以为每个目标指定自己的字典，或根据 BNF 语法生成变异器。",
-    new_4_title: "从崩溃到提交，再到工单",
+      "Go（原生模糊测试）、Python（Atheris）、Java（Jazzer）和 JavaScript（Jazzer.js）。它们都在同一个沙箱里完成目标发现、构建和运行。",
+    new_4_title: "没有源码的程序",
     new_4_text:
-      "<code>oxfuzz bisect</code> 找出某个输入最早引发崩溃的提交。发现可以提交到 GitHub、GitLab 或 Jira，新的崩溃可以推送到 webhook。",
-    new_5_title: "可以直接打开的覆盖率",
+      "<code>oxfuzz binary</code> 以 AFL++ QEMU 模式对已编译的 Linux 程序做模糊测试，输入可以是文件、TCP 或 UDP 服务，也可以是一串消息。目前只在 Linux arm64 上验证过。",
+    new_5_title: "从崩溃到提交，再到工单",
     new_5_text:
-      "行覆盖率可以导出为 lcov 文件或单页 HTML，一眼看出语料从未到达哪些代码行。",
+      "<code>oxfuzz bisect</code> 找出某个输入最早引发崩溃的提交。发现可以提交到 GitHub、GitLab 或 Jira，新的崩溃可以推送到 webhook。",
     new_6_title: "内核与构建系统",
     new_6_text:
       "<code>oxfuzz kernel</code> 从命令行运行 syzkaller 测试。我们在模拟环境下做的 30 分钟测试执行了 1,698 个程序，覆盖 3,634 条边。Bazel 项目使用 vendor 目录离线构建。",
@@ -372,7 +372,7 @@ export const locales = {
     term_python_caption:
       "真实的运行过程，对象是一个 Python 示例模块。停顿和过长的路径做了缩短，每一行都是命令的原始输出。",
     new_status:
-      '从 v0.9.9 起，下方的桌面安装包已包含这些功能。<code>oxfuzz</code> 命令行工具不在安装包内，请在 v0.9.9 标签处<a href="https://github.com/HenryCooper86/oxfuzz/blob/main/docs/guides/INSTALL.md" rel="noopener">从源码安装</a>。全部改动见<a href="https://github.com/HenryCooper86/oxfuzz/blob/main/CHANGELOG.md" rel="noopener">更新日志</a>，其中也包括 v0.9.9 之后已合入 main 分支、将随下一版本发布的修复（崩溃最小化、honggfuzz 重放、对照输入分诊等）。',
+      '从 v0.9.10 起，下方的桌面安装包已包含这些功能。<code>oxfuzz</code> 命令行工具不在安装包内，请在 v0.9.10 标签处<a href="https://github.com/HenryCooper86/oxfuzz/blob/main/docs/guides/INSTALL.md" rel="noopener">从源码安装</a>。全部改动见<a href="https://github.com/HenryCooper86/oxfuzz/blob/main/CHANGELOG.md" rel="noopener">更新日志</a>。',
 
     control_title: "模糊测试运行的是不可信代码，控制权始终在你手里。",
     control_1_title: "沙箱隔离",

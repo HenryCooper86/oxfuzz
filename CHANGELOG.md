@@ -10,6 +10,8 @@ retain only the current release; older entries remain here as the record.
 
 ## Unreleased
 
+## 0.9.10 - 2026-11-23
+
 ### Added
 
 - Triage: an AFL++ or libFuzzer crash in target code is replayed on benign
@@ -23,7 +25,8 @@ retain only the current release; older entries remain here as the record.
 - Triage: a finding that points at the harness can produce a repair proposal
   (`oxfuzz triage --repair-harness <id>`, or the Triage view). The model's fix
   compiles beside the active harness and replaces nothing until you adopt it,
-  review it, smoke-test it, and promote it.
+  review it, smoke-test it, and promote it. A repair that drops the target call
+  or carries its own copy of the target is refused.
 
 ### Fixed
 
