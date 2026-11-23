@@ -30,6 +30,7 @@ retain only the current release; older entries remain here as the record.
 
 ### Fixed
 
+- Dependencies: update `cookie` to 0.18.3 for RUSTSEC-2026-0594.
 - Triage: releasing a held finding from the desktop app or the web interface
   was refused by the approval gate.
 - The Windows `oxfuzz` binary now has the same 8 MiB main-thread stack as Linux
