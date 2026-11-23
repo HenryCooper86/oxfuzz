@@ -127,6 +127,7 @@ const COMMAND_MAP: Record<string, CommandEndpoint> = {
   finding_review_queue: { method: "POST", path: "/findings/review" },
   finding_review: { method: "GET", path: "/findings/{finding_id}/review" },
   finding_usage_review: { method: "POST", path: "/findings/{finding_id}/usage-review" },
+  finding_harness_repair: { method: "POST", path: "/findings/{finding_id}/harness-repair" },
   change_impact: { method: "POST", path: "/change/impact" },
   change_compare: { method: "POST", path: "/change/compare" },
   change_publish: { method: "POST", path: "/change/publish" },

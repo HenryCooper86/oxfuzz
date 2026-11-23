@@ -48,6 +48,8 @@ pub mod diagnostics;
 #[cfg(feature = "proof-carrying")]
 pub mod evidence;
 pub mod finding_proof;
+#[cfg(feature = "finding-repair")]
+pub mod finding_repair;
 #[cfg(feature = "triage-disposition")]
 pub mod finding_review;
 pub mod harness_review;
@@ -229,6 +231,8 @@ pub use finding_proof::{
     FixVerificationDetermination, InputDependenceDetermination, ReachabilityDetermination,
     ReproductionDetermination, FINDING_PROOF_SCHEMA_VERSION,
 };
+#[cfg(feature = "finding-repair")]
+pub use finding_repair::FindingHarnessRepair;
 #[cfg(feature = "triage-disposition")]
 pub use finding_review::{FindingDispositionFilter, FindingReviewFilter, FindingReviewItem};
 pub use harness_review::{HarnessReviewBypass, HarnessReviewBypassSource};

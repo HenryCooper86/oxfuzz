@@ -542,6 +542,42 @@ pub(crate) async fn cmd_run(
     Ok(())
 }
 
+/// Ask for a harness repair from one finding and print how to adopt it.
+#[cfg(feature = "finding-repair")]
+pub(crate) async fn cmd_finding_repair(
+    project: PathBuf,
+    finding: uuid::Uuid,
+    ai: AiOption,
+) -> anyhow::Result<()> {
+    /// Compile repairs a proposal may use, as for `--refine`.
+    const COMPILE_ATTEMPTS: usize = 2;
+    let container = crate::approval::bootstrap().await;
+    let repair = container
+        .finding_harness_repair(&project, finding, COMPILE_ATTEMPTS, ai.into())
+        .await?;
+    println!("{}", repair.detail);
+    if let Some(harness_id) = repair.harness_id {
+        println!(
+            "adopt it: oxfuzz harness {} --target {} --engine {} --lang {} --adopt {harness_id}",
+            project.display(),
+            repair.target,
+            repair.engine,
+            repair.lang,
+        );
+    }
+    Ok(())
+}
+
+/// Explain that finding-driven repair was excluded from this build.
+#[cfg(not(feature = "finding-repair"))]
+pub(crate) async fn cmd_finding_repair(
+    _project: PathBuf,
+    _finding: uuid::Uuid,
+    _ai: AiOption,
+) -> anyhow::Result<()> {
+    anyhow::bail!("finding-driven harness repair is not included in this build")
+}
+
 /// Record or withdraw the review that releases a held finding to exports.
 #[cfg(feature = "triage-disposition")]
 pub(crate) async fn cmd_usage_review(

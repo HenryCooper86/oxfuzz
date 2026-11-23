@@ -20,8 +20,15 @@ retain only the current release; older entries remain here as the record.
   harness or record a review (`oxfuzz triage --accept-usage <id>`, or the Triage
   view).
 
+- Triage: a finding that points at the harness can produce a repair proposal
+  (`oxfuzz triage --repair-harness <id>`, or the Triage view). The model's fix
+  compiles beside the active harness and replaces nothing until you adopt it,
+  review it, smoke-test it, and promote it.
+
 ### Fixed
 
+- Triage: releasing a held finding from the desktop app or the web interface
+  was refused by the approval gate.
 - The Windows `oxfuzz` binary now has the same 8 MiB main-thread stack as Linux
   and macOS. A debug build of `oxfuzz fuzz` could overflow the default 1 MiB.
 - Triage: without CASR, a crash's origin now comes from its symbolized replay

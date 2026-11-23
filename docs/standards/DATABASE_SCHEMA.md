@@ -1,6 +1,6 @@
 # Database Schema
 
-Status: **implemented through migration 0052**. Scope: `hf-storage` and
+Status: **implemented through migration 0055**. Scope: `hf-storage` and
 `hf-diagnostics`.
 
 ## 1. Storage and migration ownership
@@ -1401,6 +1401,7 @@ bounded deterministic history, and both cleanup operations.
 | `0052_chat_turn_languages.sql` | retains per-attempt response-language instructions before provider dispatch |
 | `0053_run_execution_totals.sql` | adds `runs.execs_total` and moves syzkaller's cumulative executed count there from `execs` |
 | `0054_build_profile_bazel.sql` | widens saved build profiles to Bazel by rebuilding the profile table's system check |
+| `0055_finding_harness_repairs.sql` | retains each finding-driven harness repair prompt before dispatch and its response and outcome once |
 
 ## 7. Read failure contract
 
@@ -1659,6 +1660,34 @@ permitted update sets `response` and `completed_at` on a pending row, once.
 | `completed_at` | `TEXT` | Response time; NULL exactly when `response` is NULL |
 
 Index: `idx_crash_report_drafts_crash(crash_id, created_at DESC, id DESC)`.
+
+## Finding harness repairs (0055)
+
+### `finding_harness_repairs`
+
+Migration 0055 retains each finding-driven harness repair request before
+provider dispatch, and its response and outcome once it finishes. A row whose
+prompt cannot be written is never dispatched. `crash_id` references
+`crashes(id)` with cascading deletion. The only permitted update records the
+result of a pending row, once.
+
+| Column | Type | Meaning |
+| --- | --- | --- |
+| `id` | `TEXT PRIMARY KEY` | Immutable repair UUID |
+| `crash_id` | `TEXT NOT NULL` | Crash foreign key; cascading deletion |
+| `run_id` | `TEXT NOT NULL` | Run that found the crash |
+| `project_root` | `TEXT NOT NULL` | Canonical project root |
+| `prompt_version` | `INTEGER NOT NULL` | `hf_prompt::FINDING_REPAIR_PROMPT_VERSION` |
+| `base_source_sha256` | `TEXT NOT NULL` | SHA-256 of the harness source the repair started from |
+| `prompt` | `TEXT NOT NULL` | Exact provider prompt, at most 64 KiB |
+| `response` | `TEXT` | Provider response, at most 64 KiB; NULL when none was received or it did not fit |
+| `outcome` | `TEXT` | `proposed`, `unchanged`, `rejected`, or `failed`; NULL while pending |
+| `detail` | `TEXT` | Why it finished that way, at most 4 KiB; NULL exactly while pending |
+| `harness_id` | `TEXT` | Compiled proposal revision; set exactly when `outcome` is `proposed` |
+| `created_at` | `TEXT NOT NULL` | UTC capture time, RFC 3339 with nanoseconds |
+| `completed_at` | `TEXT` | Outcome time; NULL exactly while pending |
+
+Index: `idx_finding_harness_repairs_crash(crash_id, created_at DESC, id DESC)`.
 
 ## Dictionary LLM drafts (0047)
 

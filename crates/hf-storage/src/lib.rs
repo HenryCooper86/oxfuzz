@@ -14,7 +14,12 @@ pub use ai_ranking_store::{
 mod harness_behavior;
 pub use harness_behavior::HarnessBehaviorRecord;
 mod crash_report_drafts;
+mod finding_harness_repairs;
 pub use crash_report_drafts::{CrashReportDraftRecord, MAX_CRASH_REPORT_DRAFT_BYTES};
+pub use finding_harness_repairs::{
+    FindingHarnessRepairCompletion, FindingHarnessRepairOutcome, FindingHarnessRepairRecord,
+    MAX_FINDING_HARNESS_REPAIR_BYTES, MAX_FINDING_HARNESS_REPAIR_DETAIL_BYTES,
+};
 mod crash_verify_drafts;
 pub use crash_verify_drafts::{CrashVerifyDraftRecord, MAX_CRASH_VERIFY_DRAFT_BYTES};
 mod dictionary_llm_drafts;

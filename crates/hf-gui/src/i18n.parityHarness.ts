@@ -2,6 +2,15 @@
 import { registerDictionary } from "./i18nRegistry";
 
 export const enParityHarness: Record<string, string> = {
+  "parityHarness.findingRepairHelp": "Ask the model for a corrected harness. It compiles as a proposal and replaces nothing until you adopt it.",
+  "parityHarness.findingRepair": "Draft harness repair",
+  "parityHarness.findingRepairing": "Drafting repair...",
+  "parityHarness.findingRepairProposed": "Proposal {id} compiled. Adopt it to review and smoke-test it.",
+  "parityHarness.findingRepairUnchanged": "The model found no API misuse and left the harness unchanged. Check the usage yourself before releasing this finding.",
+  "parityHarness.findingRepairRejected": "The repair stopped calling the target, so it was not compiled.",
+  "parityHarness.findingAdopt": "Adopt proposal",
+  "parityHarness.findingAdopting": "Adopting...",
+  "parityHarness.findingAdopted": "Adopted as the active draft ({status}). Review, smoke-test, and promote it in Harness.",
   "parityHarness.optionsTitle": "Build options",
   "parityHarness.sanitizer": "Sanitizer",
   "parityHarness.sanitizerHelp": "Baked into the harness binary; runs over the promoted harness record its sanitizer. Thread (TSan) needs C or C++ on libFuzzer or honggfuzz. Memory (MSan) needs C on every userspace engine, or C++ on libFuzzer and honggfuzz. Overrides the configured default sanitizer for this build.",
@@ -37,6 +46,15 @@ export const enParityHarness: Record<string, string> = {
   "parityHarness.grammarSource": "Generated mutator source",
 };
 export const zhParityHarness: Record<string, string> = {
+  "parityHarness.findingRepairHelp": "让模型生成修正后的测试桩。它会编译为提案，在你采用之前不会替换任何内容。",
+  "parityHarness.findingRepair": "起草测试桩修复",
+  "parityHarness.findingRepairing": "正在起草修复...",
+  "parityHarness.findingRepairProposed": "提案 {id} 已编译。采用后可进行审查和冒烟测试。",
+  "parityHarness.findingRepairUnchanged": "模型未发现 API 误用，测试桩保持不变。放行此发现项前请自行检查用法。",
+  "parityHarness.findingRepairRejected": "该修复不再调用目标函数，因此未编译。",
+  "parityHarness.findingAdopt": "采用提案",
+  "parityHarness.findingAdopting": "正在采用...",
+  "parityHarness.findingAdopted": "已采用为当前草稿（{status}）。请在测试桩页面审查、冒烟测试并晋升。",
   "parityHarness.optionsTitle": "构建选项",
   "parityHarness.sanitizer": "Sanitizer",
   "parityHarness.sanitizerHelp": "编译进测试桩二进制；使用已批准测试桩的运行会记录其 sanitizer。thread（TSan）需要在 libFuzzer 或 honggfuzz 上使用 C 或 C++。memory（MSan）需要在所有用户态引擎上使用 C，或在 libFuzzer 和 honggfuzz 上使用 C++。本次构建将覆盖已配置的默认 sanitizer。",

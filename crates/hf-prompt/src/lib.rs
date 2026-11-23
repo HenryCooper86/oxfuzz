@@ -15,6 +15,12 @@ pub use bug_report::{
     MAX_BUG_REPORT_LOG_CHARS, MAX_CRASH_SITE_CHARS,
 };
 
+mod finding_repair;
+pub use finding_repair::{
+    render_finding_repair_section, FindingRepairEvidence, FindingRepairReason,
+    FINDING_REPAIR_PROMPT_VERSION, MAX_FINDING_REPAIR_LOG_CHARS,
+};
+
 mod clang_compact;
 
 pub mod render;

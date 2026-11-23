@@ -1065,12 +1065,27 @@ impl ServiceContainer {
         .await
     }
 
+    /// Recreate the proposal workspace of `target` and stage its build inputs.
+    /// A build there leaves the target's active revision, binary, and source
+    /// in place. The caller holds the workspace and target leases.
+    pub(super) async fn prepare_proposal_workspace_locked(
+        &self,
+        project: &Path,
+        target: &str,
+    ) -> Result<PathBuf, ClassifiedError> {
+        let proposal = super::workspace::refine_proposal_dir(project, target);
+        prepare_refine_proposal_dir(project, &proposal)?;
+        self.stage_generated_build_inputs_for_project(project, &proposal)
+            .await?;
+        Ok(proposal)
+    }
+
     /// Compile a replacement while the caller holds workspace-operation followed
     /// by target-revision leases for the complete read/replace sequence.
     ///
     /// `cmplog` additionally compiles and records the AFL++ `CmpLog` companion
     /// binary of the same source.
-    async fn compile_source_with_repair_locked(
+    pub(super) async fn compile_source_with_repair_locked(
         &self,
         candidate: &TargetCandidate,
         target: &str,
@@ -1924,11 +1939,8 @@ impl ServiceContainer {
         let build_workspace = match destination {
             RefineDestination::TargetWorkspace => workspace,
             RefineDestination::Proposal => {
-                let proposal = super::workspace::refine_proposal_dir(project, target);
-                prepare_refine_proposal_dir(project, &proposal)?;
-                self.stage_generated_build_inputs_for_project(project, &proposal)
-                    .await?;
-                proposal
+                self.prepare_proposal_workspace_locked(project, target)
+                    .await?
             }
         };
         self.compile_source_with_repair_locked(

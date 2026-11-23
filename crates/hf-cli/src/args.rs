@@ -672,12 +672,17 @@ pub(crate) struct TriageArgs {
     /// Record that you reviewed this held input-independent finding and the
     /// harness uses the API validly, releasing it to SARIF and `DefectDojo`.
     /// Runs no triage.
-    #[arg(long, value_name = "FINDING_ID", conflicts_with = "hold_usage")]
+    #[arg(long, value_name = "FINDING_ID", conflicts_with_all = ["hold_usage", "repair_harness"])]
     pub(crate) accept_usage: Option<uuid::Uuid>,
     /// Withdraw a recorded usage review, holding the finding again. Runs no
     /// triage.
-    #[arg(long, value_name = "FINDING_ID")]
+    #[arg(long, value_name = "FINDING_ID", conflicts_with = "repair_harness")]
     pub(crate) hold_usage: Option<uuid::Uuid>,
+    /// Ask the model to repair the harness behind this finding. A changed
+    /// harness compiles as a proposal that replaces nothing; adopt it with
+    /// `oxfuzz harness --adopt`. Runs no triage.
+    #[arg(long, value_name = "FINDING_ID")]
+    pub(crate) repair_harness: Option<uuid::Uuid>,
 }
 
 /// Manage the fuzzing corpus for a target.
@@ -1664,6 +1669,40 @@ mod ai_option_tests {
             &id,
         ])
         .is_err());
+    }
+
+    #[test]
+    fn a_harness_repair_names_one_finding_and_excludes_a_usage_decision() {
+        let id = uuid::Uuid::from_u128(9).to_string();
+        let parsed = Cli::try_parse_from([
+            "oxfuzz",
+            "triage",
+            "/p",
+            "--target",
+            "t",
+            "--repair-harness",
+            &id,
+        ])
+        .unwrap();
+        let Commands::Triage(crate::args::TriageArgs { repair_harness, .. }) = parsed.command
+        else {
+            panic!("expected triage");
+        };
+        assert_eq!(repair_harness, Some(uuid::Uuid::from_u128(9)));
+        for decision in ["--accept-usage", "--hold-usage"] {
+            assert!(Cli::try_parse_from([
+                "oxfuzz",
+                "triage",
+                "/p",
+                "--target",
+                "t",
+                "--repair-harness",
+                &id,
+                decision,
+                &id,
+            ])
+            .is_err());
+        }
     }
 
     #[test]

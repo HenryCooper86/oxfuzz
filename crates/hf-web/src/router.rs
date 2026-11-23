@@ -786,10 +786,16 @@ fn patch_to_proof_routes() -> Router<AppState> {
 
 #[cfg(feature = "triage-disposition")]
 fn triage_disposition_routes() -> Router<AppState> {
-    Router::new()
+    let routes = Router::new()
         .route("/findings/review", post(finding_review_queue))
         .route("/findings/{id}/review", get(finding_review))
-        .route("/findings/{id}/usage-review", post(finding_usage_review))
+        .route("/findings/{id}/usage-review", post(finding_usage_review));
+    #[cfg(feature = "finding-repair")]
+    let routes = routes.route(
+        "/findings/{id}/harness-repair",
+        post(finding_harness_repair),
+    );
+    routes
 }
 
 #[cfg(not(feature = "triage-disposition"))]
@@ -2010,13 +2016,40 @@ async fn finding_usage_review(
     Json(request): Json<FindingUsageReviewRequest>,
 ) -> ApiResult<serde_json::Value> {
     let project = approved_project(&state, &request.project)?;
-    let item = state
-        .container
+    let item = workflow_container(&state, ExplicitAction::PublishFindings)
         .finding_usage_review(&project, id, request.accepted)
         .await
         .map_err(classified_api_error)?;
     Ok(Json(public_value(item)?))
 }
+
+#[cfg(feature = "finding-repair")]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FindingHarnessRepairRequest {
+    project: PathBuf,
+    #[serde(default)]
+    ai: hf_service::AiPolicy,
+}
+
+#[cfg(feature = "finding-repair")]
+async fn finding_harness_repair(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+    Json(request): Json<FindingHarnessRepairRequest>,
+) -> ApiResult<hf_service::FindingHarnessRepair> {
+    let project = approved_project(&state, &request.project)?;
+    let repair = state
+        .container
+        .finding_harness_repair(&project, id, FINDING_REPAIR_COMPILE_ATTEMPTS, request.ai)
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(repair))
+}
+
+/// Compile repairs a finding-driven proposal may use, as for `--refine`.
+#[cfg(feature = "finding-repair")]
+const FINDING_REPAIR_COMPILE_ATTEMPTS: usize = 2;
 
 #[derive(Debug, Deserialize)]
 struct DiscoverRequest {

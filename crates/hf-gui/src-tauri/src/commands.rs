@@ -1082,8 +1082,7 @@ pub async fn finding_usage_review(
     accepted: bool,
 ) -> Result<serde_json::Value, String> {
     let finding_id = uuid::Uuid::parse_str(&finding_id).map_err(|error| error.to_string())?;
-    let item = state
-        .container
+    let item = with_user_approval(&state.container, ExplicitAction::PublishFindings)
         .finding_usage_review(std::path::Path::new(&project), finding_id, accepted)
         .await
         .map_err(|error| error.to_string())?;
@@ -1101,6 +1100,43 @@ pub async fn finding_usage_review(
 ) -> Result<serde_json::Value, String> {
     let _ = (state, project, finding_id, accepted);
     Err("triage-disposition finding review is not included in this application build".to_owned())
+}
+
+/// Ask for a harness repair from one finding, compiled as a proposal.
+#[cfg(feature = "finding-repair")]
+#[tauri::command]
+pub async fn finding_harness_repair(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+    finding_id: String,
+    ai: Option<hf_service::AiPolicy>,
+) -> Result<hf_service::FindingHarnessRepair, String> {
+    /// Compile repairs a proposal may use, as for `--refine`.
+    const COMPILE_ATTEMPTS: usize = 2;
+    let finding_id = uuid::Uuid::parse_str(&finding_id).map_err(|error| error.to_string())?;
+    state
+        .container
+        .finding_harness_repair(
+            std::path::Path::new(&project),
+            finding_id,
+            COMPILE_ATTEMPTS,
+            ai.unwrap_or_default(),
+        )
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Explain that finding-driven repair was excluded from this build.
+#[cfg(not(feature = "finding-repair"))]
+#[tauri::command]
+pub async fn finding_harness_repair(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+    finding_id: String,
+    ai: Option<hf_service::AiPolicy>,
+) -> Result<serde_json::Value, String> {
+    let _ = (state, project, finding_id, ai);
+    Err("finding-driven harness repair is not included in this application build".to_owned())
 }
 
 /// Build an issue draft/prefilled URL for a triaged crash, targeting the fuzzed

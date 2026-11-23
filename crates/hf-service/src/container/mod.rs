@@ -54,6 +54,8 @@ mod discovery;
 #[cfg(feature = "run-closeout")]
 mod edge_sets;
 mod export;
+#[cfg(feature = "finding-repair")]
+mod finding_repair;
 #[cfg(feature = "triage-disposition")]
 mod finding_review;
 mod fuzz;

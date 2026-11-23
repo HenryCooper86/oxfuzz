@@ -207,6 +207,115 @@ pub async fn repair(
     })
 }
 
+/// Render the request that asks for a harness repair from a retained finding.
+/// The caller retains the exact text before dispatching it.
+#[must_use]
+pub fn render_finding_repair_request(
+    target: &TargetCandidate,
+    engine: EngineKind,
+    failing_source: &str,
+    evidence: &hf_prompt::FindingRepairEvidence<'_>,
+) -> String {
+    let base = if crate::persistent::is_persistent_source(failing_source) {
+        hf_prompt::render_persistent_harness_prompt(target, &persistent_prompt_skeleton(target))
+    } else {
+        hf_prompt::render_harness_prompt(target, engine)
+    };
+    format!(
+        "{base}{}",
+        hf_prompt::render_finding_repair_section(failing_source, evidence)
+    )
+}
+
+/// The harness source in a repair response, when it has a fenced code block.
+#[must_use]
+pub fn repaired_source_from_response(response: &str) -> Option<String> {
+    extract_code_block(response)
+}
+
+/// Whether C-family `source` calls `symbol` inside a function body.
+///
+/// Comments and literals are ignored, and a file-scope prototype does not
+/// count. This is a guard against a repair that stops exercising the target,
+/// not a proof that it does: review and smoke qualification still apply.
+#[must_use]
+pub fn source_calls_symbol(source: &str, symbol: &str) -> bool {
+    let name = symbol.rsplit("::").next().unwrap_or(symbol);
+    if name.is_empty() {
+        return false;
+    }
+    let code = code_without_comments_or_literals(source);
+    let mut depth = 0usize;
+    let mut scanned = 0;
+    code.match_indices(name).any(|(at, _)| {
+        for byte in &code.as_bytes()[scanned..at] {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+        }
+        scanned = at;
+        let separate = !code[..at]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_');
+        let called = code[at + name.len()..].trim_start().starts_with('(');
+        depth > 0 && separate && called
+    })
+}
+
+/// `source` with comments and string or character literals blanked, keeping
+/// every byte offset. Only ASCII delimiters are matched, so a multi-byte
+/// character is never split.
+fn code_without_comments_or_literals(source: &str) -> String {
+    #[derive(PartialEq)]
+    enum State {
+        Code,
+        Line,
+        Block,
+        Text(u8),
+    }
+    let bytes = source.as_bytes();
+    let mut out = bytes.to_vec();
+    let mut state = State::Code;
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        let next = bytes.get(index + 1).copied();
+        let mut width = 1;
+        let mut blank = state != State::Code;
+        match state {
+            State::Code => match (byte, next) {
+                (b'/', Some(b'/')) => (state, width, blank) = (State::Line, 2, true),
+                (b'/', Some(b'*')) => (state, width, blank) = (State::Block, 2, true),
+                (b'"' | b'\'', _) => (state, blank) = (State::Text(byte), true),
+                _ => {}
+            },
+            State::Line if byte == b'\n' => {
+                state = State::Code;
+                blank = false;
+            }
+            State::Block if byte == b'*' && next == Some(b'/') => {
+                state = State::Code;
+                width = 2;
+            }
+            State::Text(_) if byte == b'\\' => width = 2,
+            State::Text(quote) if byte == quote => state = State::Code,
+            _ => {}
+        }
+        if blank {
+            for slot in out.iter_mut().skip(index).take(width) {
+                if slot.is_ascii() {
+                    *slot = b' ';
+                }
+            }
+        }
+        index += width;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| source.to_owned())
+}
+
 /// Re-draft a harness that runs but has left `uncovered` reachable functions
 /// unexercised, asking the LLM to reshape the input handling so the fuzzer can
 /// drive into them. One refinement step; the caller loops on coverage feedback.
@@ -2444,6 +2553,24 @@ mod tests {
             smoke_failure_excerpt("short \u{1b}[0moutput"),
             "short output"
         );
+    }
+
+    #[test]
+    fn a_call_in_a_body_counts_but_a_prototype_or_comment_does_not() {
+        let prototype = "int parse(const char *);\nint f(void) { return 0; }";
+        assert!(!source_calls_symbol(prototype, "parse"));
+        let commented = "int parse(int);\nint f(void) { /* parse(1); */ // parse(2);\n return 0; }";
+        assert!(!source_calls_symbol(commented, "parse"));
+        let literal = "int f(void) { const char *s = \"parse(1)\"; return s[0]; }";
+        assert!(!source_calls_symbol(literal, "parse"));
+        let longer = "int f(void) { return reparse(1) + parse_all(2); }";
+        assert!(!source_calls_symbol(longer, "parse"));
+        let called = "int parse(int);\nint f(void) { return parse (1); }";
+        assert!(source_calls_symbol(called, "parse"));
+        assert!(source_calls_symbol(
+            "int f() { return ns::parse(1); }",
+            "src/a.cc::ns::parse"
+        ));
     }
 
     #[test]

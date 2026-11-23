@@ -1014,6 +1014,18 @@ export interface FindingReviewFilter {
   severity?: CasrExploitabilityDetermination | null;
 }
 
+/** A harness repair requested from a finding. A proposal replaces nothing. */
+export interface FindingHarnessRepair {
+  repair_id: string;
+  outcome: "proposed" | "unchanged" | "rejected" | "failed";
+  detail: string;
+  harness_id: string | null;
+  target: string;
+  engine: string;
+  lang: string;
+  repairs_used: number;
+}
+
 export interface FindingReviewItem {
   crash: Crash;
   project_root: string;

@@ -8,6 +8,7 @@ import { FindingProofCard } from "../components/FindingProofCard";
 import { PatchToProofPanel } from "../components/PatchToProofPanel";
 import { PathActions } from "../components/PathActions";
 import { BisectPanel } from "../components/BisectPanel";
+import { HarnessRepairPanel } from "../components/HarnessRepairPanel";
 import { TriageParityPanel } from "../components/TriageParityPanel";
 import { emitDataChanged, getTransport, isTauriEnvironment } from "../lib";
 import { useI18n } from "../i18nContext";
@@ -615,6 +616,7 @@ function CrashDetail({ item, verdict, onVerify, onUsageReview, reviewingUsage, a
       <span className="text-text-secondary">{t(item.usage_review === "held" ? "triage.usageHeldDetail" : "triage.usageReleasedDetail")}</span>
       <div><Button size="sm" variant="outline" loading={reviewingUsage} disabled={actionBusy} onClick={() => onUsageReview(item.usage_review === "held")}>{t(item.usage_review === "held" ? "triage.acceptUsage" : "triage.holdUsage")}</Button></div>
     </div>}
+    <HarnessRepairPanel key={crash.id} item={item} disabled={actionBusy} />
     {crash.casr && <div className="border-t border-border pt-3">
       <div className="flex flex-wrap items-center gap-2 mb-2">
         <SeverityBadge severity={crash.casr.severity} title={crash.casr.severity_short || crash.casr.severity} />

@@ -370,6 +370,46 @@ workspace as a new revision with the stored sanitizer and CmpLog setup; it
 requires the same target, engine and language, and carries no approval, so the
 normal review, smoke qualification and promotion follow.
 
+### 5.2 Finding Repair Proposals
+
+The `finding-repair` feature turns one retained finding into a harness repair
+proposal through `oxfuzz triage --repair-harness <id>`, the REST route
+`POST /findings/{id}/harness-repair`, or the Triage view.
+
+Only a finding that points at the harness qualifies: `HarnessDefect`, or
+`InputIndependentFault` (`triage-disposition-design.md` section 4.1). Changing
+the harness in response to any other finding would hide it, so the operation
+refuses those before any provider call. It also refuses `--ai off`, because
+repair is model-only, and a finding whose run used a different harness than the
+active one, because its evidence describes other source.
+
+The request is rendered, retained in `finding_harness_repairs`, and only then
+dispatched. Crash output and project source are labelled as untrusted data, and
+code fences inside them are neutralized so they cannot end the block they are
+shown in. The prompt asks for a correction of the API usage throughout the
+harness, and forbids skipping the target, signal handlers, disabled sanitizers,
+and checks for the bytes of this crash. For an input-independent fault it asks
+the model to return a correct harness unchanged.
+
+| Answer | Outcome | Effect |
+| --- | --- | --- |
+| Changed source that compiles | `proposed` | `Compiled` revision in the proposal workspace |
+| Same source | `unchanged` | No revision |
+| No longer calls the target in a function body | `rejected` | Not compiled |
+| No code block, provider failure, or compile failure | `failed` | No revision |
+
+A proposal uses the workspace and adoption path of section 5.1. It replaces no
+active revision, binary, or source, runs no code, and carries no approval.
+Adoption is a separate explicit action that creates a new revision, followed by
+the normal review, smoke qualification, and human promotion. A proposal does not
+count as a usage review, so a held finding stays out of SARIF and `DefectDojo`.
+
+The target-call check is a guard against an obvious way to make a crash vanish.
+It is not proof that the repair exercises the target; review, behavioral
+qualification, and promotion remain responsible for that. The operation does
+not replay the crash against the proposal, because that would execute source no
+one has reviewed.
+
 ## 6. Harness Tournament
 
 Status: **active implementation**. Owner: `hf-service`, behind the

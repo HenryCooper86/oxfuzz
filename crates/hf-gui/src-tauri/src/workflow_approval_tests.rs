@@ -72,6 +72,7 @@ impl DesktopIpc {
                 crate::commands::build_run,
                 crate::commands::file_issue,
                 crate::commands::push_to_defectdojo,
+                crate::commands::finding_usage_review,
                 crate::commands::change_publish,
                 crate::commands::start_remediation_verification,
                 crate::commands::harness_tournament,
@@ -377,6 +378,34 @@ async fn defectdojo_ipc_retains_consent_and_reaches_integration_configuration() 
         "{error}"
     );
     assert_approved(&service, "push_to_defectdojo", "publish_findings").await;
+}
+
+#[cfg(feature = "change-aware")]
+#[tokio::test(flavor = "multi_thread")]
+async fn finding_usage_review_ipc_retains_consent_and_reaches_the_finding() {
+    if in_isolated_test_process(
+        "workflow_approval_tests::finding_usage_review_ipc_retains_consent_and_reaches_the_finding",
+    ) {
+        return;
+    }
+    let fixture = hf_service::test_support::change_aware_fixture()
+        .await
+        .unwrap();
+    let service = with_denied_startup(fixture.container());
+    let ipc = DesktopIpc::new(service.clone(), fixture.project_root()).await;
+    let error = ipc
+        .invoke(
+            "finding_usage_review",
+            json!({
+                "project": fixture.project_root(),
+                "findingId": uuid::Uuid::new_v4().to_string(),
+                "accepted": true,
+            }),
+        )
+        .expect_err("an unknown finding has nothing to release");
+    ipc.scheduler.stop().await;
+    assert!(error.as_str().unwrap().contains("not found"), "{error}");
+    assert_approved(&service, "finding_usage_review", "publish_findings").await;
 }
 
 #[cfg(feature = "change-aware")]
