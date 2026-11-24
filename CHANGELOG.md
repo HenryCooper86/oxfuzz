@@ -35,9 +35,11 @@ retain only the current release; older entries remain here as the record.
 ### Removed
 
 - Windows installers are no longer built or published, and the website and
-  release notes no longer offer them. Windows is unsupported for now. The
-  Windows source paths, the Windows CI job and the qualification guide stay,
-  so support can come back.
+  release notes no longer offer them. Windows is unsupported for now. CI no
+  longer runs a Windows job, and the manual Windows qualification workflow is
+  removed. The Windows source paths and the qualification guide stay, so
+  support can come back; expect fixes when it does, because nothing compiles
+  or tests that code any more.
 
 ### Fixed
 

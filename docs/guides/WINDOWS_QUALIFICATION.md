@@ -1,8 +1,11 @@
 # Qualifying a Windows host
 
 **Windows is not supported for now, and Windows installers are not built or
-published.** The source paths, the Windows CI job and this procedure are kept
-so support can come back. The rest of this guide is unchanged.
+published, and CI no longer compiles or tests Windows.** The source paths and
+this procedure are kept so support can come back. The workflow that automated
+steps 2 and 3, `windows-qualification.yml`, was removed on 2026-11-24 and is in
+the history before that date. The rest of this guide is unchanged, so its
+statements about CI describe the state before that date.
 
 The workspace compiles and passes its unit tests on Windows in CI. No reviewed Docker build, smoke run, campaign, Stop and
 resume has been recorded on Windows 10 or 11, so the

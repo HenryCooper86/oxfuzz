@@ -3,8 +3,8 @@
 #
 #   scripts/check-windows-target.sh
 #
-# The Windows CI job is the only place the workspace is compiled for Windows,
-# so a platform-specific mistake costs one CI cycle to find. This runs
+# Windows is not supported for now and CI no longer compiles it, so this is the
+# only check that the Windows code still compiles. This runs
 # `cargo check` for x86_64-pc-windows-msvc with every target (library, tests,
 # binaries) so the same mistake is found before a push.
 #

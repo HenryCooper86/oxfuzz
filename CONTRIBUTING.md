@@ -99,8 +99,8 @@ uses the gate definitions in `scripts/tests/gates.sh`: formatting, clippy with
 `-D warnings` across all targets and feature combinations, the full workspace
 tests, docs, dependency policy (`cargo deny`), a per-crate coverage baseline,
 script tests, and the frontend tests and lint, on Linux. It also runs
-`cargo check` and the tests on macOS and Windows (the Windows job keeps the code compiling and tested;
-no Windows package is shipped). One aggregate check,
+`cargo check` and the tests on macOS. Windows is not supported for now, so no
+Windows job runs. One aggregate check,
 **All gates passed**, reports whether every job succeeded. If this is your
 first contribution, a maintainer may need
 to approve the workflow before it runs. See

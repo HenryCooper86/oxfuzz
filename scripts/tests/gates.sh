@@ -97,8 +97,8 @@ gate_test() {
   # behavior, and there is no `head`, so no SIGPIPE. Under pipefail a failing
   # `cargo test` still fails the pipeline.
   # --no-fail-fast so one failing test binary cannot hide what the rest of the
-  # suite would have found: the Windows job burned one full CI cycle per hidden
-  # failure until the gate reported them all at once.
+  # suite would have found: a platform job once burned one full CI cycle per
+  # hidden failure until the gate reported them all at once.
   cargo test --workspace --no-fail-fast 2>&1 | { grep -v "${TEST_NOISE}" || true; }
 }
 

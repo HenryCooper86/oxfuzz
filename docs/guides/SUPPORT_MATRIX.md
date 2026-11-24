@@ -7,9 +7,9 @@ the qualification column only after reviewing a corresponding
 establishes implemented behavior, not live engine qualification.
 
 **Windows is not supported for now.** Windows installers are not built or
-published, and no Windows campaign claim is made. The source paths, the
-Windows CI job and the qualification procedure are kept so support can come
-back. See [Qualifying a Windows host](WINDOWS_QUALIFICATION.md) and the
+published, CI does not compile or test Windows, and no Windows campaign claim
+is made. The source paths and the qualification procedure are kept so support
+can come back. See [Qualifying a Windows host](WINDOWS_QUALIFICATION.md) and the
 [hosted-runner record](../acceptance/windows-host-2026-11-22.md).
 
 | Target | Discovery | Harness build and smoke | Campaign engine | Run evidence and replay | Host platform scope | Qualification in this checkout |
@@ -167,8 +167,7 @@ no Windows package ships):
 
 For userspace C/C++/Rust, source discovery and the guarded build/smoke,
 campaign, corpus, replay, and triage operations have cross-platform code and
-CI checks on Linux, macOS, and Windows (the Windows job checks that the code
-compiles and passes its tests; no Windows package ships). Those checks do not qualify a real
+CI checks on Linux and macOS. Those checks do not qualify a real
 Docker campaign on each host. C/C++ LLVM function profiles need instrumented
 builds and separate live acceptance. Minimization availability depends on the
 engine and is reported per operation; it is not assumed from campaign support.
