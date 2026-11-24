@@ -285,7 +285,7 @@ pub(crate) struct HarnessArgs {
     /// offline work or hosts without a provider key. The bypass is persisted
     /// as a marked review record and a guardrail audit row, and human
     /// promotion is still required; without the model review, only the
-    /// 16-rule lexical lint and your own approval stand between the generated
+    /// 17-rule lexical lint and your own approval stand between the generated
     /// harness and the sandbox. See `docs/guides/SAFETY_MODEL.md`.
     #[arg(long)]
     pub(crate) no_llm_review: bool,
@@ -639,7 +639,7 @@ pub(crate) struct FuzzSwitchArgs {
     /// offline work or hosts without a provider key. The bypass is persisted
     /// as a marked review record and a guardrail audit row, and human
     /// promotion is still required; without the model review, only the
-    /// 16-rule lexical lint and your own approval stand between the generated
+    /// 17-rule lexical lint and your own approval stand between the generated
     /// harness and the sandbox. See `docs/guides/SAFETY_MODEL.md`.
     #[arg(long)]
     pub(crate) no_llm_review: bool,

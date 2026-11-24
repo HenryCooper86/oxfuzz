@@ -10,6 +10,14 @@ retain only the current release; older entries remain here as the record.
 
 ## Unreleased
 
+### Fixed
+
+- Harness generation: a C or C++ draft that passes the raw fuzz input to a
+  C-string API is now sent back for repair before it is built. The input has no
+  NUL terminator, so such a harness read past its buffer and reported its own bug
+  as a crash in the target. The draft prompt now says how to pass a terminated
+  copy, and names the standard headers first drafts kept omitting.
+
 ## 0.9.10 - 2026-11-23
 
 ### Added

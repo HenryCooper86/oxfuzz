@@ -131,7 +131,14 @@ fn c_source_rules(language: TargetLanguage) -> &'static str {
     if !matches!(language, TargetLanguage::C | TargetLanguage::Cpp) {
         return "";
     }
-    "- Include a project header by its path under a listed include directory, or relative to \
+    "- The fuzz input is not NUL-terminated. When the target reads a C string (a `char *` with \
+     no length parameter), copy the input into a `size + 1` heap buffer, set the last byte to \
+     0, pass that copy, and free it. This is the one exception to passing the bytes unchanged. \
+     A cast such as `(const char *)data` does not terminate the input.\n\
+     - Include `<stdint.h>` and `<stddef.h>` for the entry point's types, and the standard \
+     header for every library call you make, such as `<stdlib.h>` for `malloc` and \
+     `<string.h>` for `memcpy`.\n\
+     - Include a project header by its path under a listed include directory, or relative to \
      the project root. Never probe for a header with `__has_include`, and never guard code \
      with a macro you were not shown.\n\
      - When no project header is shown, declare the target exactly as the signature below \
@@ -1366,6 +1373,53 @@ mod tests {
             assert!(prompt.contains("on every path"), "{prompt}");
             assert!(prompt.contains("Initialize every output"), "{prompt}");
         }
+    }
+
+    #[test]
+    fn c_family_prompts_explain_how_to_give_a_c_string_target_its_input() {
+        // Observed on cJSON: five of five drafts cast the raw buffer to
+        // `const char *`, because "pass the bytes unchanged" named no exception.
+        for language in [
+            hf_core::target::TargetLanguage::C,
+            hf_core::target::TargetLanguage::Cpp,
+        ] {
+            let mut target = sample_target();
+            target.language = language;
+            let prompt = render_harness_prompt(&target, EngineKind::LibFuzzer);
+            assert!(prompt.contains("not NUL-terminated"), "{prompt}");
+            assert!(prompt.contains("`size + 1`"), "{prompt}");
+            assert!(prompt.contains("A cast such as"), "{prompt}");
+        }
+        let mut rust = sample_target();
+        rust.language = hf_core::target::TargetLanguage::Rust;
+        let prompt = render_harness_prompt(&rust, EngineKind::LibFuzzer);
+        assert!(!prompt.contains("not NUL-terminated"), "{prompt}");
+    }
+
+    #[test]
+    fn c_family_prompts_name_the_standard_headers_drafts_kept_omitting() {
+        // Observed on cJSON: five of five drafts used `uint8_t` without
+        // `<stdint.h>`, and two called `malloc` and `memcpy` with no header.
+        for language in [
+            hf_core::target::TargetLanguage::C,
+            hf_core::target::TargetLanguage::Cpp,
+        ] {
+            let mut target = sample_target();
+            target.language = language;
+            let prompt = render_harness_prompt(&target, EngineKind::LibFuzzer);
+            for header in [
+                "`<stdint.h>`",
+                "`<stddef.h>`",
+                "`<stdlib.h>`",
+                "`<string.h>`",
+            ] {
+                assert!(prompt.contains(header), "{header}: {prompt}");
+            }
+        }
+        let mut rust = sample_target();
+        rust.language = hf_core::target::TargetLanguage::Rust;
+        let prompt = render_harness_prompt(&rust, EngineKind::LibFuzzer);
+        assert!(!prompt.contains("`<stdint.h>`"), "{prompt}");
     }
 
     #[test]

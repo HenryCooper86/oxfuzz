@@ -247,6 +247,27 @@ const PERSISTENT_STRUCTURAL_RULES: [StructuralRule; 3] = [
     },
 ];
 
+/// A C or C++ entry point handing its unterminated buffer to a C-string API.
+/// Whole-source because the verdict depends on an alias declared on one line, a
+/// call on another, and any size or terminator check elsewhere in the harness.
+const UNTERMINATED_INPUT_RULE: StructuralRule = StructuralRule {
+    id: "no-unterminated-fuzz-string",
+    message: "the fuzz input has no NUL terminator, so passing it as a C string reads past \
+              the buffer and reports the harness's own bug as a target crash. Pass the size \
+              to a length-taking API, pass a NUL-terminated copy, or return early unless the \
+              input contains a NUL.",
+};
+
+/// A `char` pointer type as written in a cast or a declaration.
+const CHAR_POINTER: &str =
+    r"(?:const\s+)?(?:(?:un)?signed\s+)?char\s*(?:const\b\s*)?\*\s*(?:const\b\s*)?";
+
+/// One-argument forms that do not read their argument as a C string, plus
+/// `strlen`, which `no-strlen-on-fuzz-data` already reports.
+const NON_C_STRING_CALLS: [&str; 8] = [
+    "if", "while", "for", "switch", "return", "sizeof", "assert", "strlen",
+];
+
 /// Every harness rule the lint enforces.
 ///
 /// Exposed so an authoring packet can state the constraints up front instead of
@@ -272,6 +293,12 @@ pub fn harness_rules() -> Vec<HarnessRuleSummary> {
                     languages: vec!["c", "cpp"],
                 }),
         )
+        .chain(std::iter::once(HarnessRuleSummary {
+            id: UNTERMINATED_INPUT_RULE.id.to_owned(),
+            severity: LintSeverity::Error,
+            message: UNTERMINATED_INPUT_RULE.message.to_owned(),
+            languages: vec!["c", "cpp"],
+        }))
         .collect()
 }
 
@@ -338,6 +365,7 @@ pub fn lint_harness_source(source: &str, language: TargetLanguage) -> Vec<LintFi
     }
     if matches!(language, TargetLanguage::C | TargetLanguage::Cpp) {
         lint_persistent_structure(source, &mut findings);
+        lint_unterminated_input(source, language, &mut findings);
     }
     if language == TargetLanguage::Go {
         findings.extend(crate::go_native::lint_source(source));
@@ -433,6 +461,104 @@ fn lint_persistent_structure(source: &str, findings: &mut Vec<LintFinding>) {
             message: PERSISTENT_STRUCTURAL_RULES[2].message.to_owned(),
             line: u32::try_from(index + 1).unwrap_or(u32::MAX),
         });
+    }
+}
+
+/// The buffer and size parameter names of a libFuzzer entry point.
+fn entry_parameters_pattern() -> &'static Regex {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    PATTERN.get_or_init(|| {
+        Regex::new(
+            r"LLVMFuzzerTestOneInput\s*\(\s*(?:const\s+)?[A-Za-z_][\w:]*(?:\s+[A-Za-z_]\w*)?\s*(?:const\b\s*)?\*\s*(?:const\b\s*)?([A-Za-z_]\w*)\s*,\s*(?:const\s+)?[A-Za-z_][\w:]*(?:\s+[A-Za-z_]\w*)*?\s+([A-Za-z_]\w*)\s*\)",
+        )
+        .expect("the entry-parameter pattern is a compile-time constant")
+    })
+}
+
+/// Compile a pattern built from constants and escaped identifiers.
+fn parameter_pattern(pattern: &str) -> Regex {
+    Regex::new(pattern).expect("parameter names are escaped before they reach a pattern")
+}
+
+/// Whether the harness rejects input that holds no NUL, which makes the buffer
+/// a valid C string. Reading the last byte for any other purpose does not count.
+fn checks_for_terminator(code: &[(u32, &str)], data: &str, size: &str) -> bool {
+    let last = format!(r"{data}\s*\[\s*{size}\s*-\s*1\s*\]");
+    let check = parameter_pattern(&format!(
+        r"{last}\s*(?:!=|==)\s*(?:0\b|'\\0')|(?:\bif\s*\(|\|\||&&|!)\s*{last}\s*(?:\)|\|\||&&)|memchr\s*\(\s*(?:\([^)]*\)\s*)?{data}\s*,\s*(?:0\b|'\\0')\s*,"
+    ));
+    code.iter().any(|(_, line)| check.is_match(line))
+}
+
+/// Whether the harness enforces a minimum or exact input size above one byte,
+/// the shape of a correct call to a fixed-width `char *` API. An empty-input
+/// check or a maximum says nothing about the width the target reads.
+fn enforces_minimum_size(code: &[(u32, &str)], size: &str) -> bool {
+    let bound = parameter_pattern(&format!(
+        r"\b{size}\s*(?:<=\s*(?:sizeof\b|[1-9]\d*|[A-Za-z_]\w*)|(?:<|!=)\s*(?:sizeof\b|[2-9]\b|[1-9]\d+|[A-Za-z_]\w*))"
+    ));
+    code.iter().any(|(_, line)| bound.is_match(line))
+}
+
+/// Report one-argument calls that receive the entry point's buffer as a `char`
+/// pointer, directly or through a local alias. The call carries no length, so
+/// the callee can only find the end by reading for a terminator that libFuzzer
+/// does not provide.
+///
+/// Lexical like the other rules: a buffer passed through another function, a
+/// call split across lines, or an `auto` alias is not followed.
+fn lint_unterminated_input(
+    source: &str,
+    language: TargetLanguage,
+    findings: &mut Vec<LintFinding>,
+) {
+    let Some(parameters) = entry_parameters_pattern().captures(source) else {
+        return;
+    };
+    let data = regex::escape(&parameters[1]);
+    let size = regex::escape(&parameters[2]);
+    let code: Vec<(u32, &str)> = source
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| !is_comment_line(line, language))
+        .map(|(index, line)| (u32::try_from(index + 1).unwrap_or(u32::MAX), line))
+        .collect();
+    if checks_for_terminator(&code, &data, &size) {
+        return;
+    }
+    let cast = format!(
+        r"(?:\(\s*{CHAR_POINTER}\)\s*{data}\b|reinterpret_cast\s*<\s*{CHAR_POINTER}>\s*\(\s*{data}\s*\))"
+    );
+    let alias = parameter_pattern(&format!(r"{CHAR_POINTER}([A-Za-z_]\w*)\s*=\s*{cast}"));
+    let mut argument = vec![cast.clone()];
+    for (_, line) in &code {
+        argument.extend(
+            alias
+                .captures_iter(line)
+                .map(|found| format!(r"\b{}\b", regex::escape(&found[1]))),
+        );
+    }
+    let call = parameter_pattern(&format!(
+        r"([A-Za-z_][\w:]*)\s*\(\s*(?:{})\s*\)",
+        argument.join("|")
+    ));
+    let severity = if enforces_minimum_size(&code, &size) {
+        LintSeverity::Warning
+    } else {
+        LintSeverity::Error
+    };
+    for (number, line) in &code {
+        let passes_input = call
+            .captures_iter(line)
+            .any(|found| !NON_C_STRING_CALLS.contains(&&found[1]));
+        if passes_input {
+            findings.push(LintFinding {
+                severity,
+                rule: UNTERMINATED_INPUT_RULE.id.to_owned(),
+                message: UNTERMINATED_INPUT_RULE.message.to_owned(),
+                line: *number,
+            });
+        }
     }
 }
 
@@ -730,6 +856,190 @@ mod tests {
             .find(|rule| rule.id == "no-catch-all")
             .expect("no-catch-all is a rule");
         assert_eq!(catch_all.languages, vec!["cpp"]);
+    }
+
+    // -- Fuzz input passed as a C string --------------------------------------
+
+    const ENTRY: &str = "int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {\n";
+
+    /// The line and severity of each unterminated-input finding in `body`.
+    fn unterminated(body: &str, language: TargetLanguage) -> Vec<(u32, LintSeverity)> {
+        lint_harness_source(&format!("{ENTRY}{body}\nreturn 0; }}\n"), language)
+            .into_iter()
+            .filter(|finding| finding.rule == "no-unterminated-fuzz-string")
+            .map(|finding| (finding.line, finding.severity))
+            .collect()
+    }
+
+    #[test]
+    fn blocks_the_c_string_shapes_the_model_drafted() {
+        // Both shapes are verbatim from qwen3:8b drafts for `cJSON_Parse`.
+        assert_eq!(
+            unterminated(
+                "cJSON *json = cJSON_Parse((const char *)data);",
+                TargetLanguage::C
+            ),
+            vec![(2, LintSeverity::Error)]
+        );
+        assert_eq!(
+            unterminated(
+                "const char *input = (const char *)data;\ncJSON *json = cJSON_Parse(input);",
+                TargetLanguage::C
+            ),
+            vec![(3, LintSeverity::Error)]
+        );
+    }
+
+    #[test]
+    fn blocks_cpp_c_string_uses_of_the_fuzz_input() {
+        assert_eq!(
+            unterminated(
+                "parse(reinterpret_cast<const char *>(data));",
+                TargetLanguage::Cpp
+            ),
+            vec![(2, LintSeverity::Error)]
+        );
+        assert_eq!(
+            unterminated(
+                "const char *text = reinterpret_cast<const char *>(data);\nstd::string s(text);",
+                TargetLanguage::Cpp
+            ),
+            vec![(3, LintSeverity::Error)]
+        );
+    }
+
+    #[test]
+    fn follows_the_entry_points_own_parameter_names() {
+        let source = "int LLVMFuzzerTestOneInput(const unsigned char* buf, size_t len) {\n\
+                      parse((char*)buf);\nreturn 0; }\n";
+        let found = lint_harness_source(source, TargetLanguage::C);
+        assert!(
+            found
+                .iter()
+                .any(|f| f.rule == "no-unterminated-fuzz-string"),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_calls_that_carry_the_length_or_a_terminated_copy() {
+        for body in [
+            "parse((const char *)data, size);",
+            "const char *input = (const char *)data;\nparse(input, size);",
+            "std::string s(reinterpret_cast<const char *>(data), size);",
+            "char *copy = malloc(size + 1);\nif (!copy) return 0;\nmemcpy(copy, data, size);\n\
+             copy[size] = 0;\nparse(copy);\nfree(copy);",
+        ] {
+            assert_eq!(unterminated(body, TargetLanguage::Cpp), vec![], "{body}");
+        }
+    }
+
+    #[test]
+    fn a_check_for_a_nul_last_byte_makes_the_input_a_c_string() {
+        for guard in [
+            "if (size == 0 || data[size - 1] != 0) return 0;",
+            "if (!size || data[size-1] != '\\0') return 0;",
+            "if (size == 0 || data[size - 1]) return 0;",
+            "if (!memchr(data, 0, size)) return 0;",
+        ] {
+            let body = format!("{guard}\nparse((const char *)data);");
+            assert_eq!(unterminated(&body, TargetLanguage::C), vec![], "{guard}");
+        }
+    }
+
+    #[test]
+    fn reading_the_last_byte_for_another_reason_is_not_a_terminator_check() {
+        let body = "uint8_t flags = data[size - 1];\nparse((const char *)data);";
+        assert_eq!(
+            unterminated(body, TargetLanguage::C),
+            vec![(3, LintSeverity::Error)]
+        );
+    }
+
+    #[test]
+    fn a_minimum_size_check_downgrades_the_finding_to_a_warning() {
+        // A fixed-width `char *` API is correctly called after a size check.
+        for guard in [
+            "if (size < 16) return 0;",
+            "if (size != 16) return 0;",
+            "if (size <= 1) return 0;",
+            "if (size < sizeof(header_t)) return 0;",
+            "if (size < MIN_INPUT) return 0;",
+        ] {
+            let body = format!("{guard}\nparse((const char *)data);");
+            assert_eq!(
+                unterminated(&body, TargetLanguage::C),
+                vec![(3, LintSeverity::Warning)],
+                "{guard}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_input_or_maximum_size_check_does_not_downgrade_it() {
+        for guard in [
+            "if (size == 0) return 0;",
+            "if (size < 1) return 0;",
+            "if (size != 0) { }",
+            "if (size > 4096) return 0;",
+            "if (size >= 4096) return 0;",
+        ] {
+            let body = format!("{guard}\nparse((const char *)data);");
+            assert_eq!(
+                unterminated(&body, TargetLanguage::C),
+                vec![(3, LintSeverity::Error)],
+                "{guard}"
+            );
+        }
+    }
+
+    #[test]
+    fn control_flow_and_comments_are_not_c_string_calls() {
+        for body in [
+            "const char *input = (const char *)data;\nif (input) { }",
+            "const char *input = (const char *)data;\nwhile (input) { break; }",
+            "(void)sizeof((const char *)data);",
+            "// parse((const char *)data);",
+        ] {
+            assert_eq!(unterminated(body, TargetLanguage::C), vec![], "{body}");
+        }
+    }
+
+    #[test]
+    fn strlen_on_the_input_keeps_its_own_rule() {
+        assert_eq!(
+            unterminated("(void)strlen((const char *)data);", TargetLanguage::C),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn the_rule_needs_a_c_family_libfuzzer_entry_point() {
+        assert_eq!(
+            lint_harness_source(
+                "void f(const char *d) { g((const char *)d); }",
+                TargetLanguage::C
+            )
+            .iter()
+            .filter(|f| f.rule == "no-unterminated-fuzz-string")
+            .count(),
+            0
+        );
+        assert_eq!(
+            unterminated("parse((const char *)data);", TargetLanguage::Rust),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn the_unterminated_input_rule_is_listed_as_blocking_for_authors() {
+        let all = harness_rules();
+        let rule = all
+            .iter()
+            .find(|rule| rule.id == "no-unterminated-fuzz-string")
+            .expect("the rule is listed");
+        assert_eq!(rule.severity, LintSeverity::Error);
+        assert_eq!(rule.languages, vec!["c", "cpp"]);
     }
 
     // -- AFL++ persistent-mode structural rules -------------------------------

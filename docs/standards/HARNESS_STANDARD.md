@@ -48,6 +48,7 @@ recorded on the compile outcome and surfaced to the operator without blocking.
 | `no-nondeterminism` | Warning | C, C++, Rust | A clock or RNG branch makes a crash irreproducible and breaks corpus minimization. |
 | `no-catch-all` | Warning | C++ | `catch (...)` hides target failures the fuzzer exists to observe. |
 | `no-strlen-on-fuzz-data` | Warning | C, C++ | Fuzz input is not NUL-terminated, so treating it as a C string reads out of bounds inside the harness itself. |
+| `no-unterminated-fuzz-string` | Error, or Warning after a minimum-size check | C, C++ | A one-argument call that receives the fuzz buffer as a `char` pointer reads for a NUL the fuzzer does not provide, so the harness's own over-read is reported as a target crash. |
 | `no-process-spawn` | Error | Rust | `Command::new` moves execution outside the sandbox that is measuring the target. |
 | `no-catch-unwind` | Warning | Rust | `catch_unwind` hides the panic the fuzzing runtime treats as a finding. |
 | `no-subprocess` | Error | Python | The `subprocess` module moves execution outside the sandbox that is measuring the target. |
@@ -64,6 +65,15 @@ same way. Comment-only lines are skipped (`//` and `/*` for the C family, `#`
 for Python); a rule name in a string literal or a trailing comment still
 matches, which is the safe direction for findings that only advise a repair
 prompt.
+
+`no-unterminated-fuzz-string` is structural because its verdict spans the
+entry point's parameter names, a local alias, the call, and any check elsewhere
+in the harness. A check that the input holds a NUL (`data[size - 1] != 0` or
+`memchr(data, 0, size)`) satisfies it. A minimum or exact size check above one
+byte downgrades it to a warning, because that is how a fixed-width `char *` API
+is called correctly; an empty-input check or a maximum does not. It is lexical:
+a buffer passed through another function, a call split across lines, and an
+`auto` alias are not followed.
 
 The three `persistent-*` rules are structural rather than per-line call
 patterns, and they apply only to a source that carries a `__AFL_LOOP` or
