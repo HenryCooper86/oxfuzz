@@ -23,7 +23,7 @@ if ! command -v python3 >/dev/null 2>&1; then
     python_command=python
 fi
 
-IMAGE="${OXFUZZ_SANDBOX_IMAGE:-oxfuzz/fuzz-sandbox:0.2.3}"
+IMAGE="${OXFUZZ_SANDBOX_IMAGE:-oxfuzz/fuzz-sandbox:0.2.4}"
 if [[ "$IMAGE" == "latest" || "$IMAGE" == *":latest" ]]; then
     echo "OXFUZZ_SANDBOX_IMAGE must use an explicit version tag" >&2
     exit 1
@@ -71,6 +71,11 @@ docker run "${run_args[@]}" \
         python3 -I -c "import atheris"
         test -f /opt/oxfuzz/msan-libcxx/lib/libc++.so.1
         test -f /opt/oxfuzz/msan-libcxx/lib/libFuzzer-msan.a
+        notices=/usr/share/doc/oxfuzz-sandbox
+        test -s "$notices/NOTICES.md"
+        test -s "$notices/packages.tsv"
+        grep -Eqx "[0-9]{8}T[0-9]{6}Z" "$notices/ubuntu-snapshot.txt"
+        test -s "$notices/licenses/LGPL-3"
         cargo fuzz --version >/dev/null
         test "$(semgrep --version --disable-version-check)" = "1.169.0"
         test -z "$(

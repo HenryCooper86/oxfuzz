@@ -45,7 +45,7 @@ record it.
   configurations.
 - The Rust toolchain named in `rust-toolchain.toml`, with the MSVC build
   tools, and Git for Windows (the gate script is bash).
-- The sandbox image `oxfuzz/fuzz-sandbox:0.2.3` for `linux/amd64` in that
+- The sandbox image `oxfuzz/fuzz-sandbox:0.2.4` for `linux/amd64` in that
   engine. It is not published. `scripts/build-sandbox.sh` builds and
   verifies it; run it from Git Bash in the checkout. A default Git for
   Windows checkout rewrites line endings; `.gitattributes` keeps the files
@@ -68,7 +68,7 @@ record it.
 Record, for the acceptance record: the commit and `git status --short`, the
 Windows version (`cmd /c ver`), `docker version`, the backend, `wsl --version`
 if WSL 2 is used, and the image ID
-(`docker image inspect --format "{{.Id}}" oxfuzz/fuzz-sandbox:0.2.3`).
+(`docker image inspect --format "{{.Id}}" oxfuzz/fuzz-sandbox:0.2.4`).
 
 Run every command from Git Bash in the repository root.
 

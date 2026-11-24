@@ -10,6 +10,19 @@ retain only the current release; older entries remain here as the record.
 
 ## Unreleased
 
+### Changed
+
+- Sandbox image 0.2.4 (the next release expects it; 0.9.10 still uses 0.2.3).
+  The toolchains are the same as 0.2.3. The image now carries its third-party
+  licence notices, the GPL and LGPL texts and a list of the installed Ubuntu
+  packages (`packages.tsv`) under `/usr/share/doc/oxfuzz-sandbox/`, plus OCI
+  labels for source, description and licences. `ubuntu-snapshot.txt` there
+  records the UTC time of the build's first `apt-get update`; the Ubuntu
+  source packages for the listed versions are at
+  `https://snapshot.ubuntu.com/ubuntu/<timestamp>/`. Ubuntu binaries are still
+  not version-pinned, so image builds are not binary-reproducible. Run `./scripts/build-sandbox.sh` or
+  `./scripts/pull-sandbox.sh` after upgrading.
+
 ### Removed
 
 - Windows installers are no longer built or published, and the website and

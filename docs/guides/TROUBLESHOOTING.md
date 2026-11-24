@@ -51,7 +51,7 @@ a build or run fails with Docker output such as `pull access denied`.
 
 Cause: the runtime always uses the image tag compiled into oxfuzz
 (`SANDBOX_IMAGE` in `crates/hf-runtime/src/config.rs`, currently
-`oxfuzz/fuzz-sandbox:0.2.3`), and it is not present locally. The runtime
+`oxfuzz/fuzz-sandbox:0.2.4`), and it is not present locally. The runtime
 never pulls it on its own.
 
 Fix: from an oxfuzz source checkout run
@@ -65,7 +65,7 @@ skips the script's post-build toolchain and Semgrep verification). Expect a
 long first build and a large image: it compiles honggfuzz, syzkaller (with
 its Go toolchain), and SymCC from source, installs Rust nightly and
 cargo-fuzz, and needs network access while building. The local
-`oxfuzz/fuzz-sandbox:0.2.3` image is about 7 GB on disk.
+`oxfuzz/fuzz-sandbox:0.2.4` image is about 7 GB on disk.
 
 If a prebuilt image has been published for your version,
 `./scripts/pull-sandbox.sh` downloads and verifies it instead; when none is
@@ -101,7 +101,7 @@ checkout, rebuilds on a mismatch; the CLI `doctor` only checks that the tag
 exists.
 
 Fix: check with
-`docker image inspect --format '{{.Architecture}}' oxfuzz/fuzz-sandbox:0.2.3`.
+`docker image inspect --format '{{.Architecture}}' oxfuzz/fuzz-sandbox:0.2.4`.
 For userspace fuzzing, build for the native architecture: run
 `./scripts/build-sandbox.sh` without `OXFUZZ_SANDBOX_PLATFORM`, or with
 `OXFUZZ_SANDBOX_PLATFORM=linux/arm64` on Apple Silicon. Building a foreign
@@ -118,7 +118,7 @@ The runtime, `doctor`, and Build Doctor always use the fixed
 overrides it.
 
 Fix: build with the default tag, or retag your image:
-`docker tag myorg/sandbox:1 oxfuzz/fuzz-sandbox:0.2.3`.
+`docker tag myorg/sandbox:1 oxfuzz/fuzz-sandbox:0.2.4`.
 
 ## Building oxfuzz
 

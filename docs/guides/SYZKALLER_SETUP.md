@@ -21,7 +21,7 @@ driven by `syz-manager`, which needs three artifacts you provide:
 
 ### 1.1 Sandbox image with the syzkaller toolchain
 
-The shared sandbox image (`oxfuzz/fuzz-sandbox:0.2.3`) must contain the
+The shared sandbox image (`oxfuzz/fuzz-sandbox:0.2.4`) must contain the
 syzkaller toolchain (Go 1.26, qemu, and the `syz-*` binaries). The Docker layer
 that installs it lives in `docker/sandbox/Dockerfile`.
 
@@ -31,12 +31,12 @@ Build it one of two ways:
   image for your host architecture and then verifies `syz-manager` is present.
 - Or, in the app: open Settings > General > Sandbox and switch the Architecture
   (this forces a rebuild). To force a same-arch rebuild instead, remove the
-  image first: `docker image rm oxfuzz/fuzz-sandbox:0.2.3`.
+  image first: `docker image rm oxfuzz/fuzz-sandbox:0.2.4`.
 
 Confirm the toolchain is present:
 
 ```bash
-docker run --rm oxfuzz/fuzz-sandbox:0.2.3 bash -lc 'which syz-manager && syz-manager --help | head -1'
+docker run --rm oxfuzz/fuzz-sandbox:0.2.4 bash -lc 'which syz-manager && syz-manager --help | head -1'
 ```
 
 ### 1.2 Architecture matching

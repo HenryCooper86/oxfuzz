@@ -136,10 +136,24 @@ slowest part of a first install. `sandbox-image.yml` can publish it instead:
 
 1. Run **Actions -> Sandbox image -> Run workflow** with `publish` unticked.
    This builds and verifies both architectures without pushing anything.
-2. Before ticking `publish`, confirm the license obligations of distributing
-   the image. It contains GPL-licensed binaries (SymCC and Ubuntu packages)
-   and LGPL Semgrep, whose notices live under `third_party/`. The automotive
-   Scapy sidecar is not part of this image.
+2. Before ticking `publish`, confirm the licence obligations of distributing
+   the image. It contains GPL and LGPL components: SymCC (GPL-3.0-or-later)
+   and its runtime (LGPL-3.0-or-later), the AFL++ QEMU mode built from
+   QEMUAFL (GPL-2.0), honggfuzz (Apache-2.0, but linked against the
+   GPL-3.0-or-later libbfd and libopcodes from Ubuntu binutils), Semgrep CE
+   (LGPL-2.1-or-later, notice under `third_party/semgrep`), and Ubuntu
+   packages such as QEMU, GDB and glibc. The image carries its own notices at
+   `/usr/share/doc/oxfuzz-sandbox/NOTICES.md` (source of the file:
+   `docker/sandbox/NOTICES.md`), with the exact Ubuntu package list in
+   `packages.tsv` and `ubuntu-snapshot.txt` beside it. Keep that file accurate
+   whenever a pin in the Dockerfile changes. Ubuntu binaries are not
+   version-pinned, so two builds can differ and are not binary-reproducible;
+   `ubuntu-snapshot.txt` (the UTC time of the build's first `apt-get update`,
+   rounded up to the hour) gives the `snapshot.ubuntu.com/ubuntu/<timestamp>/`
+   archive that holds the matching Ubuntu source packages. The notices carry a
+   written offer to provide source for GPL and LGPL components through the
+   issue tracker for at least three years from each publication. The
+   automotive Scapy sidecar is not part of this image.
 3. With `publish` ticked, the workflow pushes
    `ghcr.io/<owner>/oxfuzz-fuzz-sandbox:<version>-<arch>` and a multi-arch
    `<version>` tag. Make the GHCR package public in its package settings.
@@ -148,7 +162,9 @@ Users then run `./scripts/pull-sandbox.sh`, which pulls that tag, retags it as
 the `oxfuzz/fuzz-sandbox:<version>` name the runtime expects, and runs the same
 compiler verification as a local build. The version comes from
 `scripts/build-sandbox.sh`, so bump it there (and in
-`crates/hf-runtime/src/config.rs`) when the Dockerfile changes.
+`crates/hf-runtime/src/config.rs`) when the Dockerfile changes. The image
+carries OCI labels for its source repository, description and licences, which
+link the GHCR package to this repository.
 
 ## Frontend JavaScript budgets
 

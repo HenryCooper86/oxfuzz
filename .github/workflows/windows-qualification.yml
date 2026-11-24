@@ -104,7 +104,7 @@ jobs:
       - name: Image identity
         shell: pwsh
         run: |
-          docker image inspect --format 'image {{.Id}} {{.Architecture}} {{.Size}}' oxfuzz/fuzz-sandbox:0.2.3
+          docker image inspect --format 'image {{.Id}} {{.Architecture}} {{.Size}}' oxfuzz/fuzz-sandbox:0.2.4
           if ($LASTEXITCODE -ne 0) { throw "the sandbox image is not present" }
           docker system df
           Get-PSDrive -PSProvider FileSystem | Format-Table Name, Used, Free
@@ -181,7 +181,7 @@ jobs:
           MSYS_NO_PATHCONV: "1"
           MSYS2_ARG_CONV_EXCL: "*"
         run: |
-          docker run --rm --network none --tmpfs /tmp:rw,exec,size=64m oxfuzz/fuzz-sandbox:0.2.3 sh -c '
+          docker run --rm --network none --tmpfs /tmp:rw,exec,size=64m oxfuzz/fuzz-sandbox:0.2.4 sh -c '
             echo "kernel=$(uname -r)"
             echo "core_pattern=$(cat /proc/sys/kernel/core_pattern)"
             echo "mmap_rnd_bits=$(cat /proc/sys/vm/mmap_rnd_bits)"

@@ -14,12 +14,23 @@ backend selector. Test doubles implement `RuntimeAdapter` explicitly, but there
 is no production native-host fallback for generated or untrusted execution.
 
 The production image uses the release-version tag
-`oxfuzz/fuzz-sandbox:0.2.3`; floating `latest` references are forbidden. Its
+`oxfuzz/fuzz-sandbox:0.2.4`; floating `latest` references are forbidden. Its
 Dockerfile pins the base-image digest, source revisions, language toolchains,
 and top-level installed tool versions. The canonical build script rejects a
 floating tag and runs a network-disabled, read-only toolchain smoke check after
 the build. Dockerfile verification steps are release gates and must fail rather
 than masking missing advertised tools.
+The image also carries its third-party licence notices and an installed-package
+manifest under `/usr/share/doc/oxfuzz-sandbox/` (source of the notices:
+`docker/sandbox/NOTICES.md`), added at image 0.2.4 so a published image
+distributes its GPL and LGPL source locations with it. Ubuntu binary packages
+are not version-pinned, so image builds are not binary-reproducible. The first
+`apt-get update` of a build writes its UTC time, rounded up to the next hour, to
+`ubuntu-snapshot.txt` beside the manifest. The Ubuntu source packages for the
+manifest's versions are looked up at
+`https://snapshot.ubuntu.com/ubuntu/<timestamp>/` (Launchpad as fallback).
+Only the main archive path serves snapshots; `ubuntu-ports`, the arm64 binary
+archive, does not, so binaries cannot be pinned that way on both architectures.
 The smoke check also links a small C program with each advertised userspace
 compiler using the sanitizer and profile flags applied to live harnesses.
 Listing a compiler binary alone does not establish that its architecture's

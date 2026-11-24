@@ -11,7 +11,9 @@ ARG UBUNTU_IMAGE=ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c0
 FROM ${UBUNTU_IMAGE}
 
 LABEL org.opencontainers.image.title="oxfuzz sandbox" \
-      org.opencontainers.image.version="0.2.0" \
+      org.opencontainers.image.description="Sandbox toolchain for oxfuzz: clang and libFuzzer, AFL++, honggfuzz, syzkaller, SymCC, CASR, Semgrep CE, Jazzer, Jazzer.js, Atheris and Bazel. Third-party licences and corresponding-source locations are in /usr/share/doc/oxfuzz-sandbox/NOTICES.md." \
+      org.opencontainers.image.licenses="MIT AND Apache-2.0 AND BSD-3-Clause AND GPL-2.0-or-later AND GPL-3.0-or-later AND LGPL-2.1-or-later AND LGPL-3.0-or-later AND LicenseRef-Mixed-Ubuntu-packages" \
+      org.opencontainers.image.version="0.2.4" \
       org.opencontainers.image.source="https://github.com/HenryCooper86/oxfuzz"
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -19,7 +21,16 @@ ENV DEBIAN_FRONTEND=noninteractive
 # Install clang, build tools, AFL++, libFuzzer dev, and clang runtime (asan/fuzzer).
 # meson + autoconf/automake/libtool cover the Meson and Autotools build profiles
 # alongside CMake and plain Make (docs/design/build-doctor-design.md).
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# The first apt-get update of the build is timestamped (UTC, rounded up to the
+# next whole hour) into ubuntu-snapshot.txt. Ubuntu binaries are not
+# version-pinned, so that time is what locates the matching source packages on
+# https://snapshot.ubuntu.com/ubuntu/<timestamp>/ (docker/sandbox/NOTICES.md).
+# Later layers of a cached rebuild may install newer versions; packages.tsv
+# lists what the image actually contains.
+RUN mkdir -p /usr/share/doc/oxfuzz-sandbox \
+    && date -u -d "@$(( ($(date +%s) + 3599) / 3600 * 3600 ))" +%Y%m%dT%H%M%SZ \
+        > /usr/share/doc/oxfuzz-sandbox/ubuntu-snapshot.txt \
+    && apt-get update && apt-get install -y --no-install-recommends \
     clang \
     llvm \
     lld \
@@ -446,3 +457,23 @@ RUN arch="$(dpkg --print-architecture)" \
     && chmod 0755 /opt/bazel/bazel-8 /opt/bazel/bazel-9 /usr/local/bin/bazel /usr/local/bin/oxfuzz-bazel-compdb \
     && python3 -m py_compile /usr/local/bin/oxfuzz-bazel-compdb \
     && rm -rf /usr/local/bin/__pycache__
+
+# --- Image 0.2.4 additions: licence notices. Appended last so the pinned
+# toolchains above keep their build cache. The notices file names every
+# component built from source or downloaded, its licence, and where its
+# corresponding source is. The package manifest lists the exact Ubuntu package
+# versions this build installed; their source packages are on the Ubuntu
+# archive under those versions, and ubuntu-snapshot.txt names the snapshot.ubuntu.com
+# timestamp to look them up at. The licence texts come from base-files.
+COPY docker/sandbox/NOTICES.md /usr/share/doc/oxfuzz-sandbox/NOTICES.md
+RUN mkdir -p /usr/share/doc/oxfuzz-sandbox/licenses \
+    && for text in GPL-2 GPL-3 LGPL-2.1 LGPL-3; do \
+         cp "/usr/share/common-licenses/${text}" "/usr/share/doc/oxfuzz-sandbox/licenses/${text}"; \
+       done \
+    && dpkg-query -W -f='${binary:Package}\t${Version}\t${source:Package}\t${source:Version}\n' \
+         > /usr/share/doc/oxfuzz-sandbox/packages.tsv \
+    && chmod 0644 /usr/share/doc/oxfuzz-sandbox/NOTICES.md /usr/share/doc/oxfuzz-sandbox/packages.tsv \
+    && test -s /usr/share/doc/oxfuzz-sandbox/NOTICES.md \
+    && test -s /usr/share/doc/oxfuzz-sandbox/packages.tsv \
+    && grep -Eqx '[0-9]{8}T[0-9]{6}Z' /usr/share/doc/oxfuzz-sandbox/ubuntu-snapshot.txt \
+    && test -s /usr/share/doc/oxfuzz-sandbox/licenses/LGPL-3

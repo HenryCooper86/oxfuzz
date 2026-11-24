@@ -1741,7 +1741,7 @@ mod staging_tests {
     fn comparison_context_rejects_non_digest_sandbox_identity() {
         let workspace = tempfile::tempdir().unwrap();
 
-        let error = run_context_digests(workspace.path(), "oxfuzz/fuzz-sandbox:0.2.3").unwrap_err();
+        let error = run_context_digests(workspace.path(), "oxfuzz/fuzz-sandbox:0.2.4").unwrap_err();
 
         assert!(error.to_string().contains("sandbox image digest"));
     }
