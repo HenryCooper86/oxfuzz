@@ -3000,7 +3000,8 @@ impl ServiceContainer {
         // Cross-line state for the streaming callback.
         let peak_edges = AtomicU64::new(0);
         let last_execs = AtomicU64::new(0);
-        let peak_crashes = AtomicU64::new(0);
+        let crash_tally =
+            std::sync::Mutex::new(hf_engine::progress::SyzkallerCrashTally::default());
         let exec_rate_state = std::sync::Mutex::new(CumulativeRate::default());
         #[cfg(feature = "campaign-health")]
         let campaign_telemetry = Arc::clone(&self.campaign_telemetry);
@@ -3010,18 +3011,24 @@ impl ServiceContainer {
             on_progress(progress);
         };
         let on_line = |line: &str| {
-            if let Some((cover, executed, crash_ct)) =
-                hf_engine::progress::parse_syzkaller_status(line)
-            {
+            // Crashes come from status-line counters (older managers) and from
+            // `VM <n>: crash:` reports (the bundled one); the tally merges them.
+            let observed = match crash_tally.lock() {
+                Ok(mut tally) => tally.observe(line),
+                Err(_) => hf_engine::progress::SyzkallerLine {
+                    status: hf_engine::progress::parse_syzkaller_status(line)
+                        .map(|(cover, executed, _)| (cover, executed)),
+                    new_crashes: 0,
+                },
+            };
+            if observed.new_crashes > 0 {
+                emit_progress(FuzzProgress::CrashesFound(
+                    u32::try_from(observed.new_crashes).unwrap_or(u32::MAX),
+                ));
+            }
+            if let Some((cover, executed)) = observed.status {
                 peak_edges.fetch_max(cover, Ordering::Relaxed);
                 last_execs.store(executed, Ordering::Relaxed);
-                let prev = peak_crashes.load(Ordering::Relaxed);
-                if crash_ct > prev {
-                    emit_progress(FuzzProgress::CrashesFound(
-                        u32::try_from(crash_ct - prev).unwrap_or(u32::MAX),
-                    ));
-                    peak_crashes.store(crash_ct, Ordering::Relaxed);
-                }
                 emit_progress(FuzzProgress::EdgesCovered(cover));
                 // syzkaller reports a cumulative execution count; convert it to a
                 // per-second rate before emitting on the rate channel so the
@@ -3195,7 +3202,7 @@ impl ServiceContainer {
             // rate is then claimed for the run.
             execs: exec_rate_state.lock().ok().and_then(|state| state.peak),
             execs_total: last_execs.load(Ordering::Relaxed),
-            crashes: peak_crashes.load(Ordering::Relaxed),
+            crashes: crash_tally.lock().map_or(0, |tally| tally.total()),
             exit_code: Some(result.exit_code),
             termination: Some(result.termination),
             run_id: Some(run_id),

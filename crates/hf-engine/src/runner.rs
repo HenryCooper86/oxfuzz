@@ -361,7 +361,7 @@ impl EngineRunner {
         // dedicated parsing rather than the generic per-line event extraction
         // (which would miscount each `crashes N` token as a fresh finding).
         let is_syzkaller = engine == EngineKind::Syzkaller;
-        let syz_crashes = std::sync::atomic::AtomicU64::new(0);
+        let syz_crashes = std::sync::Mutex::new(crate::progress::SyzkallerCrashTally::default());
         let aggregate = std::sync::Mutex::new(ProgressAggregate::default());
         let saw_line = std::sync::atomic::AtomicBool::new(false);
         let saw_completion = std::sync::atomic::AtomicBool::new(false);
@@ -385,19 +385,24 @@ impl EngineRunner {
                 on_progress(FuzzProgress::LogLine(line.to_owned()));
             }
             if is_syzkaller {
-                // Structured syzkaller progress comes only from status lines;
-                // emit coverage live and a crash event per newly-seen crash.
-                if let Some((cover, _executed, crashes)) =
-                    crate::progress::parse_syzkaller_status(line)
-                {
-                    if let Ok(mut aggregate) = aggregate.lock() {
-                        aggregate.observe_syzkaller(cover, crashes);
-                    }
+                // Structured syzkaller progress comes from status lines and
+                // crash reports; emit coverage live and a crash event per
+                // newly-seen crash.
+                let Ok(mut tally) = syz_crashes.lock() else {
+                    return;
+                };
+                let observed = tally.observe(line);
+                let total = tally.total();
+                drop(tally);
+                if let Ok(mut aggregate) = aggregate.lock() {
+                    aggregate
+                        .observe_syzkaller(observed.status.map_or(0, |(cover, _)| cover), total);
+                }
+                if let Some((cover, _executed)) = observed.status {
                     on_progress(FuzzProgress::EdgesCovered(cover));
-                    let prev = syz_crashes.swap(crashes, Relaxed);
-                    for _ in prev..crashes {
-                        on_progress(FuzzProgress::CrashesFound(1));
-                    }
+                }
+                for _ in 0..observed.new_crashes {
+                    on_progress(FuzzProgress::CrashesFound(1));
                 }
                 return;
             }

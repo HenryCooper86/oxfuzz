@@ -59,6 +59,72 @@ pub fn parse_syzkaller_status(line: &str) -> Option<(u64, u64, u64)> {
     Some((cover, executed, crashes))
 }
 
+/// Whether `line` is syz-manager's report of a crash it keeps.
+///
+/// The bundled manager logs each crash on its own line,
+/// `VM <n>: crash: <title><flags>`, and its status line carries no crash
+/// counter. A ` [suppressed]` flag marks a crash it discards, and
+/// `crash(tail<n>)` lines repeat a crash already reported; neither counts.
+#[must_use]
+pub fn is_syzkaller_crash_report(line: &str) -> bool {
+    let Some((head, title)) = line.split_once(": crash: ") else {
+        return false;
+    };
+    let Some((before, index)) = head.rsplit_once("VM ") else {
+        return false;
+    };
+    let title = title.trim_end();
+    !index.is_empty()
+        && index.bytes().all(|byte| byte.is_ascii_digit())
+        && (before.is_empty() || before.ends_with(char::is_whitespace))
+        && !title.is_empty()
+        && !title.ends_with("[suppressed]")
+}
+
+/// What one syz-manager output line contributes to a run's progress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyzkallerLine {
+    /// `(cover, executed)` when the line is a status line.
+    pub status: Option<(u64, u64)>,
+    /// Crashes this line adds to the run's total.
+    pub new_crashes: u64,
+}
+
+/// One syz-manager run's crash count.
+///
+/// Older managers print a cumulative `crashes N` counter on their status line;
+/// the bundled one reports each crash on its own line instead. The total is the
+/// larger of the two, so a manager that prints both is not counted twice.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SyzkallerCrashTally {
+    status_counter: u64,
+    reports: u64,
+}
+
+impl SyzkallerCrashTally {
+    /// The run's crash count so far.
+    #[must_use]
+    pub fn total(&self) -> u64 {
+        self.status_counter.max(self.reports)
+    }
+
+    /// Account for one output line.
+    pub fn observe(&mut self, line: &str) -> SyzkallerLine {
+        let before = self.total();
+        let status = parse_syzkaller_status(line).map(|(cover, executed, crashes)| {
+            self.status_counter = self.status_counter.max(crashes);
+            (cover, executed)
+        });
+        if status.is_none() && is_syzkaller_crash_report(line) {
+            self.reports += 1;
+        }
+        SyzkallerLine {
+            status,
+            new_crashes: self.total() - before,
+        }
+    }
+}
+
 /// Parse every progress event present in a single line.
 ///
 /// Unlike [`parse_progress_line`] (which returns the first match), a libFuzzer
@@ -738,6 +804,75 @@ mod tests {
         ] {
             assert_eq!(parse_syzkaller_status(line), None, "{line}");
         }
+    }
+
+    // Lines below are verbatim from the 2026-11-24 KVM campaign log
+    // (syz-manager 27a8bd60, `syz-manager/manager.go:708`).
+    const SYZ_CRASH: &str = "2026/11/24 08:02:29 VM 0: crash: SYZFAIL: posix_spawnp failed";
+    const SYZ_STATUS: &str = "2026/11/24 08:04:14 candidates=0 corpus=4826 coverage=59982 exec total=143404 (81/sec) pending=0 reproducing=1";
+
+    #[test]
+    fn recognises_a_syz_manager_crash_report() {
+        use super::is_syzkaller_crash_report;
+        assert!(is_syzkaller_crash_report(SYZ_CRASH));
+        assert!(is_syzkaller_crash_report(
+            "VM 12: crash: KASAN: use-after-free Read in foo [corrupted]"
+        ));
+    }
+
+    #[test]
+    fn suppressed_tail_and_unrelated_lines_are_not_crash_reports() {
+        use super::is_syzkaller_crash_report;
+        for line in [
+            "2026/11/24 08:02:29 VM 0: crash: lost connection to test machine [suppressed]",
+            "2026/11/24 08:02:29 VM 0: crash(tail0): SYZFAIL: posix_spawnp failed",
+            "2026/11/24 08:02:29 start reproducing 'SYZFAIL: posix_spawnp failed'",
+            "2026/11/24 08:04:43 repro finished 'SYZFAIL: posix_spawnp failed', repro=false",
+            "2026/11/24 08:02:29 VM 0: crash: ",
+            "2026/11/24 08:02:29 VM x: crash: title",
+            "2026/11/24 08:02:29 NVM 0: crash: title",
+            "2026/11/24 08:02:29 failed to save the crash: disk full",
+            SYZ_STATUS,
+        ] {
+            assert!(!is_syzkaller_crash_report(line), "{line}");
+        }
+    }
+
+    #[test]
+    fn the_tally_counts_crash_reports_from_a_manager_without_a_crash_counter() {
+        use super::SyzkallerCrashTally;
+        let mut tally = SyzkallerCrashTally::default();
+        let status = tally.observe(SYZ_STATUS);
+        assert_eq!(status.status, Some((59982, 143_404)));
+        assert_eq!(status.new_crashes, 0);
+        assert_eq!(tally.observe(SYZ_CRASH).new_crashes, 1);
+        assert_eq!(
+            tally
+                .observe("VM 0: crash(tail0): SYZFAIL: posix_spawnp failed")
+                .new_crashes,
+            0
+        );
+        assert_eq!(tally.observe(SYZ_STATUS).new_crashes, 0);
+        assert_eq!(tally.observe("VM 1: crash: WARNING in bar").new_crashes, 1);
+        assert_eq!(tally.total(), 2);
+    }
+
+    #[test]
+    fn the_tally_does_not_double_count_a_manager_that_reports_both_ways() {
+        use super::SyzkallerCrashTally;
+        let mut tally = SyzkallerCrashTally::default();
+        assert_eq!(tally.observe("VM 0: crash: WARNING in foo").new_crashes, 1);
+        let status = tally.observe("VMs 2, executed 100, cover 50, signal 40, crashes 1, repro 0");
+        assert_eq!(status.status, Some((50, 100)));
+        assert_eq!(status.new_crashes, 0, "the counter repeats the report");
+        assert_eq!(
+            tally
+                .observe("VMs 2, executed 200, cover 60, signal 40, crashes 3, repro 0")
+                .new_crashes,
+            2
+        );
+        assert_eq!(tally.observe("VM 1: crash: WARNING in bar").new_crashes, 0);
+        assert_eq!(tally.total(), 3);
     }
 
     #[test]
