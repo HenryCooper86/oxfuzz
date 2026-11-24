@@ -720,22 +720,24 @@ pub(crate) fn project_workspace_dir_at(root: &Path, project: &Path) -> PathBuf {
 }
 
 /// Whether the in-container qemu for a syzkaller run can use KVM hardware
-/// acceleration. Requires a Linux host with `/dev/kvm`, and that the sandbox
-/// arch matches the host arch (KVM cannot accelerate a foreign architecture).
-/// On macOS/Windows the Docker VM does not expose nested KVM, so this is always
-/// false and qemu falls back to slow TCG emulation.
+/// acceleration. Requires a Linux host whose `/dev/kvm` is a character device
+/// node, and that the sandbox arch matches the host arch. On macOS/Windows
+/// the Docker VM does not expose nested KVM, so this is always false and qemu
+/// falls back to slow TCG emulation. The same host check gates the device in
+/// the runtime, so the two cannot disagree.
 fn syz_kvm_usable(platform: &str) -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        hf_runtime::norm_platform(platform)
-            .is_some_and(|normalized| normalized == hf_runtime::host_platform())
-            && Path::new("/dev/kvm").exists()
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = platform;
-        false
-    }
+    kvm_accelerates(
+        platform,
+        &hf_runtime::host_platform(),
+        hf_runtime::host_kvm_available(),
+    )
+}
+
+/// KVM accelerates only a guest of the host's own architecture, and only when
+/// the host can pass the device node.
+fn kvm_accelerates(platform: &str, host_platform: &str, host_kvm: bool) -> bool {
+    host_kvm
+        && hf_runtime::norm_platform(platform).is_some_and(|normalized| normalized == host_platform)
 }
 
 /// The `docker` argv for the sandbox image build, extracted so the exact
@@ -2725,18 +2727,43 @@ pub struct SyzkallerSummary {
 /// requested budget with a graceful `TERM`, then `--kill-after` force-kills a
 /// syz-manager that ignores it -- both before the sandbox teardown backstop, so
 /// a hung manager cannot trip the outer Docker deadline and discard the summary.
+/// Fixed launch script for syz-manager. Every value arrives as a positional
+/// parameter, never as script text: `$1` manager config, `$2` duration, `$3`
+/// kill-after grace, `$4` staged SSH key, `$5` private key directory, `$6`
+/// workdir, `$7` scratch.
+///
+/// On a Linux host the container's root user owns none of the staged files
+/// and holds no capability to bypass their modes. syz-manager refuses a key
+/// with group or other bits, so the script makes a private copy inside the
+/// container. Output it writes is root-owned on the host; the closing
+/// `chmod` lets the service, running as the host user, retain and remove it.
+/// The manager's exit status (124 when the campaign timer ends it) is kept.
+const SYZKALLER_LAUNCH_SCRIPT: &str = r#"umask 000
+if [ -f "$4" ]; then
+  mkdir -p -m 0700 "$5" && cp "$4" "$5/id_rsa" && chmod 0600 "$5/id_rsa" || exit 125
+fi
+timeout --signal=TERM --kill-after="$3" "$2" syz-manager -config="$1"
+status=$?
+chmod -R a+rwX "$6" "$7" 2>/dev/null
+exit "$status""#;
+
 fn syzkaller_manager_command(
     manager_cfg: &str,
     duration_secs: u64,
     kill_after_secs: u64,
 ) -> Vec<String> {
     vec![
-        "timeout".to_owned(),
-        "--signal=TERM".to_owned(),
-        format!("--kill-after={kill_after_secs}"),
+        "sh".to_owned(),
+        "-c".to_owned(),
+        SYZKALLER_LAUNCH_SCRIPT.to_owned(),
+        "sh".to_owned(),
+        manager_cfg.to_owned(),
         duration_secs.to_string(),
-        "syz-manager".to_owned(),
-        format!("-config={manager_cfg}"),
+        kill_after_secs.to_string(),
+        crate::syzkaller::CONTAINER_STAGED_SSH_KEY.to_owned(),
+        crate::syzkaller::CONTAINER_SSH_KEY_DIR.to_owned(),
+        crate::syzkaller::CONTAINER_WORKDIR.to_owned(),
+        crate::syzkaller::CONTAINER_SCRATCH.to_owned(),
     ]
 }
 
@@ -3536,18 +3563,120 @@ mod syzkaller_command_tests {
         let path = "/tmp/manager;touch /work/pwn.cfg";
         let command = syzkaller_manager_command(path, 90, 30);
 
+        assert_eq!(&command[..2], ["sh", "-c"]);
+        assert!(!command[2].contains(path), "the script is fixed text");
         assert_eq!(
-            command,
-            vec![
-                "timeout",
+            &command[3..],
+            [
+                "sh",
+                path,
+                "90",
+                "30",
+                "/syzbench/inputs/id_rsa",
+                "/syzbench/key",
+                "/syzbench/workdir",
+                "/syzbench/scratch",
+            ]
+        );
+    }
+
+    /// Run the wrapper with a stand-in `timeout` that records its arguments,
+    /// leaves root-style private output in the workdir, and exits `status`.
+    #[cfg(unix)]
+    fn run_wrapper(root: &std::path::Path, config: &str, with_key: bool, status: i32) -> i32 {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let bin = root.join("bin");
+        let workdir = root.join("workdir");
+        let scratch = root.join("scratch");
+        for directory in [&bin, &workdir, &scratch] {
+            std::fs::create_dir_all(directory).unwrap();
+        }
+        let key = root.join("inputs-id_rsa");
+        if with_key {
+            std::fs::write(&key, b"key-v1").unwrap();
+            std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o444)).unwrap();
+        }
+        let fake = bin.join("timeout");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$FAKE_ROOT/args\"\n\
+                 mkdir -m 0700 \"$FAKE_ROOT/workdir/crashes\"\n\
+                 echo log > \"$FAKE_ROOT/workdir/crashes/log\"\n\
+                 chmod 0600 \"$FAKE_ROOT/workdir/crashes/log\"\nexit {status}\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut command = syzkaller_manager_command(config, 90, 30);
+        command[7] = key.to_string_lossy().into_owned();
+        command[8] = root.join("key").to_string_lossy().into_owned();
+        command[9] = workdir.to_string_lossy().into_owned();
+        command[10] = scratch.to_string_lossy().into_owned();
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        std::process::Command::new(&command[0])
+            .args(&command[1..])
+            .env("PATH", path)
+            .env("FAKE_ROOT", root)
+            .status()
+            .unwrap()
+            .code()
+            .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wrapper_keeps_the_manager_status_and_leaves_output_removable() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let config = "/tmp/manager;touch pwn.cfg";
+
+        assert_eq!(run_wrapper(root.path(), config, true, 124), 124);
+
+        let args = std::fs::read_to_string(root.path().join("args")).unwrap();
+        assert_eq!(
+            args.lines().collect::<Vec<_>>(),
+            [
                 "--signal=TERM",
                 "--kill-after=30",
                 "90",
                 "syz-manager",
-                "-config=/tmp/manager;touch /work/pwn.cfg",
+                "-config=/tmp/manager;touch pwn.cfg",
             ]
         );
-        assert!(!command.iter().any(|arg| arg == "bash" || arg == "-c"));
+        assert!(!root.path().join("pwn.cfg").exists());
+        let mode =
+            |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        // syz-manager rejects a key readable by others, so the wrapper uses a
+        // private copy; the staged original stays readable for the copy.
+        let copied = root.path().join("key/id_rsa");
+        assert_eq!(std::fs::read(&copied).unwrap(), b"key-v1");
+        assert_eq!(mode(&copied), 0o600);
+        assert_eq!(mode(&root.path().join("key")), 0o700);
+        // Output the container user wrote privately is opened up so the
+        // service, which is not that user on a Linux host, can retain and
+        // remove it.
+        assert_eq!(mode(&root.path().join("workdir/crashes")), 0o777);
+        assert_eq!(mode(&root.path().join("workdir/crashes/log")), 0o666);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wrapper_runs_without_a_key_and_reports_a_failed_manager() {
+        let root = tempfile::tempdir().unwrap();
+
+        assert_eq!(
+            run_wrapper(root.path(), "/syzbench/inputs/manager.cfg", false, 1),
+            1
+        );
+        assert!(!root.path().join("key").exists());
     }
 }
 
@@ -3835,6 +3964,26 @@ mod sandbox_build_tests {
             error.to_string().contains("docker/sandbox/Dockerfile"),
             "{error}"
         );
+    }
+}
+
+#[cfg(test)]
+mod kvm_selection_tests {
+    use super::kvm_accelerates;
+
+    #[test]
+    fn kvm_accelerates_only_a_native_guest_on_a_host_with_the_device() {
+        assert!(kvm_accelerates("linux/amd64", "linux/amd64", true));
+        assert!(kvm_accelerates("x86_64", "linux/amd64", true));
+        assert!(
+            !kvm_accelerates("linux/amd64", "linux/amd64", false),
+            "no device node on the host"
+        );
+        assert!(
+            !kvm_accelerates("linux/arm64", "linux/amd64", true),
+            "KVM cannot run a foreign architecture"
+        );
+        assert!(!kvm_accelerates("riscv64", "linux/amd64", true));
     }
 }
 

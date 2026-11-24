@@ -14,9 +14,10 @@ pub mod process_env;
 
 pub use adapter::StubRuntime;
 pub use config::{
-    can_run_platform, docker_bin, docker_cli_present, docker_daemon_ready, host_platform,
-    image_present, norm_platform, platform_short, resolve_bin, sandbox_engine_probe,
-    sandbox_image_arch, sandbox_image_present, RuntimeConfig, SandboxEngines, SANDBOX_IMAGE,
+    can_run_platform, docker_bin, docker_cli_present, docker_daemon_ready, host_kvm_available,
+    host_platform, image_present, is_character_device, norm_platform, platform_short, resolve_bin,
+    sandbox_engine_probe, sandbox_image_arch, sandbox_image_present, RuntimeConfig, SandboxEngines,
+    KVM_DEVICE, SANDBOX_IMAGE,
 };
 pub use process_env::{
     is_sensitive_name, scrub, scrubbed_command, scrubbed_parent_env, scrubbed_tokio_command,

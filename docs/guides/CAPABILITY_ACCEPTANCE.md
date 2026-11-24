@@ -35,7 +35,7 @@ physical interfaces, and approved test destinations for external publication.
 | libFuzzer campaigns | Real fault rediscovery, cancellation, corpus growth, replay and minimization on pinned projects. |
 | AFL++ campaigns | Actual persistent-mode throughput and crash/queue ingestion; add/review intra-target worker configuration and compare multi-core efficiency with native AFL++. |
 | honggfuzz campaigns | Real wrapper compatibility, worker behavior, crash ingestion and reproducibility. |
-| syzkaller campaigns | Linux/KVM qualification, VM failure recovery, kernel reproduction and minimization. Not userspace parity. |
+| syzkaller campaigns | Linux/KVM throughput qualification beyond the two recorded 30-minute campaigns ([record](../acceptance/kernel-kvm-2026-11-24.md)), crash counting for the pinned syzkaller status format, VM failure recovery, kernel reproduction and minimization. Not userspace parity. |
 | Progress, cancellation, run ownership | Real per-run Stop latency and container cleanup under engine failure. |
 | Campaign Health and morning queue | Overnight soak with disk pressure, worker loss, restart and multiple campaigns. |
 | Scheduling and portfolio rotation | Multi-day timezone/restart tests with real worker lifecycle; acknowledgement does not establish orphan termination. |

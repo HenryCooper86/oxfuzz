@@ -689,7 +689,8 @@ impl DockerRuntime {
     ///
     /// # Errors
     /// Returns a sandbox error when a source escapes the approved workspace,
-    /// is not a regular file/directory, or the container target is unsafe.
+    /// is not a regular file/directory, or the container target is unsafe, or
+    /// when a device other than the host's own `/dev/kvm` node is requested.
     pub fn validate_sandbox_options(
         &self,
         opts: &hf_core::runtime::SandboxOptions,
@@ -720,6 +721,23 @@ impl DockerRuntime {
             return Err(ClassifiedError::Sandbox(
                 "host-network raw-socket execution requires a direct immutable image id".to_owned(),
             ));
+        }
+        // A passed device is host access the container keeps for its whole
+        // life, so the runtime admits exactly one, KVM, and only when this
+        // host has the node. The value goes to `--device` unchanged, which is
+        // why a mapping or permission suffix is not accepted either.
+        for device in &opts.devices {
+            if device != crate::config::KVM_DEVICE {
+                return Err(ClassifiedError::Sandbox(format!(
+                    "sandbox device '{device}' is not permitted; only {} may be passed",
+                    crate::config::KVM_DEVICE
+                )));
+            }
+            if !crate::config::host_kvm_available() {
+                return Err(ClassifiedError::Sandbox(format!(
+                    "sandbox device {device} is not a character device on this host"
+                )));
+            }
         }
         if opts
             .stdin

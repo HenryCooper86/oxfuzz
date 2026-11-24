@@ -271,3 +271,58 @@ fn specialized_profile_rejects_pid_limit_outside_configured_ceiling() {
         ));
     }
 }
+
+#[test]
+fn sandbox_passes_through_no_host_device_but_kvm() {
+    let temp = tempfile::tempdir().expect("temp root");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let runtime = DockerRuntime::new(RuntimeConfig::default(), &workspace);
+
+    for device in [
+        "/dev/sda",
+        "/dev/mem",
+        "/dev/null",
+        "/dev/kvm:/dev/kvm:rwm",
+        "/dev/kvm:/dev/sda",
+        "/dev/../dev/kvm",
+        "/dev/kvm/",
+        "",
+    ] {
+        let options = SandboxOptions {
+            devices: vec![device.to_owned()],
+            ..SandboxOptions::default()
+        };
+
+        assert!(
+            matches!(
+                runtime.validate_sandbox_options(&options),
+                Err(ClassifiedError::Sandbox(message)) if message.contains("device")
+            ),
+            "the runtime accepted host device {device:?}"
+        );
+    }
+}
+
+#[test]
+fn sandbox_passes_kvm_only_when_the_host_has_the_device_node() {
+    let temp = tempfile::tempdir().expect("temp root");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let runtime = DockerRuntime::new(RuntimeConfig::default(), &workspace);
+    let options = SandboxOptions {
+        devices: vec![hf_runtime::KVM_DEVICE.to_owned()],
+        ..SandboxOptions::default()
+    };
+
+    let result = runtime.validate_sandbox_options(&options);
+
+    if hf_runtime::host_kvm_available() {
+        assert_eq!(result.unwrap().devices, [hf_runtime::KVM_DEVICE]);
+    } else {
+        assert!(
+            matches!(&result, Err(ClassifiedError::Sandbox(message)) if message.contains("/dev/kvm")),
+            "{result:?}"
+        );
+    }
+}

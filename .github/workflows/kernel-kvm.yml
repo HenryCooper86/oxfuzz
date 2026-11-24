@@ -1,0 +1,441 @@
+name: Kernel campaign with KVM
+
+# Records one syzkaller kernel campaign on an x86_64 Linux host with /dev/kvm,
+# started through the service operation that `oxfuzz kernel` and the desktop
+# app call (the ignored live test
+# live_syzkaller_boots_executes_programs_and_records_the_campaign) and run in
+# the hf-runtime Docker sandbox. docs/acceptance/kernel-kvm-2026-11-24.md is
+# the record of the first runs.
+#
+# What this is and is not:
+# - The kernel (Linux, KCOV and KASAN, the options of
+#   docs/guides/SYZKALLER_SETUP.md), the Debian rootfs with a per-run SSH key,
+#   and the sandbox image are all built here. Nothing is published, and the
+#   uploaded evidence holds no kernel, rootfs or key.
+# - No provider, model or secret is used. HF_AUTO_APPROVE is never set: the
+#   live test constructs the service without an approval handler, so the
+#   campaign is not put to a human; an operator run goes through the
+#   `oxfuzz kernel` approval.
+# - The sandbox profile is the service's own: /dev/kvm is the only device,
+#   all capabilities are dropped, no-new-privileges, no container network.
+#   The evidence records `docker inspect` of the campaign container.
+#
+# Manual. GitHub dispatches a workflow only from the default branch.
+
+on:
+  workflow_dispatch:
+    inputs:
+      campaign_seconds:
+        description: "Campaign length in seconds"
+        type: number
+        default: 1800
+
+concurrency:
+  group: kernel-kvm-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  # Same release as the emulated arm64 record (kernel-emulated-2026-11-22.md).
+  LINUX_VERSION: 6.12.118
+  # From https://cdn.kernel.org/pub/linux/kernel/v6.x/sha256sums.asc
+  LINUX_SHA256: 08308460320e852ac0745b2be3c7ae1cd81bdad713506ed7d817ba1ec9e1a5a5
+  # Bump when the kernel options below change, so the cached kernel is rebuilt.
+  KERNEL_RECIPE: x86_64-kcov-kasan-r1
+  # tools/create-image.sh at the syzkaller commit pinned in
+  # docker/sandbox/Dockerfile. A changed pin fails this check on purpose.
+  CREATE_IMAGE_SHA256: be1588c107f8fa096cdd8c81eefddc46d789ea83ab3f082ba1c5b89b4f2ddf34
+  ROOTFS_RELEASE: bookworm
+  SANDBOX_IMAGE: oxfuzz/fuzz-sandbox:0.2.4
+
+jobs:
+  kernel:
+    name: Build the x86_64 kernel
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - name: Restore a kernel built from the same recipe
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/kernel-out
+          key: kvm-kernel-${{ env.LINUX_VERSION }}-${{ env.KERNEL_RECIPE }}
+
+      - name: Build the kernel
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flex bison bc libelf-dev libssl-dev
+          build="$RUNNER_TEMP/kernel-build"
+          out="$RUNNER_TEMP/kernel-out"
+          mkdir -p "$build" "$out"
+          cd "$build"
+          curl -fsSL --retry 3 -o linux.tar.xz \
+            "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${LINUX_VERSION}.tar.xz"
+          echo "${LINUX_SHA256}  linux.tar.xz" | sha256sum -c -
+          tar -xf linux.tar.xz
+          cd "linux-${LINUX_VERSION}"
+          make defconfig
+          make kvm_guest.config
+          ./scripts/config \
+            -e CONFIG_KCOV \
+            -e CONFIG_KCOV_INSTRUMENT_ALL \
+            -e CONFIG_KCOV_ENABLE_COMPARISONS \
+            -e CONFIG_DEBUG_INFO_DWARF4 \
+            -e CONFIG_KASAN \
+            -e CONFIG_KASAN_INLINE \
+            -e CONFIG_CONFIGFS_FS \
+            -e CONFIG_SECURITYFS \
+            -e CONFIG_DEBUG_FS \
+            -e CONFIG_BINFMT_MISC \
+            -e CONFIG_NET_9P \
+            -e CONFIG_NET_9P_VIRTIO \
+            -e CONFIG_CMDLINE_BOOL
+          make olddefconfig
+          for option in KCOV KCOV_INSTRUMENT_ALL KCOV_ENABLE_COMPARISONS KASAN \
+            KASAN_INLINE CONFIGFS_FS SECURITYFS DEBUG_FS BINFMT_MISC KVM_GUEST; do
+            grep -qx "CONFIG_${option}=y" .config || { echo "CONFIG_${option} is not set" >&2; exit 1; }
+          done
+          started=$SECONDS
+          make -j"$(nproc)" bzImage
+          cp arch/x86/boot/bzImage "$out/bzImage"
+          cp .config "$out/kernel.config"
+          {
+            echo "linux_version=${LINUX_VERSION}"
+            echo "linux_tarball_sha256=${LINUX_SHA256}"
+            echo "kernel_recipe=${KERNEL_RECIPE}"
+            echo "bzImage_sha256=$(sha256sum "$out/bzImage" | cut -d' ' -f1)"
+            echo "kernel_config_sha256=$(sha256sum "$out/kernel.config" | cut -d' ' -f1)"
+            echo "compiler=$(gcc --version | head -n 1)"
+            echo "build_seconds=$((SECONDS - started))"
+            echo "build_cpus=$(nproc)"
+            echo "built_by_run=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "built_from_commit=${GITHUB_SHA}"
+            grep -E '^CONFIG_(DEBUG_INFO[A-Z0-9_]*|KASAN[A-Z_]*|KCOV[A-Z_]*)=' .config | sed 's/^/config: /'
+          } > "$out/identity.txt"
+          cat "$out/identity.txt"
+
+      - name: Save the kernel for the campaign job
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/kernel-out
+          key: kvm-kernel-${{ env.LINUX_VERSION }}-${{ env.KERNEL_RECIPE }}
+
+  campaign:
+    name: Campaign with /dev/kvm
+    needs: kernel
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      # ARTIFACTS holds the kernel, rootfs and SSH key and is never uploaded;
+      # EVIDENCE is the uploaded bundle.
+      - name: Host identity
+        run: |
+          set -euo pipefail
+          export ARTIFACTS="$RUNNER_TEMP/kernel-artifacts" EVIDENCE="$RUNNER_TEMP/evidence"
+          {
+            echo "ARTIFACTS=$ARTIFACTS"
+            echo "EVIDENCE=$EVIDENCE"
+          } >> "$GITHUB_ENV"
+          mkdir -p "$EVIDENCE" "$ARTIFACTS"
+          {
+            echo "commit=$(git rev-parse HEAD)"
+            echo "run=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID} attempt ${GITHUB_RUN_ATTEMPT}"
+            echo "runner_image=${ImageOS:-unknown} ${ImageVersion:-unknown}"
+            echo "host_kernel=$(uname -srm)"
+            . /etc/os-release && echo "host_os=${PRETTY_NAME}"
+            echo "cpu_model=$(grep -m1 '^model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//')"
+            echo "cpus=$(nproc)"
+            echo "virtualization_flag=$(grep -m1 -ow -E 'vmx|svm' /proc/cpuinfo || echo none)"
+            echo "memory_mib=$(free -m | awk '/^Mem:/ {print $2}')"
+            echo "docker=$(docker version --format '{{.Server.Version}}')"
+          } | tee "$EVIDENCE/host-identity.txt"
+
+      # Hosted runners have /dev/kvm owned by root:kvm with mode 0660. This
+      # rule only lets the runner user probe it from the host; the campaign
+      # container gets the node from the root Docker daemon.
+      - name: Enable KVM for the runner user
+        run: |
+          set -euo pipefail
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+
+      # KVM_GET_API_VERSION must return 12; KVM_CREATE_VM must return a VM fd.
+      - name: Prove /dev/kvm works on the host
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/kvm_probe.py" <<'EOF'
+          import fcntl
+          import os
+
+          fd = os.open("/dev/kvm", os.O_RDWR | os.O_CLOEXEC)
+          version = fcntl.ioctl(fd, 0xAE00)
+          vm = fcntl.ioctl(fd, 0xAE01, 0)
+          print(f"KVM_GET_API_VERSION={version} KVM_CREATE_VM_fd={vm}")
+          assert version == 12, version
+          assert vm >= 0, vm
+          EOF
+          python3 -I "$RUNNER_TEMP/kvm_probe.py" | tee "$EVIDENCE/kvm-host-probe.txt"
+
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL
+          docker system prune -af
+          df -h /
+
+      - name: Restore the kernel
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/kernel-out
+          key: kvm-kernel-${{ env.LINUX_VERSION }}-${{ env.KERNEL_RECIPE }}
+          fail-on-cache-miss: true
+
+      - name: Stage the kernel
+        run: |
+          set -euo pipefail
+          cp "$RUNNER_TEMP/kernel-out/bzImage" "$ARTIFACTS/bzImage"
+          cp "$RUNNER_TEMP/kernel-out/kernel.config" "$RUNNER_TEMP/kernel-out/identity.txt" "$EVIDENCE/"
+          mv "$EVIDENCE/identity.txt" "$EVIDENCE/kernel-identity.txt"
+          echo "bzImage_sha256_staged=$(sha256sum "$ARTIFACTS/bzImage" | cut -d' ' -f1)" \
+            | tee -a "$EVIDENCE/kernel-identity.txt"
+          grep -q "bzImage_sha256=$(sha256sum "$ARTIFACTS/bzImage" | cut -d' ' -f1)" "$EVIDENCE/kernel-identity.txt"
+
+      # syzkaller's own helper at the pinned commit. The SSH key is generated
+      # here for this run only and never leaves the runner.
+      - name: Build the Debian rootfs
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends debootstrap debian-archive-keyring
+          commit="$(grep -oE '^ARG SYZKALLER_COMMIT=[0-9a-f]{40}$' docker/sandbox/Dockerfile | cut -d= -f2)"
+          test -n "$commit"
+          build="$RUNNER_TEMP/rootfs-build"
+          mkdir -p "$build"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/create-image.sh" \
+            "https://raw.githubusercontent.com/google/syzkaller/${commit}/tools/create-image.sh"
+          echo "${CREATE_IMAGE_SHA256}  $RUNNER_TEMP/create-image.sh" | sha256sum -c -
+          cd "$build"
+          started=$SECONDS
+          bash "$RUNNER_TEMP/create-image.sh" --distribution "$ROOTFS_RELEASE" --output rootfs \
+            > "$RUNNER_TEMP/rootfs-build.log" 2>&1 || { tail -n 80 "$RUNNER_TEMP/rootfs-build.log"; exit 1; }
+          mv rootfs.img rootfs.id_rsa "$ARTIFACTS/"
+          rm -f rootfs.id_rsa.pub
+          sudo rm -rf rootfs
+          {
+            echo "release=${ROOTFS_RELEASE}"
+            echo "create_image_commit=${commit}"
+            echo "create_image_sha256=${CREATE_IMAGE_SHA256}"
+            echo "rootfs_bytes=$(stat -c %s "$ARTIFACTS/rootfs.img")"
+            echo "rootfs_sha256=$(sha256sum "$ARTIFACTS/rootfs.img" | cut -d' ' -f1)"
+            echo "build_seconds=$((SECONDS - started))"
+            echo "ssh_key=generated on the runner for this run; not uploaded"
+          } | tee "$EVIDENCE/rootfs-identity.txt"
+          tail -n 20 "$RUNNER_TEMP/rootfs-build.log"
+
+      # Run as root: the script's Semgrep check mounts a 0700 temporary
+      # directory that the container's root user, with every capability
+      # dropped, can write only when it owns the directory. Under the runner
+      # user (uid 1001) that check fails with "Permission denied" on native
+      # Linux Docker.
+      - name: Build and verify the sandbox image
+        run: |
+          sudo env OXFUZZ_SANDBOX_IMAGE="$SANDBOX_IMAGE" ./scripts/build-sandbox.sh 2>&1 \
+            | tee "$RUNNER_TEMP/image-build.log" | { grep -vE '^#[0-9]+ [0-9.]+ ' || true; }
+          test "${PIPESTATUS[0]}" -eq 0
+
+      # The same hardening as the campaign profile. The second probe has no
+      # device and must fail: the container gets KVM only when it is passed.
+      - name: Image identity and KVM inside the sandbox profile
+        run: |
+          set -euo pipefail
+          hardened=(--rm --network none --cap-drop ALL --security-opt no-new-privileges
+                    --mount "type=bind,src=$RUNNER_TEMP/kvm_probe.py,dst=/probe/kvm_probe.py,readonly")
+          {
+            echo "image=${SANDBOX_IMAGE}"
+            echo "image_id=$(docker image inspect --format '{{.Id}}' "$SANDBOX_IMAGE")"
+            echo "image_arch=$(docker image inspect --format '{{.Architecture}}' "$SANDBOX_IMAGE")"
+            echo "qemu=$(docker run "${hardened[@]}" "$SANDBOX_IMAGE" qemu-system-x86_64 --version | head -n 1)"
+            echo "syzkaller_commit=$(docker run "${hardened[@]}" "$SANDBOX_IMAGE" git -C /opt/syzkaller rev-parse HEAD)"
+            echo "container_user=$(docker run "${hardened[@]}" "$SANDBOX_IMAGE" id)"
+          } | tee "$EVIDENCE/image-identity.txt"
+          {
+            echo "with --device /dev/kvm:"
+            docker run "${hardened[@]}" --device /dev/kvm "$SANDBOX_IMAGE" \
+              bash -c 'ls -l /dev/kvm && python3 -I /probe/kvm_probe.py'
+            echo "without the device:"
+            if docker run "${hardened[@]}" "$SANDBOX_IMAGE" python3 -I /probe/kvm_probe.py 2>&1; then
+              echo "KVM was reachable without the device" >&2
+              exit 1
+            fi
+          } 2>&1 | tee "$EVIDENCE/kvm-container-probe.txt"
+          test "${PIPESTATUS[0]}" -eq 0
+
+      - name: Provision the pinned toolchain
+        run: rustup show active-toolchain
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build the live test
+        run: cargo test -p hf-service --lib --no-run
+
+      # The sandbox budget is the emulated record's (2 CPUs, 6,144 MiB, one
+      # guest), so the two records compare. The runner has 4 CPUs and 16 GiB.
+      - name: Campaign
+        id: campaign
+        env:
+          CAMPAIGN_SECONDS: ${{ inputs.campaign_seconds || 1800 }}
+        run: |
+          set -uo pipefail
+          config="$RUNNER_TEMP/oxfuzz-config"
+          export HF_CONFIG_DIR="$config"
+          export HF_APP_DIR="$RUNNER_TEMP/oxfuzz-app"
+          export TMPDIR="$RUNNER_TEMP/kernel-test-tmp"
+          export OXFUZZ_KERNEL_ARTIFACTS="$ARTIFACTS"
+          export OXFUZZ_KERNEL_SECONDS="$CAMPAIGN_SECONDS"
+          mkdir -p "$config" "$HF_APP_DIR" "$TMPDIR"
+          printf '[fuzzing.sandbox]\nmax_cpus = 2\nmax_mem_mb = 6144\nmax_duration_secs = 7200\n' \
+            > "$config/oxfuzz.toml"
+          cp "$config/oxfuzz.toml" "$EVIDENCE/oxfuzz.toml"
+
+          # Evidence sampler: the qemu command line and open KVM descriptors,
+          # the campaign container's security settings, the staged
+          # manager.cfg, and qemu's age every 30 s.
+          (
+            qemu_seen=0 container_seen=0 config_seen=0
+            while true; do
+              pid="$(pgrep -x qemu-system-x86 | head -n 1 || true)"
+              if [[ -n "$pid" ]]; then
+                echo "$(date -u +%FT%TZ) qemu pid=$pid age_s=$(ps -o etimes= -p "$pid" | tr -d ' ')" >> "$EVIDENCE/qemu-samples.log"
+                if (( ! qemu_seen )); then
+                  tr '\0' ' ' < "/proc/$pid/cmdline" > "$EVIDENCE/qemu-cmdline.txt" && echo >> "$EVIDENCE/qemu-cmdline.txt"
+                  sudo ls -l "/proc/$pid/fd" | grep -E 'kvm' > "$EVIDENCE/qemu-kvm-fds.txt" || true
+                  qemu_seen=1
+                fi
+              fi
+              if (( ! container_seen )); then
+                id="$(docker ps -q --filter "ancestor=$SANDBOX_IMAGE" | head -n 1)"
+                if [[ -n "$id" ]]; then
+                  docker inspect "$id" | jq '.[0] | {Name, Args: .Args, User: .Config.User,
+                    Privileged: .HostConfig.Privileged, CapAdd: .HostConfig.CapAdd,
+                    CapDrop: .HostConfig.CapDrop, SecurityOpt: .HostConfig.SecurityOpt,
+                    NetworkMode: .HostConfig.NetworkMode, Devices: .HostConfig.Devices,
+                    DeviceCgroupRules: .HostConfig.DeviceCgroupRules,
+                    Memory: .HostConfig.Memory, NanoCpus: .HostConfig.NanoCpus,
+                    PidsLimit: .HostConfig.PidsLimit,
+                    Mounts: [.Mounts[] | {Destination, RW}]}' > "$EVIDENCE/campaign-container.json" \
+                    && container_seen=1
+                fi
+              fi
+              if (( ! config_seen )); then
+                staged="$(find "$TMPDIR" -path '*/inputs/manager.cfg' -print -quit 2>/dev/null)"
+                if [[ -n "$staged" ]] && cp "$staged" "$EVIDENCE/manager.cfg"; then
+                  config_seen=1
+                fi
+              fi
+              sleep 30
+            done
+          ) &
+          sampler=$!
+
+          started=$SECONDS
+          cargo test -p hf-service --lib -- --ignored --nocapture --test-threads=1 \
+            live_syzkaller_boots_executes_programs_and_records_the_campaign 2>&1 \
+            | while IFS= read -r line; do printf '%(%FT%TZ)T +%ss %s\n' -1 "$((SECONDS - started))" "$line"; done \
+            | tee "$EVIDENCE/campaign.log"
+          status=${PIPESTATUS[0]}
+          kill "$sampler" 2>/dev/null || true
+          echo "test_exit=$status wall_seconds=$((SECONDS - started))" | tee "$EVIDENCE/campaign-exit.txt"
+          exit "$status"
+
+      # The same kernel and rootfs booted directly by qemu in the hardened
+      # sandbox profile, once with KVM and once under TCG, timed to systemd's
+      # multi-user target. The login prompt is not usable as the marker: it
+      # ends without a newline, and `docker logs` holds a partial line back.
+      # Diagnostic only.
+      - name: Boot-time comparison
+        if: ${{ !cancelled() && (steps.campaign.outcome == 'success' || steps.campaign.outcome == 'failure') }}
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          boot() {
+            local name=$1 accel=$2 cpu=$3 limit=$4
+            shift 4
+            docker rm -f "boot-$name" >/dev/null 2>&1 || true
+            docker run -d --name "boot-$name" --network none --cap-drop ALL \
+              --security-opt no-new-privileges --cpus 2 --memory 6144m --memory-swap 6144m "$@" \
+              --mount "type=bind,src=$ARTIFACTS/bzImage,dst=/a/bzImage,readonly" \
+              --mount "type=bind,src=$ARTIFACTS/rootfs.img,dst=/a/rootfs.img,readonly" \
+              "$SANDBOX_IMAGE" qemu-system-x86_64 -machine "pc,accel=$accel" -cpu "$cpu" \
+              -smp 2 -m 5632 -display none -serial stdio -no-reboot \
+              -kernel /a/bzImage -append "root=/dev/sda console=ttyS0 net.ifnames=0" \
+              -hda /a/rootfs.img -snapshot \
+              -netdev user,id=net0 -device e1000,netdev=net0 >/dev/null
+            local start=$SECONDS result="multi-user target not reached within ${limit} s"
+            while (( SECONDS - start < limit )); do
+              if docker logs "boot-$name" 2>&1 | grep -q 'Reached target.*Multi-User System'; then
+                result="multi-user target after $((SECONDS - start)) s wall time"
+                break
+              fi
+              if [[ "$(docker inspect -f '{{.State.Running}}' "boot-$name")" != true ]]; then
+                result="qemu exited after $((SECONDS - start)) s"
+                break
+              fi
+              sleep 1
+            done
+            docker logs "boot-$name" > "$EVIDENCE/boot-$name.log" 2>&1
+            docker rm -f "boot-$name" >/dev/null
+            local init
+            init="$(grep -m 1 -oE '^\[ *[0-9]+\.[0-9]+\] Run /sbin/init' "$EVIDENCE/boot-$name.log" || echo 'no init line')"
+            echo "$name (-machine pc,accel=$accel -cpu $cpu): $result; guest clock at init: $init" \
+              | tee -a "$EVIDENCE/boot-comparison.txt"
+          }
+          boot kvm kvm host 600 --device /dev/kvm
+          boot tcg tcg max 1500
+
+      - name: Summarize
+        if: ${{ always() }}
+        run: |
+          set -uo pipefail
+          log="$EVIDENCE/campaign.log"
+          test -f "$log" || exit 0
+          {
+            echo "first lines that mention the machine check:"
+            grep -m 3 -iE 'machine check' "$log" || true
+            echo "launch:"
+            grep -m 1 -E 'Launching syz-manager' "$log" || true
+            echo "first status line with a corpus entry:"
+            grep -m 1 -E ' corpus=[1-9]' "$log" || true
+            echo "last status line:"
+            grep -E 'exec total=[0-9]+' "$log" | tail -n 1 || true
+            echo "crashes reported by syz-manager:"
+            grep -E 'VM [0-9]+: crash: |repro finished' "$log" || true
+            echo "summary:"
+            grep -E 'summary: ' "$log" | tail -n 1 || true
+            echo "test result:"
+            grep -E '^.* test result: ' "$log" | tail -n 1 || true
+          } | tee "$EVIDENCE/campaign-summary.txt"
+          ( cd "$EVIDENCE" && sha256sum -- * > SHA256SUMS )
+          ls -l "$EVIDENCE"
+
+      # Evidence only: logs, configuration, identities and hashes. The kernel,
+      # the rootfs and its SSH key stay on the runner.
+      - name: Upload the evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-kvm-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/evidence
+          retention-days: 90
+          if-no-files-found: warn

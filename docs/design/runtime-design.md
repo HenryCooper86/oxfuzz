@@ -133,6 +133,25 @@ but is not the lifecycle lock. An absent root is a successful no-op.
   cancels the campaign if combined scratch/workdir growth exceeds 4 GiB, the
   tree exceeds 100,000 entries, or a symlink/special file appears.
 
+Host device passthrough (decided 2026-11-24). `SandboxOptions.devices` reaches
+`docker run --device` unchanged, so `DockerRuntime::validate_sandbox_options`
+admits exactly one value, `/dev/kvm`, and only when that path is itself a
+character device node on a Linux host (`hf_runtime::host_kvm_available`). Any
+other device, a `host:container[:permissions]` mapping, a symlink, or a host
+without the node fails closed with a sandbox error before Docker is called.
+The service asks for the device only for a syzkaller campaign whose sandbox
+platform is the host's own and uses the same host check, so the qemu
+arguments it writes (`accel=kvm -cpu host`) and the device the runtime passes
+cannot disagree. Passing the device adds no capability, keeps
+`--cap-drop=ALL`, `no-new-privileges`, `--network=none` and the staged mounts,
+and never uses `--privileged`. The container's user is the image's root,
+which owns the node inside the container, so no group is added either. The
+residual exposure is the host kernel's KVM interface, reachable by the
+untrusted guest kernel through qemu; that is the purpose of the device and is
+why it is limited to kernel campaigns. Rejected: `--privileged` or a device
+cgroup rule (both grant more than one node), and checking only that the path
+exists (a non-device path would reach Docker).
+
 Full fuzzer campaigns, smoke qualification, and engine-backed corpus operations
 receive their memory, CPU, and requested-duration limits from the validated
 service-owned fuzzing policy. Auxiliary operations may impose a stricter

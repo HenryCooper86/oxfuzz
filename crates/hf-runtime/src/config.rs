@@ -498,6 +498,37 @@ pub fn sandbox_engine_probe() -> SandboxEngines {
 // Platform normalisation helpers (shared by GUI and service layer)
 // ---------------------------------------------------------------------------
 
+/// The only host device node a sandbox may receive: KVM, so an in-container
+/// qemu can use hardware virtualization for a kernel campaign.
+pub const KVM_DEVICE: &str = "/dev/kvm";
+
+/// Whether `path` is itself a character device node on this host. A symlink,
+/// even one that resolves to a device, does not count: Docker would follow
+/// it and pass a different node than the one that was checked.
+#[must_use]
+pub fn is_character_device(path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        // A missing or unreadable node means the host cannot pass it; the
+        // error itself carries nothing the caller could act on.
+        std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_char_device())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+/// Whether this host can pass [`KVM_DEVICE`] to a container. Only a Linux
+/// host's own node qualifies: Docker on macOS and Windows runs its daemon in
+/// a VM that does not expose nested KVM.
+#[must_use]
+pub fn host_kvm_available() -> bool {
+    cfg!(target_os = "linux") && is_character_device(std::path::Path::new(KVM_DEVICE))
+}
+
 /// The host's native Docker platform, e.g. "linux/arm64".
 #[must_use]
 pub fn host_platform() -> String {
@@ -596,6 +627,25 @@ mod tests {
     use super::{engines_from_probe_output, run_bounded, SandboxEngines, SANDBOX_IMAGE};
     use hf_core::engine::EngineKind;
     use std::time::{Duration, Instant};
+
+    #[cfg(unix)]
+    #[test]
+    fn only_a_character_device_node_counts_as_a_host_device() {
+        use super::is_character_device;
+        use std::path::Path;
+
+        let temp = tempfile::tempdir().unwrap();
+        let regular = temp.path().join("kvm");
+        std::fs::write(&regular, b"").unwrap();
+        let link = temp.path().join("kvm-link");
+        std::os::unix::fs::symlink("/dev/null", &link).unwrap();
+
+        assert!(is_character_device(Path::new("/dev/null")));
+        assert!(!is_character_device(&regular), "a regular file");
+        assert!(!is_character_device(temp.path()), "a directory");
+        assert!(!is_character_device(&link), "a symlink to a device");
+        assert!(!is_character_device(&temp.path().join("missing")));
+    }
 
     // `run_bounded` is platform-agnostic, so these tests drive it with the
     // host's own shell rather than hardcoding /bin paths that do not exist on

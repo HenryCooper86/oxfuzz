@@ -15,7 +15,7 @@ driven by `syz-manager`, which needs three artifacts you provide:
 > accelerated VM. Under Docker on macOS there is no `/dev/kvm`, so qemu runs in
 > TCG emulation (correct but slow). Treat local runs as functional validation
 > (section 4.3 says what one looks like); run real campaigns on a Linux host
-> with KVM for throughput.
+> with KVM for throughput (section 4.4).
 
 ## 1. Prerequisites
 
@@ -172,7 +172,7 @@ The synthesized config looks like this (arm64 example):
   "http": "127.0.0.1:56741",
   "workdir": "/syzbench/workdir",
   "image": "/syzbench/scratch/rootfs.img",
-  "sshkey": "/syzbench/inputs/id_rsa",
+  "sshkey": "/syzbench/key/id_rsa",
   "syzkaller": "/opt/syzkaller",
   "procs": 2,
   "type": "qemu",
@@ -193,7 +193,7 @@ Container path mapping (set up automatically):
 | ------------------ | -------------------------------------- |
 | Kernel image       | `/syzbench/inputs/kernel` (read-only)  |
 | Rootfs disk copy   | `/syzbench/scratch/rootfs.img`         |
-| SSH key            | `/syzbench/inputs/id_rsa` (read-only)  |
+| SSH key            | `/syzbench/inputs/id_rsa` (read-only); syz-manager uses a private copy at `/syzbench/key/id_rsa` inside the container |
 | Manager config     | `/syzbench/inputs/manager.cfg` (read-only) |
 | syzkaller toolchain| `/opt/syzkaller`                       |
 | Working directory  | `/syzbench/workdir`                    |
@@ -247,6 +247,28 @@ recorded comparison it produced no coverage in a 30-minute campaign. If you
 supply your own config and want syzkaller's behavior, write `-accel tcg` in
 its `qemu_args` yourself; oxfuzz leaves it alone.
 
+### 4.4 Running with KVM
+
+On a Linux host whose `/dev/kvm` is a character device, with a sandbox
+Architecture equal to the host's, oxfuzz passes `/dev/kvm` into the campaign
+container and the synthesized config uses `accel=kvm` and `-cpu host`. The
+campaign log says "qemu uses KVM acceleration". Nothing else about the
+container changes: all capabilities stay dropped, `no-new-privileges` stays
+on, there is no container network, and `/dev/kvm` is the only device. The
+runtime refuses any other device. The Docker daemon passes the node, so the
+user who runs oxfuzz does not need to be in the `kvm` group; the user does
+need to run Docker (rootful Docker; rootless Docker was not tested).
+
+Recorded on two GitHub-hosted `ubuntu-24.04` runners (Linux 6.12 x86_64
+with KCOV and KASAN, one guest with two virtual CPUs and 5,632 MiB, the
+budget of section 4.3): syzkaller's machine check finished 32 and 51
+seconds after launch, coverage was reported within the next minute, and the
+30-minute campaigns executed 143,404 and 48,785 programs. The guest booted
+about eight times faster than under TCG on the same runner.
+`.github/workflows/kernel-kvm.yml` repeats the run on demand, and the
+[acceptance record](../acceptance/kernel-kvm-2026-11-24.md) has the
+identities and the evidence.
+
 ## 5. Watch progress
 
 `syz-manager` still creates its HTTP dashboard inside the container, but the
@@ -274,6 +296,10 @@ production campaigns.
   `eth0`, and without `net.ifnames=0` on the kernel command line udev renames
   the interface. The synthesized config passes that option; a config of your
   own needs `"cmdline": "net.ifnames=0"` in its `vm` section on arm64.
+- **`failed to read config file: ... permission denied`** — the campaign
+  container could not read its staged inputs. oxfuzz releases before
+  2026-11-24 staged them with owner-only modes, which the container's root
+  user cannot read on a native Linux Docker host; update oxfuzz.
 - **Extremely slow** — expected under TCG emulation on Docker-on-macOS (no
   `/dev/kvm`): see "Running without KVM" in section 4. Use a Linux host with
   KVM for real throughput.

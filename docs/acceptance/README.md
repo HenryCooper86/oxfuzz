@@ -50,6 +50,11 @@ passing libFuzzer, AFL++, and honggfuzz cycles on one clean candidate and image.
 The [2026-11-22 kernel record](kernel-emulated-2026-11-22.md) is a functional
 validation of a syzkaller campaign under emulation on macOS arm64, with its
 failed and withdrawn attempts; it is not a KVM or throughput record.
+The [2026-11-24 KVM kernel record](kernel-kvm-2026-11-24.md) is two
+30-minute syzkaller campaigns with `/dev/kvm` on hosted Linux x86_64
+runners, through the same service operation and sandbox, with its failed
+attempts; it is functional validation with KVM, not a throughput
+qualification.
 The [2026-11-22 Windows host record](windows-host-2026-11-22.md) is a partial
 run on a hosted Windows Server runner with a Linux engine in WSL 2: image
 build, isolation, source engines and a stopped and resumed AFL++ campaign

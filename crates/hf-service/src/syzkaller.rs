@@ -12,9 +12,15 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 const CONTAINER_INPUTS: &str = "/syzbench/inputs";
-const CONTAINER_SCRATCH: &str = "/syzbench/scratch";
-const CONTAINER_WORKDIR: &str = "/syzbench/workdir";
+pub(crate) const CONTAINER_SCRATCH: &str = "/syzbench/scratch";
+pub(crate) const CONTAINER_WORKDIR: &str = "/syzbench/workdir";
 pub(crate) const CONTAINER_MANAGER_CONFIG: &str = "/syzbench/inputs/manager.cfg";
+/// The staged SSH key, readable by the container user but too open for
+/// syz-manager, which rejects a key with any group or other permission bit.
+pub(crate) const CONTAINER_STAGED_SSH_KEY: &str = "/syzbench/inputs/id_rsa";
+/// Container-local directory (not a mount) where the launch wrapper places a
+/// private 0600 copy of the key; the manager config names that copy.
+pub(crate) const CONTAINER_SSH_KEY_DIR: &str = "/syzbench/key";
 const MAX_MANAGER_CONFIG_BYTES: u64 = 1024 * 1024;
 const MAX_KERNEL_IMAGE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub(crate) const MAX_SSH_KEY_BYTES: u64 = 1024 * 1024;
@@ -307,6 +313,16 @@ fn prepare_stage_contents(
     let inputs = ensure_child_directory(stage_root, "inputs", false)?;
     let scratch = ensure_child_directory(stage_root, "scratch", false)?;
     ensure_child_directory(stage_root, "workdir", false)?;
+    // Before anything is copied in, so the key is never exposed to other
+    // host users through a default-mode stage root.
+    set_stage_tree_permissions(stage_root).map_err(|error| {
+        input_error(
+            "set permissions on",
+            "staging directory",
+            stage_root,
+            &error,
+        )
+    })?;
 
     let supplied = request
         .manager_cfg
@@ -461,7 +477,7 @@ fn rewrite_manager_config(
     if has_key {
         root.insert(
             "sshkey".to_owned(),
-            json!(format!("{CONTAINER_INPUTS}/id_rsa")),
+            json!(format!("{CONTAINER_SSH_KEY_DIR}/id_rsa")),
         );
     } else {
         root.remove("sshkey");
@@ -803,7 +819,8 @@ fn is_managed_container_path(path: &Path) -> bool {
             || path == Path::new(CONTAINER_SCRATCH)
             || path.starts_with(CONTAINER_SCRATCH)
             || path == Path::new(CONTAINER_WORKDIR)
-            || path.starts_with(CONTAINER_WORKDIR))
+            || path.starts_with(CONTAINER_WORKDIR)
+            || path.starts_with(CONTAINER_SSH_KEY_DIR))
 }
 
 /// Verdict of one writable-tree budget scan.
@@ -1065,10 +1082,40 @@ fn input_error(
 fn set_staged_permissions(path: &Path, read_only: bool) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt as _;
 
+    // Readable (and for the rootfs copy writable) by any user: on a Linux host
+    // the container's root user owns none of these files and has no
+    // capability to bypass their modes. The 0700 stage root is what keeps
+    // other host users out.
     std::fs::set_permissions(
         path,
-        std::fs::Permissions::from_mode(if read_only { 0o400 } else { 0o600 }),
+        std::fs::Permissions::from_mode(if read_only { 0o444 } else { 0o666 }),
     )
+}
+
+/// Give the stage tree the modes the container user needs: the stage root
+/// private to the host user, `inputs` searchable, and the two writable
+/// mounts writable by the container user.
+#[cfg(unix)]
+fn set_stage_tree_permissions(stage_root: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    for (relative, mode) in [
+        ("", 0o700),
+        ("inputs", 0o755),
+        ("scratch", 0o777),
+        ("workdir", 0o777),
+    ] {
+        std::fs::set_permissions(
+            stage_root.join(relative),
+            std::fs::Permissions::from_mode(mode),
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_stage_tree_permissions(_stage_root: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 #[cfg(not(unix))]
@@ -1198,7 +1245,7 @@ mod tests {
         assert_eq!(staged["vm"]["count"], 1);
         assert_eq!(staged["vm"]["kernel"], "/syzbench/inputs/kernel");
         assert_eq!(staged["image"], "/syzbench/scratch/rootfs.img");
-        assert_eq!(staged["sshkey"], "/syzbench/inputs/id_rsa");
+        assert_eq!(staged["sshkey"], "/syzbench/key/id_rsa");
         assert_eq!(
             std::fs::read(stage.root.join("inputs/kernel")).unwrap(),
             b"kernel-v1"
@@ -1234,7 +1281,7 @@ mod tests {
         assert_eq!(staged["http"], "127.0.0.1:56741");
         assert_eq!(staged["workdir"], "/syzbench/workdir");
         assert_eq!(staged["image"], "/syzbench/scratch/rootfs.img");
-        assert_eq!(staged["sshkey"], "/syzbench/inputs/id_rsa");
+        assert_eq!(staged["sshkey"], "/syzbench/key/id_rsa");
         assert_eq!(staged["syzkaller"], "/opt/syzkaller");
         assert_eq!(staged["vm"]["kernel"], "/syzbench/inputs/kernel");
         let rendered = serde_json::to_string(&staged).unwrap();
@@ -1341,6 +1388,89 @@ mod tests {
         assert!(!serde_json::to_string(&staged)
             .unwrap()
             .contains(artifacts.path().to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn synthesized_amd64_config_uses_kvm_only_when_the_sandbox_passes_it() {
+        let workspace = tempfile::tempdir().unwrap();
+        let artifacts = tempfile::tempdir().unwrap();
+        write_artifacts(artifacts.path());
+        let staged_args = |use_kvm: bool| {
+            let stage = prepare_stage(&SyzkallerStageRequest {
+                workspace_root: workspace.path().to_path_buf(),
+                run_id: Uuid::new_v4(),
+                target_triple: "linux/amd64".to_owned(),
+                manager_cfg: None,
+                kernel_image: Some(artifacts.path().join("kernel")),
+                disk_image: Some(artifacts.path().join("rootfs.img")),
+                ssh_key: Some(artifacts.path().join("id_rsa")),
+                vm_count: Some(1),
+                use_kvm,
+                container_mem_mb: 6144,
+                max_cpus: 2,
+            })
+            .unwrap();
+            let staged: Value = serde_json::from_slice(
+                &std::fs::read(stage.root.join("inputs/manager.cfg")).unwrap(),
+            )
+            .unwrap();
+            staged["vm"]["qemu_args"].as_str().unwrap().to_owned()
+        };
+
+        assert_eq!(staged_args(true), "-machine pc,accel=kvm -cpu host");
+        // The emulated spelling stays a machine property, never `-accel tcg`.
+        assert_eq!(staged_args(false), "-machine pc,accel=tcg -cpu max");
+    }
+
+    /// On a Linux host the container's root user is not the owner of the
+    /// staged files and has no capability to bypass their modes, so access
+    /// comes from the mode bits; the 0700 stage root keeps other host users
+    /// out.
+    #[cfg(unix)]
+    #[test]
+    fn staged_tree_is_private_on_the_host_and_usable_by_the_container_user() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let artifacts = tempfile::tempdir().unwrap();
+        write_artifacts(artifacts.path());
+        let stage = prepare_stage(&SyzkallerStageRequest {
+            workspace_root: workspace.path().to_path_buf(),
+            run_id: Uuid::new_v4(),
+            target_triple: "linux/amd64".to_owned(),
+            manager_cfg: None,
+            kernel_image: Some(artifacts.path().join("kernel")),
+            disk_image: Some(artifacts.path().join("rootfs.img")),
+            ssh_key: Some(artifacts.path().join("id_rsa")),
+            vm_count: Some(1),
+            use_kvm: false,
+            container_mem_mb: 6144,
+            max_cpus: 2,
+        })
+        .unwrap();
+        let mode = |relative: &str| {
+            std::fs::metadata(stage.root.join(relative))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777
+        };
+
+        assert_eq!(mode(""), 0o700);
+        assert_eq!(mode("inputs"), 0o755);
+        for file in ["inputs/kernel", "inputs/id_rsa", "inputs/manager.cfg"] {
+            assert_eq!(mode(file), 0o444, "{file}");
+        }
+        assert_eq!(mode("scratch"), 0o777);
+        assert_eq!(mode("scratch/rootfs.img"), 0o666);
+        assert_eq!(mode("workdir"), 0o777);
+        let staged: Value =
+            serde_json::from_slice(&std::fs::read(stage.root.join("inputs/manager.cfg")).unwrap())
+                .unwrap();
+        assert_eq!(
+            staged["sshkey"], "/syzbench/key/id_rsa",
+            "syz-manager reads the private copy the launch wrapper makes"
+        );
     }
 
     #[test]

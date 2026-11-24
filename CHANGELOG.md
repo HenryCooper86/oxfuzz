@@ -10,6 +10,15 @@ retain only the current release; older entries remain here as the record.
 
 ## Unreleased
 
+### Added
+
+- Kernel campaigns: two 30-minute syzkaller campaigns with KVM are recorded on
+  hosted Linux x86_64 runners
+  ([record](docs/acceptance/kernel-kvm-2026-11-24.md)), and the manual
+  `Kernel campaign with KVM` workflow repeats it. The sandbox now accepts
+  `/dev/kvm` as its only passthrough device, and only when the host has it as a
+  character device; any other device request is refused before Docker runs.
+
 ### Changed
 
 - Sandbox image 0.2.4 (the next release expects it; 0.9.10 still uses 0.2.3).
@@ -31,6 +40,13 @@ retain only the current release; older entries remain here as the record.
   so support can come back.
 
 ### Fixed
+
+- Kernel campaigns on a Linux host with native Docker, with oxfuzz running as
+  a regular user: syz-manager could not read its staged configuration
+  (`permission denied`), so no campaign started.
+  The staged files are now readable by the container while the staging
+  directory stays private to your user, and campaign output is left removable
+  by your user.
 
 - Harness generation: a C or C++ draft that passes the raw fuzz input to a
   C-string API is now sent back for repair before it is built. The input has no

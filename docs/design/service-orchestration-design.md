@@ -507,7 +507,28 @@ parent-traversing config paths fail closed. The sandbox mounts the primary
 workspace and staged inputs read-only, exposes only the disposable rootfs
 directory and work directory as writable, disables container networking, keeps
 the standard capability and privilege hardening, and passes through only
-`/dev/kvm` when native KVM is available. Staging is removed when the service
+`/dev/kvm` when native KVM is available: a Linux host whose `/dev/kvm` is a
+character device node and a sandbox platform equal to the host's. The same
+condition writes `accel=kvm -cpu host` into a synthesized config; otherwise it
+writes `accel=tcg -cpu max` and rewrites a supplied config to match. The
+runtime independently refuses any other device (see the runtime design).
+
+The container runs as the image's root user with every capability dropped,
+so on a Linux host it owns none of the staged files and cannot bypass their
+modes (Docker Desktop and OrbStack hide this by mapping ownership). The stage
+root is therefore 0700 and owned by the host user, which keeps other host
+users out, while inside it `inputs` is 0755 with 0444 files, the rootfs copy
+is 0666, and `scratch` and `workdir` are 0777. syz-manager rejects an SSH key
+with any group or other bit, so a fixed launch script copies the staged key
+to a 0600 file in the container-local `/syzbench/key` and the rewritten
+config names that copy. The same script runs syz-manager under `timeout`,
+keeps its exit status, and on exit makes the root-owned workdir and scratch
+output readable and removable by the host user, so evidence retention and
+staging removal work. All values reach the script as positional parameters.
+A campaign removed with `docker rm -f` skips that last step and can leave
+root-owned files in the staging directory. Rejected: running the container as
+the host user (OpenSSH refuses to run for a user without a passwd entry, and
+`/dev/kvm` would need a supplementary group) and adding `CAP_DAC_OVERRIDE`. Staging is removed when the service
 call ends or is aborted. The rewritten config clamps both manager processes and
 VM count to a maximum of four, including values inherited from a supplied
 config.
