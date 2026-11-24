@@ -91,8 +91,6 @@ function requiredAssetNames(version) {
     `oxfuzz_${version}_amd64.AppImage`,
     `oxfuzz_${version}_amd64.deb`,
     `oxfuzz-${version}-1.x86_64.rpm`,
-    `oxfuzz_${version}_x64_en-US.msi`,
-    `oxfuzz_${version}_x64-setup.exe`,
   ];
 }
 

@@ -23,7 +23,7 @@ Please follow the [Code of Conduct](CODE_OF_CONDUCT.md). For questions, see
   Debian and Ubuntu. Any `--workspace` command builds that crate. If you are
   not working on the desktop app, scope commands to a package instead
   (`cargo build -p hf-cli`, `cargo test -p hf-engine`) and you do not need
-  those packages. macOS and Windows need nothing extra.
+  those packages. macOS needs nothing extra.
 - **Node 22 and npm** only if you change the desktop frontend in
   `crates/hf-gui`.
 - **Docker** only to run real harness builds and fuzzing campaigns. It is not
@@ -99,7 +99,8 @@ uses the gate definitions in `scripts/tests/gates.sh`: formatting, clippy with
 `-D warnings` across all targets and feature combinations, the full workspace
 tests, docs, dependency policy (`cargo deny`), a per-crate coverage baseline,
 script tests, and the frontend tests and lint, on Linux. It also runs
-`cargo check` and the tests on macOS and Windows. One aggregate check,
+`cargo check` and the tests on macOS and Windows (the Windows job keeps the code compiling and tested;
+no Windows package is shipped). One aggregate check,
 **All gates passed**, reports whether every job succeeded. If this is your
 first contribution, a maintainer may need
 to approve the workflow before it runs. See

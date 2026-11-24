@@ -325,7 +325,7 @@ in the same order, first match wins:
 3. the per-user config dir, when it already holds at least one live
    `<section>.toml` -- macOS `~/Library/Application Support/oxfuzz/config`,
    Linux `$XDG_DATA_HOME/oxfuzz/config` or `~/.local/share/oxfuzz/config`,
-   Windows `%APPDATA%\oxfuzz\config`. (A merely existing but empty directory
+   Windows (not supported for now) `%APPDATA%\oxfuzz\config`. (A merely existing but empty directory
    does not win: bootstrap creates it on every run, and an empty directory must
    not shadow a source checkout.)
 4. the nearest enclosing source tree containing both `Cargo.toml` and

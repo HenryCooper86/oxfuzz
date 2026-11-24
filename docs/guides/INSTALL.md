@@ -60,13 +60,14 @@ Prebuilt installers for each release are attached to the
 | macOS (Apple silicon) | `oxfuzz_*_aarch64.dmg` |
 | macOS (Intel) | `oxfuzz_*_x64.dmg` |
 | Linux | `oxfuzz_*.AppImage`, `.deb`, `.rpm` |
-| Windows | `oxfuzz_*.msi`, `*-setup.exe` |
 
 These builds have no organization-controlled code-signing identity. macOS
-bundles have an ad-hoc signature but are not notarized; Windows bundles are
-unsigned. The OS may warn on first launch -- see the release notes for the
+bundles have an ad-hoc signature but are not notarized. The OS may warn on first launch -- see the release notes for the
 per-platform steps. Docker must be installed and running before any fuzzing
 starts.
+
+Windows installers are not built or published for now. See the
+[support matrix](SUPPORT_MATRIX.md).
 
 Maintainers tag a reviewed release commit. Pushing the tag opens a draft and
 builds each platform. The publication job checks source CI for that exact

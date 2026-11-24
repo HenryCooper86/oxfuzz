@@ -20,7 +20,7 @@ resolves that directory in the same order:
 3. the per-user config dir, when it already holds config files
    (`~/Library/Application Support/oxfuzz/config` on macOS,
    `$XDG_DATA_HOME/oxfuzz/config` or `~/.local/share/oxfuzz/config` on Linux,
-   `%APPDATA%\oxfuzz\config` on Windows),
+   `%APPDATA%\oxfuzz\config` on Windows, which is not supported for now),
 4. the enclosing source tree's `config/`, found by walking up from the current
    directory (kept for development). A walk-up binding prints a one-line
    stderr warning naming the directory and the `HF_CONFIG_DIR` override, so

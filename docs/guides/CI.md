@@ -50,7 +50,7 @@ run in parallel:
 | Job | Runs |
 | --- | --- |
 | Rust gates (Linux) | `script-tests`, `translation-pairing`, `fmt`, `clippy`, `check`, `check-no-default-features`, `check-feature-matrix`, `test`, `feature-behavior`, `doc`, `performance` |
-| macOS tests, Windows tests | `check` and `test` |
+| macOS tests, Windows tests | `check` and `test` (the Windows job only keeps the code compiling and tested; no Windows package is shipped) |
 | Frontend gates | `frontend-test` (install, audit, tests, production build) and `frontend-lint` |
 | Dependency policy | `deny` |
 | Coverage report | `coverage`, with the per-crate JSON reports uploaded as an artifact |
@@ -90,12 +90,12 @@ changing a pin rather than trusting the value in git.
 
 ### Release workflow
 
-`release.yml` builds the Tauri desktop app for macOS (Apple silicon and Intel),
-Linux, and Windows when a `v*` tag is pushed. It first checks that the tag and
+`release.yml` builds the Tauri desktop app for macOS (Apple silicon and Intel)
+and Linux when a `v*` tag is pushed. It first checks that the tag and
 three version manifests agree, then opens a single draft and has each platform
 upload into it. Before publication, it waits for the latest push-triggered
 `ci.yml` run on the exact tag commit and requires its `All gates passed` job to
-succeed, including the Linux coverage baseline. It checks that all seven
+succeed, including the Linux coverage baseline. It checks that all five
 required installers are uploaded, nonempty, and have SHA-256 digests. It
 records the CI run and asset digests in the release body. It also requires the
 editable draft acceptance record to name reviewed evidence URLs and hashes for

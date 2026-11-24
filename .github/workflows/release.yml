@@ -2,8 +2,8 @@ name: Release desktop app
 
 # Builds the Tauri desktop app on each host OS and publishes the installers as a
 # GitHub Release. Tauri does not cross-compile: Linux bundles need WebKitGTK on
-# a Linux host and Windows bundles need the MSVC toolchain, so each platform
-# gets its own runner.
+# a Linux host, so each platform gets its own runner. Windows installers are
+# not built for now; see docs/guides/SUPPORT_MATRIX.md.
 #
 # Trigger by pushing a version tag:
 #   git tag v0.1.0 && git push origin v0.1.0
@@ -55,21 +55,17 @@ jobs:
             | macOS (Apple silicon) | `*_aarch64.dmg` |
             | macOS (Intel) | `*_x64.dmg` |
             | Linux | `*.AppImage`, `*.deb`, `*.rpm` |
-            | Windows | `*.msi`, `*-setup.exe` |
 
             ### These builds have no trusted code signature
 
             No organization code-signing certificates are configured. macOS
-            bundles have an ad-hoc signature but are not notarized; Windows
-            bundles are unsigned. The operating system may warn on first launch.
-            This is expected for these experimental builds and does not alone
+            bundles have an ad-hoc signature but are not notarized. The operating
+            system may warn on first launch. This is expected for these experimental builds and does not alone
             indicate that the download is corrupt.
 
             - **macOS**: Gatekeeper blocks the first run. Right-click the app and
               choose **Open**, then confirm. Alternatively:
               `xattr -cr /Applications/oxfuzz.app`
-            - **Windows**: SmartScreen shows a warning. Choose **More info**,
-              then **Run anyway**.
             - **Linux**: mark the AppImage executable with
               `chmod +x oxfuzz_*.AppImage` before running it.
 
@@ -79,12 +75,9 @@ jobs:
             Docker must be installed and running, and at least one LLM provider
             must be configured. See the Getting Started guide in the repository.
 
-            ### Known Windows limitations
+            ### Windows
 
-            Patch-to-Proof is unavailable on Windows in this release because
-            secure handle-relative reads of retained crash evidence are not yet
-            implemented. Use Patch-to-Proof on Linux or macOS; Windows fails
-            closed instead of using a path-reopen fallback.
+            Windows installers are not built or published for now.
         with:
           result-encoding: string
           script: |
@@ -133,10 +126,6 @@ jobs:
             # .deb and .AppImage, and a newer runner would narrow compatibility.
             platform: ubuntu-22.04
             rust_target: x86_64-unknown-linux-gnu
-            args: ""
-          - label: Windows (x86_64)
-            platform: windows-latest
-            rust_target: x86_64-pc-windows-msvc
             args: ""
 
     steps:

@@ -215,8 +215,8 @@ candidate commit.
 - Confirm the tag resolves to that commit and the draft release contains the
   acceptance record for the same candidate. The publish job's nonpublishing
   inspection writes a candidate-validation summary with the successful
-  required CI gate and SHA-256 digests for both macOS DMGs, Linux
-  AppImage/deb/rpm, and Windows MSI/EXE. The release workflow refuses
+  required CI gate and SHA-256 digests for both macOS DMGs and the Linux
+  AppImage/deb/rpm. Windows installers are not built or required. The release workflow refuses
   publication when this automated check fails.
 - Review the three live records required for a desktop release: userspace
   engine qualification, sandbox isolation, and installed-client acceptance.

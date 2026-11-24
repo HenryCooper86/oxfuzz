@@ -67,7 +67,7 @@ body:
     id: os
     attributes:
       label: Operating system and architecture
-      placeholder: macOS 15.4 arm64 / Ubuntu 24.04 x86_64 / Windows 11 x86_64
+      placeholder: macOS 15.4 arm64 / Ubuntu 24.04 x86_64
     validations:
       required: true
 

@@ -14,7 +14,7 @@
 [![CI](https://github.com/HenryCooper86/oxfuzz/actions/workflows/ci.yml/badge.svg)](https://github.com/HenryCooper86/oxfuzz/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust 1.94](https://img.shields.io/badge/rust-1.94-orange.svg)](rust-toolchain.toml)
-[![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-555.svg)](docs/guides/INSTALL.md)
+[![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux-555.svg)](docs/guides/INSTALL.md)
 
 [**官网**](https://oxfuzz.bionicloud.net) &middot; [**下载**](https://oxfuzz.bionicloud.net/#downloads) &middot; [**入门指南**](docs/guides/GETTING_STARTED.md) &middot; [**文档**](#documentation) &middot; [**参与贡献**](#contributing)
 
@@ -159,7 +159,7 @@ oxfuzz 驱动的是你早已信任的模糊测试器。引擎由你选择，其�
 | **计划化 campaign** | 无头、预算受限的模糊测试，按间隔/cron/一次性计划运行，在项目已提升的目标间轮换。 |
 | **问题与漏洞跟踪** | 将崩溃作为 GitHub/GitLab issue 提交，或作为 finding 推送到 DefectDojo；导出 SARIF 供代码扫描。 |
 | **保留的证据** | 运行历史、策略决策、报告、崩溃复现器、语料库、覆盖率与可导出的项目证据均保留可审。 |
-| **桌面、CLI 与 Web** | 适用于 macOS、Linux 与 Windows 的桌面应用（Tauri v2 + React），内置帮助指南；完整的 CLI/TUI；以及 REST + SSE API —— 全部构建在同一套服务核心之上。 |
+| **桌面、CLI 与 Web** | 适用于 macOS 与 Linux 的桌面应用（Tauri v2 + React），内置帮助指南；完整的 CLI/TUI；以及 REST + SSE API —— 全部构建在同一套服务核心之上。 |
 
 真实引擎运行和真实项目效果的结论需要单独验证。
 参见[手动资格验证](docs/guides/MANUAL_QUALIFICATION.md)和
@@ -173,9 +173,9 @@ oxfuzz 驱动的是你早已信任的模糊测试器。引擎由你选择，其�
 
 **桌面应用。** 从 **[oxfuzz.bionicloud.net](https://oxfuzz.bionicloud.net/#downloads)**
 或[最新的 GitHub release](https://github.com/HenryCooper86/oxfuzz/releases/latest)
-下载适用于 macOS、Linux 或 Windows 的安装包，用沙箱套件构建沙箱，在“设置”中添加模型服务，
+下载适用于 macOS 或 Linux 的安装包，用沙箱套件构建沙箱，在“设置”中添加模型服务，
 然后打开一个源码目录。需要 Docker。这是早期版本：macOS 安装包为临时签名且未经公证，
-Windows 安装包未签名，安装前系统可能会给出警告。
+安装前系统可能会给出警告。暂不支持 Windows。
 
 **从源码构建。** 命令行、桌面应用和沙箱镜像都可以从本仓库构建；见[安装与构建](docs/guides/INSTALL.md)。
 

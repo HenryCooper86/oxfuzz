@@ -48,7 +48,7 @@ physical interfaces, and approved test destinations for external publication.
 | Dictionaries and seed generation | Branch reach gained per model dollar versus static-only seeds/dictionaries. |
 | Concolic enrichment | Real solver output and incremental coverage on representative comparison barriers. |
 | Oracle Studio | Actual qualification and known property violations per kind, including state reset and false-positive controls. |
-| Change-aware comparisons and Patch-to-Proof | Real original/patch/reproducer chain; Windows and syzkaller unavailable for Patch-to-Proof. |
+| Change-aware comparisons and Patch-to-Proof | Real original/patch/reproducer chain; syzkaller unavailable for Patch-to-Proof; Windows is not supported. |
 | Run closeout and recovery | Real process interruption at each step, reliable re-opening and no repeated external side effects. |
 | Reports, SARIF and evidence exports | Clean recipient reproduces a selected finding using only the exported evidence and documented prerequisites. |
 | GitHub/GitLab and DefectDojo | Disposable integration-server workflows including retry, dedup, auth expiry and partial failure. |

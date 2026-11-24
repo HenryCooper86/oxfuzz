@@ -1,7 +1,10 @@
 # Qualifying a Windows host
 
-Windows installers ship, and the workspace compiles and passes its unit tests
-on Windows in CI. No reviewed Docker build, smoke run, campaign, Stop and
+**Windows is not supported for now, and Windows installers are not built or
+published.** The source paths, the Windows CI job and this procedure are kept
+so support can come back. The rest of this guide is unchanged.
+
+The workspace compiles and passes its unit tests on Windows in CI. No reviewed Docker build, smoke run, campaign, Stop and
 resume has been recorded on Windows 10 or 11, so the
 [support matrix](SUPPORT_MATRIX.md) makes no Windows campaign claim. This
 guide is the procedure that produces that record.

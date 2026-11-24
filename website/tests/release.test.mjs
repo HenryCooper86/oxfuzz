@@ -34,3 +34,12 @@ test("rejects duplicate assets", () => {
     validateRelease({ ...release(), assets: [asset, asset] }),
   );
 });
+test("rejects Windows installers, which are not shipped", () => {
+  for (const name of [
+    "oxfuzz_0.9.10_x64_en-US.msi",
+    "oxfuzz_0.9.10_x64-setup.exe",
+  ])
+    assert.throws(() =>
+      validateRelease({ ...release(), assets: [{ ...asset, name }] }),
+    );
+});

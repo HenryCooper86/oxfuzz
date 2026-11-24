@@ -31,18 +31,6 @@ export const packages = [
     format: "RPM",
   },
   {
-    name: `oxfuzz_${version}_x64_en-US.msi`,
-    platform: "Windows",
-    label: "Installer",
-    format: "MSI · x64",
-  },
-  {
-    name: `oxfuzz_${version}_x64-setup.exe`,
-    platform: "Windows",
-    label: "Setup",
-    format: "EXE · x64",
-  },
-  {
     name: `oxfuzz-sandbox-kit-${version}.tar.gz`,
     platform: "Sandbox",
     label: "Sandbox build kit",

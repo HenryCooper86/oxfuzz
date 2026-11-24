@@ -35,7 +35,7 @@ if (!preview) {
 }
 const dist = join(root, "dist");
 const template = await readFile(join(root, "src/index.html"), "utf8");
-const groups = ["macOS", "Linux", "Windows", "Sandbox"];
+const groups = ["macOS", "Linux", "Sandbox"];
 
 // A terminal recording is a transcript file: one "@seconds|kind|text" line per
 // printed line, with "#" comment lines for where it came from. The text is

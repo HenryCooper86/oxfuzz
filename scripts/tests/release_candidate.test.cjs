@@ -38,8 +38,6 @@ function assets() {
     `oxfuzz_${VERSION}_amd64.AppImage`,
     `oxfuzz_${VERSION}_amd64.deb`,
     `oxfuzz-${VERSION}-1.x86_64.rpm`,
-    `oxfuzz_${VERSION}_x64_en-US.msi`,
-    `oxfuzz_${VERSION}_x64-setup.exe`,
   ].map(name => ({ name, size: 123, state: 'uploaded', digest: DIGEST }));
 }
 
@@ -148,7 +146,7 @@ test('inspection returns a reviewable record without publishing', () => withCand
     attempts: 2, sleep: async () => {},
   });
   assert.equal(record.ciRunId, 7);
-  assert.equal(record.assets.length, 7);
+  assert.equal(record.assets.length, 5);
   assert.equal(record.acceptance.scope.length, 3);
   assert.equal(fake.updates.length, 0);
 }));
@@ -297,14 +295,24 @@ test('ignores CI results from another commit and pull requests', () => withCandi
 
 test('rejects a missing, empty, or unhashed installer', () => withCandidate(async root => {
   for (const releaseAssets of [
-    assets().filter(asset => !asset.name.endsWith('.msi')),
-    assets().map(asset => asset.name.endsWith('.msi') ? { ...asset, size: 0 } : asset),
-    assets().map(asset => asset.name.endsWith('.msi') ? { ...asset, digest: null } : asset),
+    assets().filter(asset => !asset.name.endsWith('.rpm')),
+    assets().map(asset => asset.name.endsWith('.rpm') ? { ...asset, size: 0 } : asset),
+    assets().map(asset => asset.name.endsWith('.rpm') ? { ...asset, digest: null } : asset),
   ]) {
     const fake = fakeGithub({ releaseAssets });
     await assert.rejects(run(root, fake), /asset|installer|digest/);
     assert.equal(fake.updates.length, 0);
   }
+}));
+
+test('does not require Windows installers', () => withCandidate(async root => {
+  assert.equal(assets().some(asset => /\.(msi|exe)$/.test(asset.name)), false);
+  const fake = fakeGithub();
+  const record = await inspectReleaseCandidate({
+    github: fake.github, context: context(), releaseId: 42, root,
+    attempts: 2, sleep: async () => {},
+  });
+  assert.equal(record.assets.some(asset => /\.(msi|exe)$/.test(asset.name)), false);
 }));
 
 test('GitHub API errors keep the release draft', () => withCandidate(async root => {

@@ -14,7 +14,7 @@ The open-source AI fuzzing agent for C, C++ and Rust.
 [![CI](https://github.com/HenryCooper86/oxfuzz/actions/workflows/ci.yml/badge.svg)](https://github.com/HenryCooper86/oxfuzz/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust 1.94](https://img.shields.io/badge/rust-1.94-orange.svg)](rust-toolchain.toml)
-[![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-555.svg)](docs/guides/INSTALL.md)
+[![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux-555.svg)](docs/guides/INSTALL.md)
 
 [**Website**](https://oxfuzz.bionicloud.net) &middot; [**Download**](https://oxfuzz.bionicloud.net/#downloads) &middot; [**Getting Started**](docs/guides/GETTING_STARTED.md) &middot; [**Documentation**](#documentation) &middot; [**Contribute**](#contributing)
 
@@ -173,7 +173,7 @@ Details are in the [Safety Model](docs/guides/SAFETY_MODEL.md).
 | **Scheduled Campaigns** | Headless, budget-bounded fuzzing on an interval/cron/once schedule, rotating through a project's promoted targets. |
 | **Issue & Vuln Tracking** | File crashes as GitHub/GitLab issues or push them to DefectDojo as findings; export SARIF for code scanning. |
 | **Retained Evidence** | Run history, policy decisions, reports, crash reproducers, corpora, coverage, and exportable project evidence remain available for review. |
-| **Desktop, CLI & Web** | A desktop app for macOS, Linux, and Windows (Tauri v2 + React) with a built-in Help guide, a full CLI/TUI, and a REST + SSE API -- all over the same service core. |
+| **Desktop, CLI & Web** | A desktop app for macOS and Linux (Tauri v2 + React) with a built-in Help guide, a full CLI/TUI, and a REST + SSE API -- all over the same service core. |
 
 Live engine and real-project effectiveness claims require separate qualification.
 See [manual qualification](docs/guides/MANUAL_QUALIFICATION.md) and
@@ -190,8 +190,8 @@ See [manual qualification](docs/guides/MANUAL_QUALIFICATION.md) and
 [latest GitHub release](https://github.com/HenryCooper86/oxfuzz/releases/latest),
 build the sandbox from the sandbox kit, add a model provider in Settings, and
 open a source folder. Docker is required. This is an early release: macOS
-packages are ad-hoc signed and not notarized, and Windows packages are
-unsigned, so your system may warn you before installing.
+packages are ad-hoc signed and not notarized, so your system may warn you
+before installing. Windows is not supported for now.
 
 **From source.** The CLI, the desktop app, and the sandbox image all build from
 this repository; see [Install & Build](docs/guides/INSTALL.md).

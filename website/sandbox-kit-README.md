@@ -6,9 +6,8 @@ Semgrep rules and license notices. Application source and credentials are not
 included. The Dockerfile downloads pinned upstream toolchain releases.
 
 Requirements: Docker with its daemon running, Bash, Python 3, internet access
-for the initial build, and several GB of free disk space. On Windows use a
-WSL 2 distribution integrated with Docker Desktop. The default build targets
-the Docker host architecture (Apple silicon/arm64 or x86_64).
+for the initial build, and several GB of free disk space. The default build
+targets the Docker host architecture (Apple silicon/arm64 or x86_64).
 
 Run from this directory:
 

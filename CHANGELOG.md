@@ -10,6 +10,13 @@ retain only the current release; older entries remain here as the record.
 
 ## Unreleased
 
+### Removed
+
+- Windows installers are no longer built or published, and the website and
+  release notes no longer offer them. Windows is unsupported for now. The
+  Windows source paths, the Windows CI job and the qualification guide stay,
+  so support can come back.
+
 ### Fixed
 
 - Harness generation: a C or C++ draft that passes the raw fuzz input to a

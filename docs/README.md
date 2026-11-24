@@ -48,7 +48,8 @@ the document that matches your task.
 - [Syzkaller Setup](guides/SYZKALLER_SETUP.md) covers the advanced kernel
   workflow and its stronger environment requirements.
 - [Qualifying a Windows Host](guides/WINDOWS_QUALIFICATION.md) is the
-  procedure for the Windows Docker record that does not exist yet.
+  procedure for the Windows Docker record that does not exist yet. Windows is
+  not supported for now.
 - [Screenshot Guide](screenshots/README.md) defines the reproducible image set,
   safety constraints, and privacy review.
 

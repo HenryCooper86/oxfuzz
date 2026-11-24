@@ -27,7 +27,7 @@ export const locales = {
     hero_download: "Download v{{VERSION}}",
     hero_source: "View the source on GitHub",
     hero_facts:
-      "Free under the MIT license. macOS, Linux and Windows. You approve every step.",
+      "Free under the MIT license. macOS and Linux. You approve every step.",
 
     fuzz_aria: "A finding oxfuzz produced, replayed step by step",
     fuzz_running: "fuzzing",
@@ -188,8 +188,6 @@ export const locales = {
       "Pick the package for your system. You also need Docker, and the sandbox kit to build the fuzzing environment.",
     dl_macos: "Apple silicon or Intel. Ad-hoc signed; not notarized.",
     dl_linux: "x86_64 desktop. Docker Engine required.",
-    dl_windows:
-      "64-bit Windows. Unsigned installers. Docker Desktop with WSL 2.",
     dl_sandbox:
       "Build the isolated engine environment locally. Docker required.",
     dl_sandbox_name: "Sandbox",
@@ -197,12 +195,12 @@ export const locales = {
     dl_preview:
       "Release verification is in progress. Downloads will be enabled after the checks finish.",
     dl_notice:
-      "This is an early release. macOS packages are ad-hoc signed and not notarized, and Windows packages are unsigned, so your system may warn you before installing. Only the macOS Apple silicon package is tested live for each release; the others are built and checked in CI.",
+      "This is an early release. macOS packages are ad-hoc signed and not notarized, so your system may warn you before installing. Windows is not supported for now. Only the macOS Apple silicon package is tested live for each release; the others are built and checked in CI.",
     setup_title: "Set up in three steps",
     setup_1:
-      "<strong>Install the app.</strong> On macOS, drag oxfuzz to Applications. On Linux, install the DEB or RPM, or make the AppImage executable. On Windows, run the installer.",
+      "<strong>Install the app.</strong> On macOS, drag oxfuzz to Applications. On Linux, install the DEB or RPM, or make the AppImage executable.",
     setup_2:
-      "<strong>Build the sandbox.</strong> Extract the sandbox kit and run the script below. It needs Bash, Python 3 and Docker (on Windows, a WSL 2 shell), and a few GB of disk space.",
+      "<strong>Build the sandbox.</strong> Extract the sandbox kit and run the script below. It needs Bash, Python 3 and Docker, and a few GB of disk space.",
     setup_3:
       "<strong>Add a model provider and open a project.</strong> Enter your provider in Settings, then open a source folder and follow the workflow.",
     setup_note:
@@ -247,7 +245,7 @@ export const locales = {
     hero_download: "下载 v{{VERSION}}",
     hero_source: "在 GitHub 查看源码",
     hero_facts:
-      "MIT 许可，免费使用。支持 macOS、Linux 和 Windows。每一步都由你批准。",
+      "MIT 许可，免费使用。支持 macOS 和 Linux。每一步都由你批准。",
 
     fuzz_aria: "oxfuzz 产出的一个发现，逐步重放",
     fuzz_running: "测试中",
@@ -407,19 +405,17 @@ export const locales = {
       "选择适合你系统的安装包。你还需要 Docker，以及用来构建测试环境的沙箱套件。",
     dl_macos: "Apple 芯片或 Intel。临时签名，未经公证。",
     dl_linux: "x86_64 桌面系统。需要 Docker Engine。",
-    dl_windows:
-      "64 位 Windows。安装包未签名。需要启用 WSL 2 的 Docker Desktop。",
     dl_sandbox: "在本机构建隔离的引擎环境。需要 Docker。",
     dl_sandbox_name: "沙箱",
     dl_unavailable: "候选版本，暂未提供",
     dl_preview: "发布验证正在进行，检查完成后将开放下载。",
     dl_notice:
-      "这是早期版本。macOS 安装包为临时签名且未经公证，Windows 安装包未签名，安装前系统可能会给出警告。每个版本只有 macOS Apple 芯片安装包做过实机测试，其余安装包在 CI 中构建并检查。",
+      "这是早期版本。macOS 安装包为临时签名且未经公证，安装前系统可能会给出警告。暂不支持 Windows。每个版本只有 macOS Apple 芯片安装包做过实机测试，其余安装包在 CI 中构建并检查。",
     setup_title: "三步完成安装",
     setup_1:
-      "<strong>安装应用。</strong>macOS：把 oxfuzz 拖进“应用程序”。Linux：安装 DEB 或 RPM，或给 AppImage 加上可执行权限。Windows：运行安装程序。",
+      "<strong>安装应用。</strong>macOS：把 oxfuzz 拖进“应用程序”。Linux：安装 DEB 或 RPM，或给 AppImage 加上可执行权限。",
     setup_2:
-      "<strong>构建沙箱。</strong>解压沙箱套件并运行下面的脚本。需要 Bash、Python 3 和 Docker（Windows 上请使用 WSL 2 终端），以及几个 GB 的磁盘空间。",
+      "<strong>构建沙箱。</strong>解压沙箱套件并运行下面的脚本。需要 Bash、Python 3 和 Docker，以及几个 GB 的磁盘空间。",
     setup_3:
       "<strong>添加模型服务并打开项目。</strong>在“设置”中填写模型服务，然后打开一个源码目录，按流程操作即可。",
     setup_note:
