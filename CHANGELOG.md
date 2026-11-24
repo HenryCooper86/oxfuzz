@@ -41,6 +41,15 @@ retain only the current release; older entries remain here as the record.
 
 ### Fixed
 
+- Kernel campaigns: crashes are now counted. The bundled syz-manager reports
+  each crash on its own `VM <n>: crash:` line and its status line has no crash
+  counter, so the live counter and the campaign summary always showed 0.
+  Suppressed crashes and repeated `crash(tail)` lines are not counted.
+- `./scripts/build-sandbox.sh` and `./scripts/test-semgrep-sandbox.sh` now work
+  for a normal user on native Linux Docker. The verification container could
+  not write its output there, because its root user has no capabilities and the
+  output directory belonged to the invoking user. Docker Desktop and OrbStack
+  hid this by mapping ownership.
 - Kernel campaigns on a Linux host with native Docker, with oxfuzz running as
   a regular user: syz-manager could not read its staged configuration
   (`permission denied`), so no campaign started.

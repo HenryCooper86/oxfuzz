@@ -57,12 +57,19 @@ cleanup() {
     rm -rf -- "$verification_output"
 }
 trap cleanup EXIT
+# The container's root user has every capability dropped, so on a native Linux
+# host it cannot write to a directory the invoking user owns (Docker Desktop
+# and OrbStack map ownership and hide this). Keep the private 0700 mktemp root
+# and give the container a world-writable directory inside it; other host
+# users still cannot reach it.
+verification_mount="${verification_output}/output"
+mkdir -m 0777 "$verification_mount"
 
 echo "Verifying the pinned sandbox toolchain ..."
 docker run "${run_args[@]}" \
     --tmpfs /tmp:rw,nosuid,nodev,size=64m \
     --mount "type=bind,src=$(host_path "${PWD}/docker/sandbox/semgrep/fixtures"),dst=/work/source,readonly" \
-    --mount "type=bind,src=$(host_path "$verification_output"),dst=/work/output" \
+    --mount "type=bind,src=$(host_path "$verification_mount"),dst=/work/output" \
     "$IMAGE" bash -lc '
         set -euo pipefail
         for binary in clang afl-fuzz afl-qemu-trace honggfuzz python3 java javac jazzer jazzer-js bazel oxfuzz-bazel-compdb syz-manager ssh scp qemu-system-aarch64 qemu-system-x86_64 casr-san casr-cluster cargo semgrep; do
@@ -103,7 +110,7 @@ docker run "${run_args[@]}" \
     '
 
 "$python_command" scripts/validate-semgrep-smoke.py \
-    "$(host_path "$verification_output/semgrep.json")" 67108864
+    "$(host_path "$verification_mount/semgrep.json")" 67108864
 
 echo "Verified offline read-only scan with read-only source and writable output"
 docker image inspect --format 'Verified {{.Id}} ({{.Architecture}})' "$IMAGE"

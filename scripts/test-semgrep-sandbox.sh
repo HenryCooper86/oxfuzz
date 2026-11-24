@@ -97,9 +97,15 @@ trap cleanup EXIT
 
 source_root="${verification_root}/source"
 output_root="${verification_root}/output"
-mkdir "$source_root" "$output_root"
+# The container's root user has every capability dropped, so on a native Linux
+# host it can only use what the permission bits allow. The verification root
+# stays private (0700); inside it the fixtures are world-readable and the
+# output directory is world-writable.
+mkdir -m 0755 "$source_root"
+mkdir -m 0777 "$output_root"
 cp docker/sandbox/semgrep/fixtures/vulnerable.c "$source_root/vulnerable.c"
 cp docker/sandbox/semgrep/fixtures/clean.c "$source_root/clean.c"
+chmod 0644 "$source_root/vulnerable.c" "$source_root/clean.c"
 
 docker_hardening=(
     --rm
