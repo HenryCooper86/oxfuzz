@@ -1,0 +1,29 @@
+WEBVTT
+
+1
+00:00:00.000 --> 00:00:05.000
+The Linux desktop app with the linux-kernel project open, on an x86_64 host with /dev/kvm.
+
+2
+00:00:05.000 --> 00:00:27.400
+Run view: engine syzkaller, the KCOV and KASAN kernel image, a Debian rootfs and its SSH key, one VM, 10 minutes (sped up 1.25x).
+
+3
+00:00:27.400 --> 00:00:41.400
+Launch Campaign: the sandbox gets /dev/kvm as its only device and qemu boots the guest with KVM (sped up 2x).
+
+4
+00:00:41.400 --> 00:01:00.000
+The 10-minute campaign, sped up 30x: coverage climbs as syzkaller executes programs in the guest.
+
+5
+00:01:00.000 --> 00:01:06.000
+The campaign ends when its 10-minute budget runs out (sped up 2x).
+
+6
+00:01:06.000 --> 00:01:18.000
+Result: 29,736 coverage edges and 17,129 executions; this run retained no crash.
+
+7
+00:01:18.000 --> 00:01:22.000
+The dashboard after the campaign.

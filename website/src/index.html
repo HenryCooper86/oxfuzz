@@ -21,7 +21,7 @@
       >
       <nav aria-label="{{nav_aria}}">
         <a href="#how">{{nav_how}}</a><a href="#engines">{{nav_engines}}</a
-        ><a href="#whats-new">{{nav_new}}</a
+        ><a href="#whats-new">{{nav_new}}</a><a href="#videos">{{nav_videos}}</a
         ><a href="#open-source">{{nav_contribute}}</a
         ><a href="#downloads">{{nav_download}}</a>
         <a
@@ -456,6 +456,117 @@ oxfuzz dict . --target parse --set http.dict</code></pre>
           </div>
         </div>
         <p class="also" data-reveal>{{new_status}}</p>
+      </section>
+
+      <section class="section wrap" id="videos">
+        <h2 data-reveal>{{videos_title}}</h2>
+        <p class="section-intro" data-reveal>{{videos_intro}}</p>
+        <div class="video-grid">
+          <figure class="video-card wide" data-reveal>
+            <video
+              controls
+              muted
+              playsinline
+              preload="none"
+              poster="/demos/kernel-kvm.jpg"
+              width="1440"
+              height="960"
+              aria-label="{{vid_kernel_title}}"
+            >
+              <source src="/demos/kernel-kvm.mp4" type="video/mp4" />
+              <track
+                kind="captions"
+                src="/demos/kernel-kvm.{{caption_lang}}.vtt"
+                srclang="{{caption_lang}}"
+                label="{{caption_label}}"
+                default
+              />
+            </video>
+            <figcaption>
+              <h3>{{vid_kernel_title}}</h3>
+              <p>{{vid_kernel_text}}</p>
+              <p class="video-meta">{{vid_kernel_meta}}</p>
+            </figcaption>
+          </figure>
+          <figure class="video-card" data-reveal>
+            <video
+              controls
+              muted
+              playsinline
+              preload="none"
+              poster="/demos/setup.jpg"
+              width="1440"
+              height="960"
+              aria-label="{{vid_setup_title}}"
+            >
+              <source src="/demos/setup.mp4" type="video/mp4" />
+              <track
+                kind="captions"
+                src="/demos/setup.{{caption_lang}}.vtt"
+                srclang="{{caption_lang}}"
+                label="{{caption_label}}"
+                default
+              />
+            </video>
+            <figcaption>
+              <h3>{{vid_setup_title}}</h3>
+              <p>{{vid_setup_text}}</p>
+              <p class="video-meta">{{vid_setup_meta}}</p>
+            </figcaption>
+          </figure>
+          <figure class="video-card" data-reveal>
+            <video
+              controls
+              muted
+              playsinline
+              preload="none"
+              poster="/demos/campaign.jpg"
+              width="1440"
+              height="960"
+              aria-label="{{vid_campaign_title}}"
+            >
+              <source src="/demos/campaign.mp4" type="video/mp4" />
+              <track
+                kind="captions"
+                src="/demos/campaign.{{caption_lang}}.vtt"
+                srclang="{{caption_lang}}"
+                label="{{caption_label}}"
+                default
+              />
+            </video>
+            <figcaption>
+              <h3>{{vid_campaign_title}}</h3>
+              <p>{{vid_campaign_text}}</p>
+              <p class="video-meta">{{vid_campaign_meta}}</p>
+            </figcaption>
+          </figure>
+          <figure class="video-card" data-reveal>
+            <video
+              controls
+              muted
+              playsinline
+              preload="none"
+              poster="/demos/binary.jpg"
+              width="1440"
+              height="960"
+              aria-label="{{vid_binary_title}}"
+            >
+              <source src="/demos/binary.mp4" type="video/mp4" />
+              <track
+                kind="captions"
+                src="/demos/binary.{{caption_lang}}.vtt"
+                srclang="{{caption_lang}}"
+                label="{{caption_label}}"
+                default
+              />
+            </video>
+            <figcaption>
+              <h3>{{vid_binary_title}}</h3>
+              <p>{{vid_binary_text}}</p>
+              <p class="video-meta">{{vid_binary_meta}}</p>
+            </figcaption>
+          </figure>
+        </div>
       </section>
 
       <section class="section wrap" id="control">

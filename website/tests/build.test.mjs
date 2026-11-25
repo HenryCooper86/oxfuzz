@@ -194,7 +194,11 @@ test("the page lists what is new and says the desktop packages carry it", async 
       );
       assert.ok(section, edition);
       assert.equal((section[0].match(/<h3>/g) ?? []).length, 6, edition);
-      for (const command of ["oxfuzz binary", "./scripts/pull-sandbox.sh", "/dev/kvm"])
+      for (const command of [
+        "oxfuzz binary",
+        "./scripts/pull-sandbox.sh",
+        "/dev/kvm",
+      ])
         assert.ok(section[0].includes(`<code>${command}</code>`), command);
       for (const path of [
         "/blob/main/CHANGELOG.md",
@@ -207,6 +211,88 @@ test("the page lists what is new and says the desktop packages carry it", async 
     }
     const english = await readFile(join(root, "dist/index.html"), "utf8");
     assert.match(english, /in the desktop packages below from v\d+\.\d+\.\d+/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the GUI demos show four captioned videos whose files exist", async () => {
+  const root = await previewBuild();
+  try {
+    for (const [edition, track] of [
+      ["dist/index.html", "en"],
+      ["dist/zh/index.html", "zh"],
+    ]) {
+      const html = await readFile(join(root, edition), "utf8");
+      assert.ok(html.includes('href="#videos"'), edition);
+      const section = html.match(/<section[^>]*id="videos"[\s\S]*?<\/section>/);
+      assert.ok(section, edition);
+      const videos = [...section[0].matchAll(/<video[\s\S]*?<\/video>/g)].map(
+        (m) => m[0],
+      );
+      const names = videos.map(
+        (v) => /src="\/demos\/([a-z0-9-]+)\.mp4"/.exec(v)?.[1],
+      );
+      assert.deepEqual(
+        names,
+        ["kernel-kvm", "setup", "campaign", "binary"],
+        edition,
+      );
+      for (const [index, video] of videos.entries()) {
+        const name = names[index];
+        assert.ok(video.includes(`poster="/demos/${name}.jpg"`), name);
+        assert.ok(video.includes(`src="/demos/${name}.${track}.vtt"`), name);
+        assert.ok(video.includes(`srclang="${track}"`), name);
+        assert.ok(
+          /preload="none"/.test(video) && /\bcontrols\b/.test(video),
+          name,
+        );
+        for (const file of [
+          `${name}.mp4`,
+          `${name}.jpg`,
+          `${name}.${track}.vtt`,
+        ])
+          assert.ok(
+            (await stat(join(root, "dist/demos", file))).size > 0,
+            file,
+          );
+        const captions = await readFile(
+          join(root, "dist/demos", `${name}.${track}.vtt`),
+          "utf8",
+        );
+        assert.ok(captions.startsWith("WEBVTT"), name);
+      }
+      // Every clip says where and when it was recorded.
+      assert.equal(
+        (section[0].match(/class="video-meta"/g) ?? []).length,
+        4,
+        edition,
+      );
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a demo file the page points at but the source lacks fails the build", async () => {
+  const root = await mkdtemp(join(tmpdir(), "oxfuzz-site-"));
+  try {
+    const source = fileURLToPath(new URL("..", import.meta.url));
+    for (const name of [
+      "build.mjs",
+      "release.mjs",
+      "locales.mjs",
+      "src",
+      "recordings",
+    ])
+      await cp(join(source, name), join(root, name), { recursive: true });
+    await rm(join(root, "src/demos/setup.zh.vtt"));
+    const result = spawnSync(process.execPath, [
+      join(root, "build.mjs"),
+      "--preview",
+    ]);
+    assert.notEqual(result.status, 0);
+    assert.match(String(result.stderr), /demos\/setup\.zh\.vtt/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

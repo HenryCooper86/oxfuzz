@@ -112,6 +112,14 @@ const editions = Object.entries(locales).map(([language, strings]) => ({
   path: language === "en" ? "index.html" : join(language, "index.html"),
   html: render(language, strings),
 }));
+// Every demo video, poster and caption file an edition points at must exist.
+for (const edition of editions)
+  for (const [, file] of edition.html.matchAll(/"\/demos\/([^"]+)"/g))
+    await stat(join(root, "src/demos", file)).catch(() => {
+      throw new Error(
+        `${edition.path} points at a missing demo file: demos/${file}`,
+      );
+    });
 // Validate every input before replacing the generated directory.
 await rm(dist, { recursive: true, force: true });
 await mkdir(dist, { recursive: true });

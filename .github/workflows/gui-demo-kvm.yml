@@ -231,6 +231,19 @@ jobs:
           ffmpeg -nostdin -loglevel error -f x11grab -framerate 15 -video_size 1280x880 -i "$DISPLAY" \
             -c:v libx264 -preset ultrafast -crf 20 -pix_fmt yuv420p "$DEMO/screen.mkv" &
           recorder=$!
+          # Evidence that the guest runs under KVM: qemu's command line and
+          # its open KVM descriptors, taken once qemu appears.
+          (
+            while true; do
+              pid="$(pgrep -x qemu-system-x86 | head -n 1 || true)"
+              if [[ -n "$pid" ]]; then
+                tr '\0' ' ' < "/proc/$pid/cmdline" > "$DEMO/qemu-cmdline.txt"
+                sudo ls -l "/proc/$pid/fd" | grep -E 'kvm' > "$DEMO/qemu-kvm-fds.txt" || true
+                break
+              fi
+              sleep 5
+            done
+          ) &
           # The step shell runs with -e; capture the driver's status so the
           # recorder is always stopped and its file finalized.
           status=0
@@ -251,7 +264,7 @@ jobs:
           find "$RUNNER_TEMP/oxfuzz-app" -maxdepth 3 -type d | head -50 > "$DEMO/app-dirs.txt"
           find "$RUNNER_TEMP/linux-kernel" -maxdepth 4 \( -name '*.log' -o -name 'manager.cfg' \) \
             -size -2M -exec cp --parents {} "$DEMO/" \; 2>/dev/null || true
-          grep -rhoE 'accel=(kvm|tcg)' "$DEMO" 2>/dev/null | sort | uniq -c | tee "$DEMO/accel.txt" || true
+          grep -hoE 'accel=(kvm|tcg)' "$DEMO/qemu-cmdline.txt" 2>/dev/null | tee "$DEMO/accel.txt" || true
 
       - name: Upload the recording
         if: always()

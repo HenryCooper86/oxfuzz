@@ -18,6 +18,7 @@ export const locales = {
     nav_how: "How it works",
     nav_engines: "Engines",
     nav_new: "What's new",
+    nav_videos: "Demos",
     nav_contribute: "Contribute",
     nav_download: "Download",
 
@@ -152,6 +153,38 @@ export const locales = {
       "A real session on a sample C program compiled without instrumentation. Pauses and long paths are shortened; every line is what the command printed.",
     term_python_caption:
       "A real session on a sample Python module. Pauses and long paths are shortened; every line is what the command printed.",
+    videos_title:
+      "See it in the desktop app",
+    videos_intro:
+      "Screen recordings of the released 0.9.11 desktop app, cut for length. Long waits are sped up and marked on screen; nothing else is changed. Captions explain each step.",
+    caption_lang:
+      "en",
+    caption_label:
+      "English",
+    vid_kernel_title:
+      "Kernel fuzzing with KVM",
+    vid_kernel_text:
+      "A syzkaller campaign started from the Run view of the Linux app: choose the kernel image, the Debian rootfs and its SSH key, approve, and the guest boots under KVM inside the sandbox, which gets /dev/kvm as its only device.",
+    vid_kernel_meta:
+      "Linux x86_64 GitHub-hosted runner with /dev/kvm, oxfuzz 0.9.11 (.deb), sandbox image 0.2.4, Linux 6.12.118 with KCOV and KASAN. Recorded 2026-11-25.",
+    vid_setup_title:
+      "First launch and sandbox check",
+    vid_setup_text:
+      "The setup screen finds the AI provider, checks Docker, the sandbox image and the four engines, then opens the fuzzing workflow.",
+    vid_setup_meta:
+      "macOS arm64, oxfuzz 0.9.11, sandbox image 0.2.4. Recorded 2026-11-25.",
+    vid_campaign_title:
+      "From source folder to triaged crash",
+    vid_campaign_text:
+      "Fuzz this project on a small C decoder with a planted bug: the AI drafts a harness, the sandbox smoke-tests it, a person approves it, a one-minute libFuzzer run finds the crash, and triage classifies it without an AI call.",
+    vid_campaign_meta:
+      "macOS arm64, oxfuzz 0.9.11, sandbox image 0.2.4, DeepSeek model, examples/utf8_decoder. Recorded 2026-11-25.",
+    vid_binary_title:
+      "Fuzzing a binary without its source",
+    vid_binary_text:
+      "AFL++ QEMU mode on an uninstrumented Linux ELF with a planted NULL read: one minute, one distinct crash confirmed by replay, its stack frames and an issue draft.",
+    vid_binary_meta:
+      "macOS arm64 host, linux/arm64 sandbox image 0.2.4, oxfuzz 0.9.11. Recorded 2026-11-25.",
     new_status:
       'These features are in the desktop packages below from v0.9.11. The <code>oxfuzz</code> command-line tool is not in those packages; <a href="https://github.com/HenryCooper86/oxfuzz/blob/main/docs/guides/INSTALL.md" rel="noopener">install it from source</a> at the v0.9.11 tag. The <a href="https://github.com/HenryCooper86/oxfuzz/blob/main/CHANGELOG.md" rel="noopener">changelog</a> lists every change.',
 
@@ -236,6 +269,7 @@ export const locales = {
     nav_how: "工作流程",
     nav_engines: "引擎",
     nav_new: "新功能",
+    nav_videos: "演示",
     nav_contribute: "参与贡献",
     nav_download: "下载",
 
@@ -369,6 +403,38 @@ export const locales = {
       "真实的运行过程，对象是一个未插桩编译的 C 示例程序。停顿和过长的路径做了缩短，每一行都是命令的原始输出。",
     term_python_caption:
       "真实的运行过程，对象是一个 Python 示例模块。停顿和过长的路径做了缩短，每一行都是命令的原始输出。",
+    videos_title:
+      "在桌面应用中观看",
+    videos_intro:
+      "以下是已发布的 0.9.11 桌面应用的录屏，仅为控制时长做了剪辑。较长的等待以加速播放，并在画面上标明；其余内容未作改动。字幕逐步说明操作。",
+    caption_lang:
+      "zh",
+    caption_label:
+      "中文",
+    vid_kernel_title:
+      "使用 KVM 的内核模糊测试",
+    vid_kernel_text:
+      "在 Linux 应用的“运行”视图中启动 syzkaller 任务：选择内核镜像、Debian rootfs 及其 SSH 密钥并批准，客户机即在沙箱内借助 KVM 启动；沙箱只获得 /dev/kvm 这一个设备。",
+    vid_kernel_meta:
+      "带 /dev/kvm 的 GitHub 托管 Linux x86_64 运行器，oxfuzz 0.9.11（.deb），沙箱镜像 0.2.4，启用 KCOV 和 KASAN 的 Linux 6.12.118。录制于 2026-11-25。",
+    vid_setup_title:
+      "首次启动与沙箱检查",
+    vid_setup_text:
+      "设置界面找到 AI 服务，检查 Docker、沙箱镜像和四个引擎，然后打开模糊测试工作流。",
+    vid_setup_meta:
+      "macOS arm64，oxfuzz 0.9.11，沙箱镜像 0.2.4。录制于 2026-11-25。",
+    vid_campaign_title:
+      "从源码目录到完成分诊的崩溃",
+    vid_campaign_text:
+      "对一个预埋缺陷的小型 C 解码器使用“一键模糊测试”：AI 起草 harness，沙箱进行冒烟测试，由人批准，一分钟的 libFuzzer 运行找到崩溃，分诊在不调用 AI 的情况下完成分类。",
+    vid_campaign_meta:
+      "macOS arm64，oxfuzz 0.9.11，沙箱镜像 0.2.4，DeepSeek 模型，examples/utf8_decoder。录制于 2026-11-25。",
+    vid_binary_title:
+      "在没有源码的情况下模糊测试二进制程序",
+    vid_binary_text:
+      "用 AFL++ QEMU 模式测试一个未插桩、预埋空指针读取缺陷的 Linux ELF：一分钟内得到一个经重放确认的独立崩溃，并给出调用栈和 issue 草稿。",
+    vid_binary_meta:
+      "macOS arm64 主机，linux/arm64 沙箱镜像 0.2.4，oxfuzz 0.9.11。录制于 2026-11-25。",
     new_status:
       '从 v0.9.11 起，下方的桌面安装包已包含这些功能。<code>oxfuzz</code> 命令行工具不在安装包内，请在 v0.9.11 标签处<a href="https://github.com/HenryCooper86/oxfuzz/blob/main/docs/guides/INSTALL.md" rel="noopener">从源码安装</a>。全部改动见<a href="https://github.com/HenryCooper86/oxfuzz/blob/main/CHANGELOG.md" rel="noopener">更新日志</a>。',
 

@@ -17,6 +17,18 @@ the numbers on the page are the ones that session produced. Retake them together
 if the app's look changes. Motion (`src/motion.js`) is skipped entirely when the
 visitor asks for reduced motion, and the recording is replaced by a still.
 
+The GUI demos in `src/demos/` are screen recordings of the released desktop app,
+cut by `scripts/demo/cut_demo.py` from an edit spec: segments kept in order,
+waits sped up with an on-screen "N x faster" badge, and one WebVTT file per
+language whose cues say what each segment shows. The macOS clips (setup,
+campaign, binary) were recorded on 2026-11-25 with an isolated copy of the app
+(its own bundle id, `HF_APP_DIR` and `HF_CONFIG_DIR`) on sample projects in
+`/Users/Shared/oxfuzz-demo`, so no personal paths or projects appear. The kernel
+clip comes from the manual `gui-demo-kvm.yml` workflow, which drives the Linux
+app on a KVM runner. Before publishing a retake, look at every frame of the cut
+for other windows, file pickers or paths that are not the sample's. The build
+fails if a page points at a demo file that `src/demos/` does not have.
+
 ```sh
 cd website
 npm test
