@@ -23,8 +23,10 @@ retain only the current release; older entries remain here as the record.
 
 ### Changed
 
-- Sandbox image 0.2.4 (the next release expects it; 0.9.10 still uses 0.2.3).
-  The toolchains are the same as 0.2.3. The image now carries its third-party
+- Sandbox image 0.2.4, which 0.9.11 expects (0.9.10 used 0.2.3). It is the
+  first image published for download, for linux/amd64 and linux/arm64, at
+  `ghcr.io/henrycooper86/oxfuzz-fuzz-sandbox:0.2.4`. The toolchains are the
+  same as 0.2.3. The image now carries its third-party
   licence notices, the GPL and LGPL texts and a list of the installed Ubuntu
   packages (`packages.tsv`) under `/usr/share/doc/oxfuzz-sandbox/`, plus OCI
   labels for source, description and licences. `ubuntu-snapshot.txt` there

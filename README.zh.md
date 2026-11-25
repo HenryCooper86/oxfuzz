@@ -173,7 +173,7 @@ oxfuzz 驱动的是你早已信任的模糊测试器。引擎由你选择，其�
 
 **桌面应用。** 从 **[oxfuzz.bionicloud.net](https://oxfuzz.bionicloud.net/#downloads)**
 或[最新的 GitHub release](https://github.com/HenryCooper86/oxfuzz/releases/latest)
-下载适用于 macOS 或 Linux 的安装包，用沙箱套件构建沙箱，在“设置”中添加模型服务，
+下载适用于 macOS 或 Linux 的安装包，用沙箱套件构建或拉取沙箱，在“设置”中添加模型服务，
 然后打开一个源码目录。需要 Docker。这是早期版本：macOS 安装包为临时签名且未经公证，
 安装前系统可能会给出警告。暂不支持 Windows。
 

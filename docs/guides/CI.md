@@ -109,8 +109,9 @@ git tag v0.1.0 && git push origin v0.1.0
 ### Other workflows
 
 - `performance.yml` is a manually dispatched diagnostic on `main` that records
-  release-profile measurements on Linux, macOS, and Windows runners. It is not
-  a merge gate.
+  release-profile measurements on Linux and macOS runners. It is not a merge
+  gate. Its Windows runner was removed with Windows support; the 2026-10-01
+  Windows record stays as history.
 - `fuzz.yml.example` is an opt-in fuzz-on-PR gate for the repository you want
   to fuzz. Copy it to `fuzz.yml` there, adjust the target, engine, and
   duration, and set the `HF_PROVIDER_API_KEY` repository secret. It builds

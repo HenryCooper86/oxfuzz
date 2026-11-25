@@ -34,7 +34,11 @@ which on Linux needs the WebKitGTK and related system packages listed in
 
 The sandbox image (`oxfuzz/fuzz-sandbox`) is normally built locally.
 `./scripts/pull-sandbox.sh` downloads a prebuilt copy instead when one has
-been published for your version, and otherwise tells you to build. The first
+been published for your version, and otherwise tells you to build. Prebuilt
+images for linux/amd64 and linux/arm64 are on
+`ghcr.io/henrycooper86/oxfuzz-fuzz-sandbox` from image 0.2.4 (oxfuzz 0.9.11)
+on; the third-party notices and license texts are inside the image under
+`/usr/share/doc/oxfuzz-sandbox/`. The first
 build compiles honggfuzz, syzkaller, SymCC,
 and the Rust fuzzing tools, so expect it to take a while and to use about 7 GB
 of disk. On Apple silicon it builds a native arm64 image; set

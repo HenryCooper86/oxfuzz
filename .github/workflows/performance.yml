@@ -23,8 +23,6 @@ jobs:
         include:
           - os: ubuntu-24.04
             runner: gha-linux-ubuntu24-x64-diagnostic
-          - os: windows-2025
-            runner: gha-windows2025-x64-diagnostic
           - os: macos-26
             runner: gha-macos26-arm64-diagnostic
     defaults:

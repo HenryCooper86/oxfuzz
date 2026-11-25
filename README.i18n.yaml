@@ -4,5 +4,5 @@
 #   scripts/verify_translation_pairing.py --write README.md
 # Re-recording is the reviewable act of confirming consistency, which is why it
 # names the pair rather than sweeping the repository.
-README.md: 16636ae19eeddb847be1fdd50f996c60910d9936
-README.zh.md: 70c9ff4a9ca8aa0332fb8c4ead7b0913bd5e9fc7
+README.md: aca729f08cf412b73db12bbc9c3af098af3ae403
+README.zh.md: 135d8974f7aff09e125dff67a9da3d5547dfb8cc

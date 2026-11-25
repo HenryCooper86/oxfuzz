@@ -4,10 +4,10 @@
 published, and CI no longer compiles or tests Windows.** The source paths and
 this procedure are kept so support can come back. The workflow that automated
 steps 2 and 3, `windows-qualification.yml`, was removed on 2026-11-24 and is in
-the history before that date. The rest of this guide is unchanged, so its
-statements about CI describe the state before that date.
+the history before that date.
 
-The workspace compiles and passes its unit tests on Windows in CI. No reviewed Docker build, smoke run, campaign, Stop and
+Until 2026-11-24 the workspace compiled and passed its unit tests on Windows in
+CI. No reviewed Docker build, smoke run, campaign, Stop and
 resume has been recorded on Windows 10 or 11, so the
 [support matrix](SUPPORT_MATRIX.md) makes no Windows campaign claim. This
 guide is the procedure that produces that record.
@@ -29,9 +29,10 @@ Treat each Windows-specific note below as a place to look, not as a known
 result, unless it names where it was seen. A failed step is a result too:
 record it.
 
-`.github/workflows/windows-qualification.yml` runs the image build and steps
-2 and 3 on a hosted runner. It is started by hand. It cannot run steps 4 and
-5, which need a provider and a human approval.
+Before its removal, `.github/workflows/windows-qualification.yml` ran the
+image build and steps 2 and 3 on a hosted runner when started by hand. It could
+not run steps 4 and 5, which need a provider and a human approval. To run steps
+2 and 3 again, restore it from the history or run the commands below by hand.
 
 ## What you need
 
@@ -83,8 +84,8 @@ Run every command from Git Bash in the repository root.
 scripts/tests/gates.sh check test
 ```
 
-This is what CI runs on `windows-latest`. It must pass before anything below
-means anything.
+CI ran this on `windows-latest` until 2026-11-24. It must pass before anything
+below means anything.
 
 ### 2. Sandbox isolation
 

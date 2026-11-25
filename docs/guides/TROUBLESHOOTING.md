@@ -519,13 +519,14 @@ when available. **Stop scan** waits for sandbox teardown and keeps completed
 findings; a stopped scan has not necessarily examined every input. Previously
 saved AI reports and confirmed minimization evidence survive a rescan.
 
-Rebuild the sandbox after upgrading to image `oxfuzz/fuzz-sandbox:0.2.3`:
+Rebuild (or pull) the sandbox if your image is older than
+`oxfuzz/fuzz-sandbox:0.2.3`:
 
 ```sh
 ./scripts/build-sandbox.sh
 ```
 
-This image fixes a GDB output-pipe deadlock in CASR's timeout handling. The
+Image 0.2.3 fixes a GDB output-pipe deadlock in CASR's timeout handling. The
 service also stages honggfuzz crash names in the format CASR accepts. Earlier
 versions could skip all honggfuzz inputs and silently fall back to basic replay,
 then spend several minutes drafting AI reports. Scan the retained run again to

@@ -185,10 +185,10 @@ See [manual qualification](docs/guides/MANUAL_QUALIFICATION.md) and
 
 ## Install
 
-**Desktop app.** Download the package for macOS, Linux, or Windows from
+**Desktop app.** Download the package for macOS or Linux from
 **[oxfuzz.bionicloud.net](https://oxfuzz.bionicloud.net/#downloads)** or the
 [latest GitHub release](https://github.com/HenryCooper86/oxfuzz/releases/latest),
-build the sandbox from the sandbox kit, add a model provider in Settings, and
+build or pull the sandbox with the sandbox kit, add a model provider in Settings, and
 open a source folder. Docker is required. This is an early release: macOS
 packages are ad-hoc signed and not notarized, so your system may warn you
 before installing. Windows is not supported for now.
