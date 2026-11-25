@@ -199,13 +199,13 @@ def launch_and_approve(demo: Demo) -> None:
              "document.querySelectorAll('main, [data-scroll]').forEach(e => e.scrollTop = e.scrollHeight);")
     time.sleep(1)
     demo.step("summary", "Campaign summary before launch: budget, CPU and memory limits")
-    s.click(demo.button("Launch campaign", "Start campaign"))
+    s.click(demo.button("Launch Campaign"))
     time.sleep(1.5)
     try:
         s.wait("//*[contains(normalize-space(.), 'needs your approval')]", timeout=20)
         demo.step("approval", "oxfuzz asks for approval before the campaign starts")
         time.sleep(2)
-        s.click(demo.button("Approve", "Approve once", "Allow"))
+        s.click(s.wait("//*[@id='approval-prompt-title']/ancestor::*[.//button][1]//button[normalize-space(.)='Approve']"))
         demo.step("approved", "Approved: the campaign starts in the sandbox with /dev/kvm")
     except WebDriverError:
         demo.step("no-approval", "The campaign started without a separate approval prompt")
@@ -224,7 +224,7 @@ def wait_for_campaign(demo: Demo, minutes: int) -> None:
             if key not in seen and key in page.lower():
                 seen.add(key)
                 demo.step(key.replace(" ", "-"), caption)
-        running = s.find_all(f"//button[{text_match('Running')} or {text_match('Running…')}]")
+        running = s.find_all("//button[starts-with(normalize-space(.), 'Running')]")
         stop = s.find_all(f"//button[{text_match('Stop')}]")
         if not running and not stop:
             break
