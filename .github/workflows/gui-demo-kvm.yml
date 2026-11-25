@@ -1,0 +1,197 @@
+name: GUI demo - kernel campaign with KVM
+
+# Records the website demo of a syzkaller kernel campaign started from the
+# released Linux desktop app on an x86_64 host with /dev/kvm. The app runs on
+# a virtual X display (Xvfb), tauri-driver drives it over WebDriver
+# (scripts/demo/drive_kernel_demo.py), and ffmpeg records the display.
+#
+# What this is and is not:
+# - The app is the published v0.9.11 .deb, unmodified; the sandbox image is
+#   the published GHCR 0.2.4 image, pulled with scripts/pull-sandbox.sh.
+# - The kernel is the cached build of kernel-kvm.yml (same recipe); the Debian
+#   rootfs and its SSH key are built here for this run. Neither, nor the key,
+#   is uploaded: the artifact holds the video, screenshots, page sources,
+#   the step log and host evidence only.
+# - No provider, model or secret is used. HF_AUTO_APPROVE is never set: the
+#   campaign goes through the app's own approval prompt, which the driver
+#   answers, as the user allowed for the demo test kernel on 2026-11-25.
+#
+# Manual. GitHub dispatches a workflow only from the default branch.
+
+on:
+  workflow_dispatch:
+    inputs:
+      campaign_minutes:
+        description: "Campaign length in minutes"
+        type: number
+        default: 10
+      ui_only:
+        description: "Stop before launching (selector check, no campaign)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: gui-demo-kvm-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  LINUX_VERSION: 6.12.118
+  KERNEL_RECIPE: x86_64-kcov-kasan-r1
+  CREATE_IMAGE_SHA256: be1588c107f8fa096cdd8c81eefddc46d789ea83ab3f082ba1c5b89b4f2ddf34
+  ROOTFS_RELEASE: bookworm
+  RELEASE_TAG: v0.9.11
+  DISPLAY: ":99"
+
+jobs:
+  record:
+    name: Record the kernel demo
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      - name: Paths
+        run: |
+          {
+            echo "ARTIFACTS=$RUNNER_TEMP/kernel-artifacts"
+            echo "DEMO=$RUNNER_TEMP/demo"
+          } >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/kernel-artifacts" "$RUNNER_TEMP/demo"
+
+      - name: Enable KVM for the runner user
+        run: |
+          set -euo pipefail
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm | tee "$DEMO/kvm-device.txt"
+
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL
+          docker system prune -af
+          df -h /
+
+      - name: Restore the kernel built by kernel-kvm.yml
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/kernel-out
+          key: kvm-kernel-${{ env.LINUX_VERSION }}-${{ env.KERNEL_RECIPE }}
+          fail-on-cache-miss: true
+
+      - name: Install the display, recorder and WebDriver tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xvfb xdotool ffmpeg webkit2gtk-driver dbus-x11 at-spi2-core \
+            debootstrap debian-archive-keyring fonts-noto-core fonts-noto-cjk
+          cargo install tauri-driver --locked
+          which WebKitWebDriver tauri-driver
+
+      - name: Install the released desktop app
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release download "$RELEASE_TAG" --pattern 'oxfuzz_*_amd64.deb' --pattern SHA256SUMS.txt \
+            --dir "$RUNNER_TEMP/release" || gh release download "$RELEASE_TAG" --pattern 'oxfuzz_*_amd64.deb' \
+            --dir "$RUNNER_TEMP/release"
+          ls -l "$RUNNER_TEMP/release"
+          sudo apt-get install -y "$RUNNER_TEMP"/release/oxfuzz_*_amd64.deb
+          app="$(dpkg -L oxfuzz | grep -E '^/usr/bin/' | head -n 1)"
+          test -x "$app"
+          echo "APP=$app" >> "$GITHUB_ENV"
+          {
+            echo "app=$app"
+            echo "deb_sha256=$(sha256sum "$RUNNER_TEMP"/release/oxfuzz_*_amd64.deb | cut -d' ' -f1)"
+            dpkg -s oxfuzz | grep -E '^(Package|Version|Architecture):'
+          } | tee "$DEMO/app-identity.txt"
+
+      - name: Pull the published sandbox image
+        run: |
+          set -euo pipefail
+          ./scripts/pull-sandbox.sh 2>&1 | tee "$DEMO/pull-sandbox.log"
+
+      - name: Stage the kernel and build the Debian rootfs
+        run: |
+          set -euo pipefail
+          cp "$RUNNER_TEMP/kernel-out/bzImage" "$ARTIFACTS/bzImage"
+          cp "$RUNNER_TEMP/kernel-out/identity.txt" "$DEMO/kernel-identity.txt"
+          commit="$(grep -oE '^ARG SYZKALLER_COMMIT=[0-9a-f]{40}$' docker/sandbox/Dockerfile | cut -d= -f2)"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/create-image.sh" \
+            "https://raw.githubusercontent.com/google/syzkaller/${commit}/tools/create-image.sh"
+          echo "${CREATE_IMAGE_SHA256}  $RUNNER_TEMP/create-image.sh" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/rootfs-build"
+          cd "$RUNNER_TEMP/rootfs-build"
+          bash "$RUNNER_TEMP/create-image.sh" --distribution "$ROOTFS_RELEASE" --output rootfs \
+            > "$RUNNER_TEMP/rootfs-build.log" 2>&1 || { tail -n 80 "$RUNNER_TEMP/rootfs-build.log"; exit 1; }
+          mv rootfs.img rootfs.id_rsa "$ARTIFACTS/"
+          sudo rm -rf rootfs rootfs.id_rsa.pub
+          echo "rootfs_sha256=$(sha256sum "$ARTIFACTS/rootfs.img" | cut -d' ' -f1)" | tee "$DEMO/rootfs-identity.txt"
+
+      - name: App configuration
+        run: |
+          set -euo pipefail
+          config="$RUNNER_TEMP/oxfuzz-config"
+          mkdir -p "$config" "$RUNNER_TEMP/oxfuzz-app" "$RUNNER_TEMP/linux-kernel"
+          printf '[fuzzing.sandbox]\nmax_cpus = 2\nmax_mem_mb = 6144\nmax_duration_secs = 7200\n' \
+            > "$config/oxfuzz.toml"
+          printf 'Kernel campaign demo project.\n' > "$RUNNER_TEMP/linux-kernel/README.txt"
+          cp "$config/oxfuzz.toml" "$DEMO/oxfuzz.toml"
+          {
+            echo "HF_CONFIG_DIR=$config"
+            echo "HF_APP_DIR=$RUNNER_TEMP/oxfuzz-app"
+          } >> "$GITHUB_ENV"
+
+      - name: Record
+        id: record
+        env:
+          CAMPAIGN_MINUTES: ${{ inputs.campaign_minutes || 10 }}
+          UI_ONLY: ${{ inputs.ui_only && '--ui-only' || '' }}
+        run: |
+          set -uo pipefail
+          Xvfb "$DISPLAY" -screen 0 1280x880x24 -nolisten tcp > "$DEMO/xvfb.log" 2>&1 &
+          sleep 2
+          eval "$(dbus-launch --sh-syntax)"
+          export WEBKIT_DISABLE_COMPOSITING_MODE=1 LIBGL_ALWAYS_SOFTWARE=1
+          tauri-driver --port 4444 > "$DEMO/tauri-driver.log" 2>&1 &
+          sleep 2
+          ffmpeg -nostdin -loglevel error -f x11grab -framerate 15 -video_size 1280x880 -i "$DISPLAY" \
+            -c:v libx264 -preset ultrafast -crf 20 -pix_fmt yuv420p "$DEMO/screen.mkv" &
+          recorder=$!
+          python3 -I scripts/demo/drive_kernel_demo.py --app "$APP" \
+            --project "$RUNNER_TEMP/linux-kernel" --kernel "$ARTIFACTS/bzImage" \
+            --rootfs "$ARTIFACTS/rootfs.img" --ssh-key "$ARTIFACTS/rootfs.id_rsa" \
+            --duration-minutes "$CAMPAIGN_MINUTES" --out "$DEMO/steps" $UI_ONLY
+          status=$?
+          kill -INT "$recorder"; wait "$recorder"
+          xdotool search --name oxfuzz getwindowgeometry 2>/dev/null | tee "$DEMO/window-geometry.txt" || true
+          pgrep -a qemu-system || true
+          echo "driver_exit=$status" | tee "$DEMO/driver-exit.txt"
+          exit "$status"
+
+      - name: Campaign evidence from the app state
+        if: always()
+        run: |
+          set -uo pipefail
+          find "$RUNNER_TEMP/oxfuzz-app" -maxdepth 3 -type d | head -50 > "$DEMO/app-dirs.txt"
+          find "$RUNNER_TEMP/linux-kernel" -maxdepth 4 \( -name '*.log' -o -name 'manager.cfg' \) \
+            -size -2M -exec cp --parents {} "$DEMO/" \; 2>/dev/null || true
+          grep -rhoE 'accel=(kvm|tcg)' "$DEMO" 2>/dev/null | sort | uniq -c | tee "$DEMO/accel.txt" || true
+
+      - name: Upload the recording
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-demo-kvm
+          path: |
+            ${{ runner.temp }}/demo
+            !${{ runner.temp }}/demo/**/*.id_rsa
+          retention-days: 14
