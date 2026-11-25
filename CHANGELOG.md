@@ -10,6 +10,8 @@ retain only the current release; older entries remain here as the record.
 
 ## Unreleased
 
+## 0.9.11 - 2026-11-25
+
 ### Added
 
 - Kernel campaigns: two 30-minute syzkaller campaigns with KVM are recorded on

@@ -13,7 +13,7 @@ mkdir "$staging/$prefix"
 git archive "v$version" LICENSE docker/sandbox tools/clang-analysis \
   third_party/semgrep third_party/semgrep-rules scripts/build-sandbox.sh \
   scripts/verify-sandbox-compilers.sh scripts/semgrep-tree-digest.py \
-  scripts/validate-semgrep-smoke.py | tar -x -C "$staging/$prefix"
+  scripts/validate-semgrep-smoke.py scripts/pull-sandbox.sh | tar -x -C "$staging/$prefix"
 cp website/sandbox-kit-README.md "$staging/$prefix/README.md"
 COPYFILE_DISABLE=1 tar -czf "$output/$prefix.tar.gz" -C "$staging" "$prefix"
 printf '%s\n' "$output/$prefix.tar.gz"

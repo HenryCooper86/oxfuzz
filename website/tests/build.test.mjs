@@ -194,7 +194,7 @@ test("the page lists what is new and says the desktop packages carry it", async 
       );
       assert.ok(section, edition);
       assert.equal((section[0].match(/<h3>/g) ?? []).length, 6, edition);
-      for (const command of ["oxfuzz binary", "oxfuzz bisect", "oxfuzz kernel"])
+      for (const command of ["oxfuzz binary", "./scripts/pull-sandbox.sh", "/dev/kvm"])
         assert.ok(section[0].includes(`<code>${command}</code>`), command);
       for (const path of [
         "/blob/main/CHANGELOG.md",

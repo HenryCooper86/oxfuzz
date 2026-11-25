@@ -111,27 +111,27 @@ export const locales = {
       "Linux kernel fuzzing in a VM. You supply the kernel and guest image.",
     engine_syzkaller_link: "syzkaller setup guide",
 
-    new_title: "New in 0.9.10: triage that checks the harness first",
+    new_title: "New in 0.9.11: kernel fuzzing with KVM and a sandbox you can pull",
     new_intro:
-      "Released in November 2026. The first two items are new in 0.9.10; the others arrived in 0.9.8 and 0.9.9. The two recordings are real command-line sessions on small sample programs with a planted bug.",
-    new_1_title: "Crashes that do not depend on the input",
+      "Released in November 2026. The first two items are new in 0.9.11, the next two arrived in 0.9.10, and the others in 0.9.8. The two recordings are real command-line sessions on small sample programs with a planted bug.",
+    new_1_title: "Kernel fuzzing with KVM",
     new_1_text:
-      "Triage replays each AFL++ and libFuzzer crash on harmless inputs. A fault they all reproduce may be harness misuse, so it stays out of SARIF and DefectDojo until you review it.",
-    new_2_title: "Harness repair proposals",
+      "On a Linux host with <code>/dev/kvm</code>, kernel campaigns use hardware acceleration, and that one device is all the sandbox gains. In our recorded run the test guest booted in 16 seconds instead of 126, and a 30-minute campaign ran 143,404 programs. Kernel crashes are now counted.",
+    new_2_title: "A sandbox image you can pull",
     new_2_text:
-      "From a finding that points at the harness, the model drafts a fix. It compiles beside your harness and changes nothing until you adopt, test and promote it.",
-    new_3_title: "Four more languages",
+      "Instead of building the sandbox yourself, run <code>./scripts/pull-sandbox.sh</code> from the kit to fetch the verified image from GitHub. The image lists the licence and source of every tool inside it.",
+    new_3_title: "Crashes that do not depend on the input",
     new_3_text:
-      "Go with native fuzzing, Python with Atheris, Java with Jazzer and JavaScript with Jazzer.js. Each is discovered, built and run in the same sandbox.",
-    new_4_title: "Programs without source",
+      "Triage replays each AFL++ and libFuzzer crash on harmless inputs. A fault they all reproduce may be harness misuse, so it stays out of SARIF and DefectDojo until you review it.",
+    new_4_title: "Harness repair proposals",
     new_4_text:
-      "<code>oxfuzz binary</code> fuzzes a compiled Linux program in AFL++ QEMU mode. It can feed a file, a TCP or UDP server, or a sequence of messages. Checked on Linux arm64 so far.",
-    new_5_title: "From crash to commit to ticket",
+      "From a finding that points at the harness, the model drafts a fix. It compiles beside your harness and changes nothing until you adopt, test and promote it.",
+    new_5_title: "Four more languages",
     new_5_text:
-      "<code>oxfuzz bisect</code> finds the first commit where an input crashes. File the finding in GitHub, GitLab or Jira, and send new crashes to a webhook.",
-    new_6_title: "Kernel and build systems",
+      "Go with native fuzzing, Python with Atheris, Java with Jazzer and JavaScript with Jazzer.js. Each is discovered, built and run in the same sandbox.",
+    new_6_title: "Programs without source",
     new_6_text:
-      "<code>oxfuzz kernel</code> runs a syzkaller campaign from the command line. Our 30-minute test campaign, under emulation, ran 1,698 programs and reached 3,634 coverage edges. Bazel projects build offline from a vendored directory.",
+      "<code>oxfuzz binary</code> fuzzes a compiled Linux program in AFL++ QEMU mode. It can feed a file, a TCP or UDP server, or a sequence of messages. Checked on Linux arm64 so far.",
     bin_fact_1: "Run",
     bin_fact_1_value: "30 seconds, AFL++ QEMU mode",
     bin_fact_2: "Executions",
@@ -153,7 +153,7 @@ export const locales = {
     term_python_caption:
       "A real session on a sample Python module. Pauses and long paths are shortened; every line is what the command printed.",
     new_status:
-      'These features are in the desktop packages below from v0.9.10. The <code>oxfuzz</code> command-line tool is not in those packages; <a href="https://github.com/HenryCooper86/oxfuzz/blob/main/docs/guides/INSTALL.md" rel="noopener">install it from source</a> at the v0.9.10 tag. The <a href="https://github.com/HenryCooper86/oxfuzz/blob/main/CHANGELOG.md" rel="noopener">changelog</a> lists every change.',
+      'These features are in the desktop packages below from v0.9.11. The <code>oxfuzz</code> command-line tool is not in those packages; <a href="https://github.com/HenryCooper86/oxfuzz/blob/main/docs/guides/INSTALL.md" rel="noopener">install it from source</a> at the v0.9.11 tag. The <a href="https://github.com/HenryCooper86/oxfuzz/blob/main/CHANGELOG.md" rel="noopener">changelog</a> lists every change.',
 
     control_title: "The fuzzer runs untrusted code. You stay in charge of it.",
     control_1_title: "Sandboxed",
@@ -328,27 +328,27 @@ export const locales = {
       "在虚拟机中对 Linux 内核做模糊测试。内核和客户机镜像由你提供。",
     engine_syzkaller_link: "syzkaller 配置指南",
 
-    new_title: "0.9.10 新功能：分诊时先检查测试桩",
+    new_title: "0.9.11 新功能：KVM 加速的内核模糊测试与可直接拉取的沙箱",
     new_intro:
-      "2026 年 11 月发布。前两项是 0.9.10 的新功能，其余功能在 0.9.8 和 0.9.9 加入。下面两段录屏是真实的命令行运行过程，对象是带有预埋缺陷的小型示例程序。",
-    new_1_title: "与输入无关的崩溃",
+      "2026 年 11 月发布。前两项是 0.9.11 的新功能，接下来两项在 0.9.10 加入，其余在 0.9.8 加入。下面两段录屏是真实的命令行运行过程，对象是带有预埋缺陷的小型示例程序。",
+    new_1_title: "KVM 加速的内核模糊测试",
     new_1_text:
-      "分诊时会用无害输入重放每个 AFL++ 和 libFuzzer 崩溃。如果它们都能复现，可能是测试桩误用 API，因此在你审查前不会进入 SARIF 和 DefectDojo。",
-    new_2_title: "测试桩修复提案",
+      "在带有 <code>/dev/kvm</code> 的 Linux 主机上，内核测试使用硬件加速，沙箱只额外获得这一个设备。在我们记录的运行中，测试虚拟机 16 秒完成启动（模拟环境下需要 126 秒），30 分钟执行了 143,404 个程序。内核崩溃现在也会被计数。",
+    new_2_title: "可以直接拉取的沙箱镜像",
     new_2_text:
-      "对于指向测试桩的发现项，模型会起草修复。它在你的测试桩旁编译，在你采用、测试并晋升之前不会改变任何内容。",
-    new_3_title: "新增四种语言",
+      "不必自己构建沙箱：在套件目录运行 <code>./scripts/pull-sandbox.sh</code>，即可从 GitHub 获取经过验证的镜像。镜像内列出了每个工具的许可证和源码位置。",
+    new_3_title: "与输入无关的崩溃",
     new_3_text:
-      "Go（原生模糊测试）、Python（Atheris）、Java（Jazzer）和 JavaScript（Jazzer.js）。它们都在同一个沙箱里完成目标发现、构建和运行。",
-    new_4_title: "没有源码的程序",
+      "分诊时会用无害输入重放每个 AFL++ 和 libFuzzer 崩溃。如果它们都能复现，可能是测试桩误用 API，因此在你审查前不会进入 SARIF 和 DefectDojo。",
+    new_4_title: "测试桩修复提案",
     new_4_text:
-      "<code>oxfuzz binary</code> 以 AFL++ QEMU 模式对已编译的 Linux 程序做模糊测试，输入可以是文件、TCP 或 UDP 服务，也可以是一串消息。目前只在 Linux arm64 上验证过。",
-    new_5_title: "从崩溃到提交，再到工单",
+      "对于指向测试桩的发现项，模型会起草修复。它在你的测试桩旁编译，在你采用、测试并晋升之前不会改变任何内容。",
+    new_5_title: "新增四种语言",
     new_5_text:
-      "<code>oxfuzz bisect</code> 找出某个输入最早引发崩溃的提交。发现可以提交到 GitHub、GitLab 或 Jira，新的崩溃可以推送到 webhook。",
-    new_6_title: "内核与构建系统",
+      "Go（原生模糊测试）、Python（Atheris）、Java（Jazzer）和 JavaScript（Jazzer.js）。它们都在同一个沙箱里完成目标发现、构建和运行。",
+    new_6_title: "没有源码的程序",
     new_6_text:
-      "<code>oxfuzz kernel</code> 从命令行运行 syzkaller 测试。我们在模拟环境下做的 30 分钟测试执行了 1,698 个程序，覆盖 3,634 条边。Bazel 项目使用 vendor 目录离线构建。",
+      "<code>oxfuzz binary</code> 以 AFL++ QEMU 模式对已编译的 Linux 程序做模糊测试，输入可以是文件、TCP 或 UDP 服务，也可以是一串消息。目前只在 Linux arm64 上验证过。",
     bin_fact_1: "运行",
     bin_fact_1_value: "30 秒，AFL++ QEMU 模式",
     bin_fact_2: "执行次数",
@@ -370,7 +370,7 @@ export const locales = {
     term_python_caption:
       "真实的运行过程，对象是一个 Python 示例模块。停顿和过长的路径做了缩短，每一行都是命令的原始输出。",
     new_status:
-      '从 v0.9.10 起，下方的桌面安装包已包含这些功能。<code>oxfuzz</code> 命令行工具不在安装包内，请在 v0.9.10 标签处<a href="https://github.com/HenryCooper86/oxfuzz/blob/main/docs/guides/INSTALL.md" rel="noopener">从源码安装</a>。全部改动见<a href="https://github.com/HenryCooper86/oxfuzz/blob/main/CHANGELOG.md" rel="noopener">更新日志</a>。',
+      '从 v0.9.11 起，下方的桌面安装包已包含这些功能。<code>oxfuzz</code> 命令行工具不在安装包内，请在 v0.9.11 标签处<a href="https://github.com/HenryCooper86/oxfuzz/blob/main/docs/guides/INSTALL.md" rel="noopener">从源码安装</a>。全部改动见<a href="https://github.com/HenryCooper86/oxfuzz/blob/main/CHANGELOG.md" rel="noopener">更新日志</a>。',
 
     control_title: "模糊测试运行的是不可信代码，控制权始终在你手里。",
     control_1_title: "沙箱隔离",

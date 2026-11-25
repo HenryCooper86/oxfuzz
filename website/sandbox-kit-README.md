@@ -1,4 +1,4 @@
-# oxfuzz 0.9.10 sandbox build kit
+# oxfuzz 0.9.11 sandbox build kit
 
 This kit builds the local Docker image required by the desktop app. It contains
 only the sandbox recipe, verification scripts, Clang helper source, bundled
@@ -12,6 +12,11 @@ targets the Docker host architecture (Apple silicon/arm64 or x86_64).
 Run from this directory:
 
     ./scripts/build-sandbox.sh
+
+Or pull the prebuilt image from GitHub Container Registry instead of building
+it. The script tags it with the local name and runs the same compiler checks:
+
+    ./scripts/pull-sandbox.sh
 
 Keep the resulting image named oxfuzz/fuzz-sandbox:0.2.4. Start oxfuzz, configure
 a provider, and check sandbox readiness in Settings before opening a project.
