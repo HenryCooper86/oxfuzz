@@ -19,7 +19,6 @@ import argparse
 import base64
 import http.client
 import json
-import subprocess
 import sys
 import time
 import urllib.error
@@ -144,32 +143,19 @@ class Demo:
 
 
 def open_project(demo: Demo, project: str) -> None:
-    """Open the project folder through the native GTK chooser, with a fallback."""
+    """Make the project folder the app's active project.
+
+    The native GTK folder chooser cannot be driven reliably on a bare X
+    display (no window manager): it stayed open over the app for the whole
+    recording. The app keeps recent and active projects in localStorage, so
+    this sets them the way choosing the folder would, and reloads."""
     s = demo.s
-    s.click(demo.button("Projects"))
-    time.sleep(1)
-    demo.step("projects", "Projects: open the folder to fuzz")
-    try:
-        s.click(demo.button("Add project", "Open folder", "Open project", "Add folder", timeout=10))
-        time.sleep(2)
-        subprocess.run(["xdotool", "key", "--clearmodifiers", "ctrl+l"], check=True)
-        time.sleep(0.5)
-        subprocess.run(["xdotool", "type", "--delay", "40", project], check=True)
-        time.sleep(0.5)
-        subprocess.run(["xdotool", "key", "Return"], check=True)
-        time.sleep(1.5)
-        if s.find_all("//*[contains(@class,'surface')]") and project.rstrip("/").split("/")[-1] not in s.source():
-            subprocess.run(["xdotool", "key", "Return"], check=False)
-            time.sleep(1.5)
-    except (WebDriverError, subprocess.CalledProcessError) as error:
-        print(f"native chooser path failed ({error}); using the recents fallback", file=sys.stderr)
-    if project.rstrip("/").split("/")[-1] not in s.source():
-        s.script(
-            "localStorage.setItem('hf_recent_projects', JSON.stringify([arguments[0]]));"
-            "localStorage.setItem('hf_active_project', arguments[0]); location.reload();",
-            project,
-        )
-        time.sleep(4)
+    s.script(
+        "localStorage.setItem('hf_recent_projects', JSON.stringify([arguments[0]]));"
+        "localStorage.setItem('hf_active_project', arguments[0]); location.reload();",
+        project,
+    )
+    time.sleep(5)
     demo.step("project-open", f"Project opened: {project.rstrip('/').split('/')[-1]}")
 
 
@@ -287,7 +273,6 @@ def main() -> int:
         session.script("localStorage.setItem('hf_setup_completed', 'true');"
                        "localStorage.removeItem('hf_setup_deferred'); location.reload();")
         time.sleep(5)
-        demo.step("start", "oxfuzz desktop app on Linux x86_64 (GitHub-hosted runner with KVM)")
         open_project(demo, args.project)
         configure_campaign(demo, args)
         if args.ui_only:
