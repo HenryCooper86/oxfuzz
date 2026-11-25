@@ -98,7 +98,14 @@ def is_skipped_directory(path: pathlib.Path) -> bool:
     return len(path.parts) == 1 and path.name in SKIPPED_DIRECTORY_NAMES
 
 
+# ISO base media files (MP4, MOV) start with a 4-byte box size, so their
+# signature, the "ftyp" box type, sits at offset 4 rather than at the start.
+ISO_BASE_MEDIA_TYPE = b"ftyp"
+
+
 def is_genuine_binary_media(contents: bytes) -> bool:
+    if contents[4:8] == ISO_BASE_MEDIA_TYPE:
+        return True
     return any(contents.startswith(signature) for signature in BINARY_MEDIA_MAGIC_SIGNATURES)
 
 

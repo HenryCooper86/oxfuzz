@@ -56,6 +56,9 @@ class RetiredEngineReferenceTests(unittest.TestCase):
             ("bridge.hh", reference.encode("utf-8"), True),
             ("extensionless", reference.encode("utf-8"), True),
             ("media.bin", b"\x89PNG\r\n\x1a\n\xff", False),
+            # ISO base media (MP4): a 4-byte box size, then the ftyp box type.
+            ("video.mp4", b"\x00\x00\x00\x20ftypisom\xff\xfe", False),
+            ("not-video.bin", b"\x00\x00\x00\x20ftxp\xff\xfe", None),
         )
         for relative, payload, should_detect in cases:
             with self.subTest(relative=relative):
@@ -64,6 +67,11 @@ class RetiredEngineReferenceTests(unittest.TestCase):
                     path = root / relative
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_bytes(payload + b"\n")
+                    if should_detect is None:
+                        # Invalid UTF-8 without a media signature stays an error.
+                        with self.assertRaises(checker.ScanError):
+                            find_forbidden_references(root)
+                        continue
                     findings = find_forbidden_references(root)
                 expected = [f"{relative}:1:{reference}"] if should_detect else []
                 self.assertEqual(findings, expected)
