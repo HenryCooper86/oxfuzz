@@ -231,12 +231,14 @@ jobs:
           ffmpeg -nostdin -loglevel error -f x11grab -framerate 15 -video_size 1280x880 -i "$DISPLAY" \
             -c:v libx264 -preset ultrafast -crf 20 -pix_fmt yuv420p "$DEMO/screen.mkv" &
           recorder=$!
+          # The step shell runs with -e; capture the driver's status so the
+          # recorder is always stopped and its file finalized.
+          status=0
           python3 -I scripts/demo/drive_kernel_demo.py --app "$APP" \
             --project "$RUNNER_TEMP/linux-kernel" --kernel "$ARTIFACTS/bzImage" \
             --rootfs "$ARTIFACTS/rootfs.img" --ssh-key "$ARTIFACTS/rootfs.id_rsa" \
-            --duration-minutes "$CAMPAIGN_MINUTES" --out "$DEMO/steps" $UI_ONLY
-          status=$?
-          kill -INT "$recorder"; wait "$recorder"
+            --duration-minutes "$CAMPAIGN_MINUTES" --out "$DEMO/steps" $UI_ONLY || status=$?
+          kill -INT "$recorder"; wait "$recorder" || true
           xdotool search --name oxfuzz getwindowgeometry 2>/dev/null | tee "$DEMO/window-geometry.txt" || true
           pgrep -a qemu-system || true
           echo "driver_exit=$status" | tee "$DEMO/driver-exit.txt"
