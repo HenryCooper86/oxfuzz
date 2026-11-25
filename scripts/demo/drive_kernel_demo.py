@@ -56,7 +56,9 @@ class Session:
 
     def find_all(self, xpath: str) -> list[str]:
         found = self.call("POST", "/elements", {"using": "xpath", "value": xpath})
-        return [item[ELEMENT] for item in found]
+        # WebKitWebDriver may key the reference as ELEMENT rather than the
+        # W3C name; each reference holds exactly one id either way.
+        return [item.get(ELEMENT) or next(iter(item.values())) for item in found]
 
     def displayed(self, element: str) -> bool:
         try:
