@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import http.client
 import json
 import subprocess
 import sys
@@ -49,6 +50,8 @@ class Session:
                 payload = json.loads(response.read() or b"{}")
         except urllib.error.HTTPError as error:
             raise WebDriverError(f"{method} {path}: {error.code} {error.read()[:400]!r}") from None
+        except (urllib.error.URLError, http.client.HTTPException, OSError) as error:
+            raise WebDriverError(f"{method} {path}: {error}") from None
         return payload.get("value", payload) if path != "/session" else payload["value"]
 
     def call(self, method: str, path: str, body: dict | None = None):
@@ -211,29 +214,46 @@ def launch_and_approve(demo: Demo) -> None:
         demo.step("no-approval", "The campaign started without a separate approval prompt")
 
 
-def wait_for_campaign(demo: Demo, minutes: int) -> None:
+def wait_for_campaign(demo: Demo, minutes: int) -> bool:
+    """Leave the app alone while the campaign runs; the screen recorder keeps
+    capturing. Fetching the page source on a timer made WebKitWebDriver drop
+    the session once the live log grew, so this only scrolls the live stats
+    into view, sleeps, and polls one cheap lookup near the end. Returns False
+    when the driver session is gone (the recording is still usable)."""
     s = demo.s
-    deadline = time.monotonic() + minutes * 60 + 900
-    next_shot = time.monotonic() + 30
-    milestones = (("machine check", "Guest booted under KVM; syz-manager checks the machine"),
-                  ("corpus", "Programs are executing and the corpus is growing"),)
-    seen: set[str] = set()
+    try:
+        s.script("const b = [...document.querySelectorAll('button')]"
+                 ".find(e => e.textContent.trim() === 'Stop');"
+                 "if (b) b.scrollIntoView({block: 'start'});")
+        time.sleep(20)
+        demo.step("running", "The campaign is running under KVM; live stats and the manager log update")
+    except WebDriverError as error:
+        print(f"could not scroll to the live stats: {error}", file=sys.stderr)
+    time.sleep(max(minutes * 60 - 60, 0))
+    deadline = time.monotonic() + 900
+    failures = 0
     while time.monotonic() < deadline:
-        page = s.source()
-        for key, caption in milestones:
-            if key not in seen and key in page.lower():
-                seen.add(key)
-                demo.step(key.replace(" ", "-"), caption)
-        running = s.find_all("//button[starts-with(normalize-space(.), 'Running')]")
-        stop = s.find_all(f"//button[{text_match('Stop')}]")
-        if not running and not stop:
-            break
-        if time.monotonic() >= next_shot:
-            demo.snapshot("progress")
-            next_shot = time.monotonic() + 60
-        time.sleep(5)
-    time.sleep(3)
-    demo.step("finished", "Campaign finished: executions, corpus and coverage are recorded")
+        try:
+            if not s.find_all("//button[starts-with(normalize-space(.), 'Running')]"):
+                break
+            failures = 0
+        except WebDriverError as error:
+            failures += 1
+            print(f"poll failed ({failures}): {error}", file=sys.stderr)
+            if failures >= 3:
+                return False
+        time.sleep(15)
+    time.sleep(5)
+    try:
+        s.script("const b = [...document.querySelectorAll('button')]"
+                 ".find(e => e.textContent.includes('Launch Campaign'));"
+                 "if (b) b.scrollIntoView({block: 'start'});")
+        time.sleep(3)
+        demo.step("finished", "Campaign finished: executions, corpus and coverage are recorded")
+    except WebDriverError as error:
+        print(f"could not show the result: {error}", file=sys.stderr)
+        return False
+    return True
 
 
 def show_results(demo: Demo) -> None:
@@ -274,8 +294,11 @@ def main() -> int:
             demo.step("ui-only", "UI-only pass: stopping before launch")
             return 0
         launch_and_approve(demo)
-        wait_for_campaign(demo, args.duration_minutes)
-        show_results(demo)
+        if wait_for_campaign(demo, args.duration_minutes):
+            show_results(demo)
+        else:
+            # Keep recording until the campaign's budget has surely ended.
+            time.sleep(120)
         return 0
     except WebDriverError as error:
         print(f"demo failed: {error}", file=sys.stderr)
