@@ -1,0 +1,48 @@
+{
+  "schema_version": 3,
+  "claim": "installed_clients",
+  "candidate_commit": "7057e092591ac989729f3f969db426d869ffb5fd",
+  "tag": "v0.9.11",
+  "local_build_commit": "7057e092591ac989729f3f969db426d869ffb5fd",
+  "production_delta": "None known. The local build was made with scripts/build-app.sh in a separate worktree checked out at the tag commit, after the engine qualification in that worktree recorded an empty working-tree patch. No digest was taken for the build itself. The final release installer was built by the release workflow from the tag.",
+  "platform": "macOS arm64",
+  "version_observed": "0.9.11",
+  "local_executable_sha256": "48473c8be4c643722938c0226c73795f2ce1ac86bde878b0858ce9efc29a9b78",
+  "observed_on": "2026-11-25",
+  "observed": {
+    "local_build": "codesign --verify --deep --strict passed and the DMG passed hdiutil verify.",
+    "not_observed": [
+      "A launch against the existing per-user data, and any migration of earlier data",
+      "First-run setup wizard",
+      "The Settings page's contents (no readable heading was exposed)",
+      "A campaign, bisection or concolic enrichment completing from the desktop app",
+      "Go, Python, Java and JavaScript runs started from the desktop app",
+      "Linux desktop installations",
+      "Physical-bench automotive operations",
+      "syzkaller campaigns from the desktop app"
+    ]
+  },
+  "final_release_installer": {
+    "workflow_run": 45531103752,
+    "candidate_commit": "7057e092591ac989729f3f969db426d869ffb5fd",
+    "file": "oxfuzz_0.9.11_aarch64.dmg",
+    "sha256": "52c372301ae55148b3fb258fb0b41b60f7847b2d67c9183e90510773b4478f82",
+    "executable_sha256": "44839438c85121ecea6cf17eb495ca016b912a2a2d9882765ca47313978173ea",
+    "observed_on": "2026-11-25",
+    "checks": [
+      "Downloaded asset SHA-256 matches GitHub metadata, as do the other four installers and the two .app.tar.gz archives",
+      "DMG verification and read-only mount succeeded; the Intel DMG also passed verification",
+      "Copied app passes codesign --verify --deep --strict (ad-hoc signature); bundle version 0.9.11; arm64 executable",
+      "Started from the copy against empty scratch data: the process stayed up, applied all 55 migrations and exited on a termination request",
+      "Through the accessibility interface: one window; pressing the Triage and Harness navigation buttons showed the headings Crash Triage and Harness Generation",
+      "Not installed to /Applications and not started against the existing per-user data",
+      "No project was opened and no harness, run or campaign was executed from the installer build"
+    ]
+  },
+  "limitations": [
+    "Only two page headings were read; the rest of the interface was not walked, so this does not show every view rendered correctly.",
+    "Only the macOS Apple silicon installer was started; the other packages were built and digest-checked only.",
+    "macOS packages are ad-hoc signed and not notarized. Windows installers are no longer built.",
+    "The oxfuzz command-line tool, its terminal interface and its JSON output are not in the desktop packages."
+  ]
+}

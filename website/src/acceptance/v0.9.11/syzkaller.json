@@ -1,0 +1,66 @@
+{
+  "schema_version": 3,
+  "claim": "syzkaller",
+  "candidate_commit": "7057e092591ac989729f3f969db426d869ffb5fd",
+  "tag": "v0.9.11",
+  "qualification_provenance": "Two parts. (1) Emulated: a 30-minute campaign on macOS arm64, run on 2026-11-25 in a separate worktree checked out at the tag commit (the engine qualification in that worktree recorded an empty patch shortly before), through the service operation that oxfuzz kernel and the desktop app call (ServiceContainer::run_syzkaller_observed_with_environment), driven by the live test live_syzkaller_boots_executes_programs_and_records_the_campaign. (2) KVM: two 30-minute campaigns through the same operation on hosted GitHub ubuntu-24.04 x86_64 runners with /dev/kvm on 2026-11-24, on a development branch whose result was merged to main as d63cab37, an ancestor of the tag; they were not rerun on the tag commit.",
+  "record_at_tag": "https://github.com/HenryCooper86/oxfuzz/blob/v0.9.11/docs/acceptance/kernel-kvm-2026-11-24.md",
+  "emulated": {
+    "sandbox_image": "sha256:06142d9651c92b4cadefa55fa40309f8c081fa3d219ef17df9f2f1108c95863b",
+    "engine": "syzkaller 27a8bd60fa3a186e2b15eb9c4706689e3d2be6f2, QEMU 8.2.2, -machine virt,accel=tcg -cpu max",
+    "kernel": "Linux 6.12.118 arm64 (tarball sha256 08308460320e852ac0745b2be3c7ae1cd81bdad713506ed7d817ba1ec9e1a5a5), KCOV and KASAN inline per docs/guides/SYZKALLER_SETUP.md; Image sha256 0182d7a5fe638c253e1c60ee6db7c718a2f564bb8f281596e37cb0a8e02c0d8b",
+    "guest": "Debian bookworm arm64 from syzkaller's create-image.sh at 27a8bd60, 2 GiB; rootfs sha256 3b14c503e385194c9def78ad5ec7a6b5d95cc709e95ef8e09fc597888e4c8f69",
+    "duration_secs": 1800,
+    "cpu_cores": 2,
+    "memory_mib": 6144,
+    "vm_count": 1,
+    "procs": 6,
+    "machine_check_done": "9 min 42 s after the test started",
+    "first_corpus_entry": "16 min 24 s after the test started",
+    "execs": 1810,
+    "corpus": 57,
+    "coverage": 13708,
+    "crashes_observed": 0,
+    "observed_on": "2026-11-25",
+    "termination": "completed; timeout wrapper exit 124 is expected",
+    "staging": "First emulated run with the 0.9.11 staging permissions and fixed launch script that the Linux KVM runs needed."
+  },
+  "kvm": {
+    "runs": [
+      "https://github.com/HenryCooper86/oxfuzz/actions/runs/45346836012",
+      "https://github.com/HenryCooper86/oxfuzz/actions/runs/45358003693"
+    ],
+    "accel": "-machine pc,accel=kvm -cpu host; only /dev/kvm passed to the container (no privileges or capabilities added)",
+    "boot_to_multi_user": "16 s with KVM against 126 s under TCG, same kernel and rootfs (run 45358003693)",
+    "campaigns": [
+      {
+        "host": "Intel Xeon 6975P-C",
+        "execs": 143404,
+        "corpus": 4826,
+        "coverage": 59982,
+        "machine_check_done": "32 s",
+        "crashes_observed": 1
+      },
+      {
+        "host": "AMD EPYC 7763",
+        "execs": 48785,
+        "corpus": 2118,
+        "coverage": 44314,
+        "machine_check_done": "51 s",
+        "crashes_observed": 0
+      }
+    ],
+    "kernel": "Linux 6.12.118 x86_64, KCOV and KASAN; bzImage sha256 ad7a8178aeb847737642e0b6e97bc5599766811d83c9fbd395f497fd63e39148"
+  },
+  "approval": "None requested: the test constructs the service without an approval handler. An operator run goes through the oxfuzz kernel approval.",
+  "limitations": [
+    "The KVM campaigns ran before the tag on a development branch and were not repeated on the tag commit.",
+    "The one KVM crash report (SYZFAIL: posix_spawnp failed) was not reproduced and its cause was not investigated; that campaign predates the crash-count fix, so its summary recorded 0 crashes.",
+    "Throughput is not qualified; the emulated run executes about one program per second.",
+    "No kernel crash occurred in the emulated run; kernel crash reproduction and complete symbolization are not qualified.",
+    "Kernel, rootfs and private guest keys are not distributed with the application or website.",
+    "The oxfuzz kernel command line, a supplied manager.cfg, the desktop app's launch path, Stop and resume, and more than one guest were not exercised."
+  ],
+  "observed_commit": "7057e092591ac989729f3f969db426d869ffb5fd",
+  "candidate_delta": "Emulated part: none known (same worktree as the engine qualification, which recorded an empty patch). KVM part: the tag adds the crash-count fix, the native-Linux build-script fix, the Windows CI removal and the 0.9.11 version bump on top of d63cab37."
+}

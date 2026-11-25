@@ -1,0 +1,39 @@
+{
+  "schema_version": 3,
+  "claim": "sandbox_isolation",
+  "candidate_commit": "7057e092591ac989729f3f969db426d869ffb5fd",
+  "tag": "v0.9.11",
+  "platform": "macOS arm64 / Linux arm64 Docker",
+  "sandbox_image": {
+    "reference": "oxfuzz/fuzz-sandbox:0.2.4",
+    "id": "sha256:06142d9651c92b4cadefa55fa40309f8c081fa3d219ef17df9f2f1108c95863b",
+    "architecture": "linux/arm64",
+    "distribution": "Built locally with scripts/build-sandbox.sh on 2026-11-24 from the 0.2.4 Dockerfile the tag carries. The image published to GitHub Container Registry for this release is a separate build of the same Dockerfile; its Ubuntu packages are not version-pinned and can differ (each image lists them in /usr/share/doc/oxfuzz-sandbox/packages.tsv)."
+  },
+  "command": "cargo test --locked -p hf-runtime --test live_isolation -- --ignored --test-threads=1 --nocapture",
+  "exit_code": 0,
+  "observed_on": "2026-11-25",
+  "started_utc": "2026-11-25T01:34:30Z",
+  "ended_utc": "2026-11-25T01:34:52Z",
+  "scenarios_passed": [
+    "Network unavailable, input read-only, explicitly mounted output writable, 256 MiB and 1 CPU cgroup limits verified",
+    "Explicit numeric UID/GID can read private input and creates correctly owned output",
+    "Timeout awaits owned-container cleanup",
+    "Running container registered with owned workspace label",
+    "Runtime ownership records inaccessible inside the sandbox",
+    "Fresh runtime cleans up container left by terminated helper client"
+  ],
+  "helper": "Seventh test is the recovery child-process helper, not an independent scenario.",
+  "device_policy": "New in 0.9.11: the runtime accepts exactly /dev/kvm as a passthrough device, only when the host has it as a character device, and refuses any other device before Docker runs. Covered by unit and integration tests in CI; this macOS host has no /dev/kvm, so no device was passed here.",
+  "semgrep": {
+    "provenance": "The 0.2.4 image build runs an offline Semgrep scan with a read-only source mount and checks its report on the host. That check passed when this image was built on 2026-11-24 and again when the same image was rebuilt from cache on 2026-11-24 after the verification-mount fix; it was not repeated for this record."
+  },
+  "limitations": [
+    "Host is macOS arm64; this is not a Linux host qualification. Windows is not supported.",
+    "Docker failure recovery scenarios cover only disposable owned containers.",
+    "All seven tests reported ok (six scenarios and the recovery helper).",
+    "Only the linux/arm64 image was used here; the linux/amd64 image was built and verified by the GitHub workflow, not run through these scenarios."
+  ],
+  "observed_commit": "7057e092591ac989729f3f969db426d869ffb5fd",
+  "candidate_delta": "None known. This run was made in a separate worktree checked out at the tag commit, with no other changes in it; the engine qualification that ran in the same worktree immediately afterwards recorded an empty working-tree patch. No digest was taken for this run itself."
+}

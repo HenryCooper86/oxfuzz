@@ -1,0 +1,69 @@
+{
+  "schema_version": 3,
+  "claim": "userspace_engines",
+  "candidate_commit": "7057e092591ac989729f3f969db426d869ffb5fd",
+  "tag": "v0.9.11",
+  "qualification_commit": "7057e092591ac989729f3f969db426d869ffb5fd",
+  "qualification_patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "candidate_delta": "None. The qualification ran in a separate worktree checked out at the tag commit and recorded that commit and an empty working-tree patch (the digest above is that of an empty patch).",
+  "source_sha256": "a21529ba223ec0a03b349e9f78b879eed69dc60d8d130dbac1b97fb7bf05a591",
+  "status": "passed",
+  "started_at": "2026-11-25T01:34:53.310357+00:00",
+  "ended_at": "2026-11-25T01:37:01.237090+00:00",
+  "platform": "macOS-27.2.1-arm64-arm-64bit",
+  "sandbox_image": {
+    "reference": "oxfuzz/fuzz-sandbox:0.2.4",
+    "id": "sha256:06142d9651c92b4cadefa55fa40309f8c081fa3d219ef17df9f2f1108c95863b",
+    "architecture": "linux/arm64",
+    "distribution": "Built locally with scripts/build-sandbox.sh on 2026-11-24 from the 0.2.4 Dockerfile the tag carries. The image published to GitHub Container Registry for this release is a separate build of the same Dockerfile; its Ubuntu packages are not version-pinned and can differ (each image lists them in /usr/share/doc/oxfuzz-sandbox/packages.tsv)."
+  },
+  "cycles": 1,
+  "cpu_cores": 1,
+  "memory_mib": 2048,
+  "smoke_and_replay_duration_secs": 10,
+  "review": "Provider review passed before execution for all three engines, using a local Ollama model (qwen3:8b), as for 0.9.10. Explicit human approval was supplied for this exact source pair on 2026-11-25; the pair is unchanged since 0.9.10.",
+  "cleanup": "verified_by_fixture",
+  "engines": {
+    "libfuzzer": {
+      "smoke_passed": true,
+      "smoke_duration_secs": 10,
+      "smoke_execs_per_sec": 1048576.0,
+      "smoke_crashes": 0,
+      "stop_ms": 575,
+      "campaign_run_id": "82ed3efe-019b-47af-a434-5c65429db6c5",
+      "replay_run_id": "d9f215c4-39bc-4cda-9454-edcfa40165a8",
+      "binary_sha256": "4bf4a4056cdb4b02400bd74b21261ce2f00b543fd47c1231d3ed8116858d63a2"
+    },
+    "afl++": {
+      "smoke_passed": true,
+      "smoke_duration_secs": 10,
+      "smoke_execs_per_sec": 268243.28,
+      "smoke_crashes": 0,
+      "stop_ms": 1608,
+      "campaign_run_id": "be07c86f-9db3-411c-a70f-f3425accf0fc",
+      "replay_run_id": "d5081be1-6a52-4705-94f2-9b717312b31b",
+      "binary_sha256": "87bc80a92dc98d0a254692a4e3f796a8f483e425564ffd01cde09584cc6ffb04"
+    },
+    "honggfuzz": {
+      "smoke_passed": true,
+      "smoke_duration_secs": 10,
+      "smoke_execs_per_sec": 190592.0,
+      "smoke_crashes": 0,
+      "stop_ms": 335,
+      "campaign_run_id": "b131b748-0dd7-4645-8d55-e6988a16ffbc",
+      "replay_run_id": "00094437-1499-4292-9d53-8862cdba6e4c",
+      "binary_sha256": "cf29269db3e44e6987f10d0e988aa437c3c0fe3e21202d493378cd80b1a1a054"
+    }
+  },
+  "related_records": {
+    "language_and_binary_engines": "https://oxfuzz.bionicloud.net/acceptance/v0.9.8/language-and-binary-engines.json"
+  },
+  "limitations": [
+    "One short cycle per engine does not establish long-duration stability or a statistical latency percentile.",
+    "No crashes occurred; crash reproduction and symbolization are not claimed by this cycle.",
+    "Executed on macOS arm64 with a Linux arm64 Docker sandbox; not a Linux desktop installation test. Windows is not supported.",
+    "The pre-execution review used a small local model rather than the provider configured for the desktop app.",
+    "This cycle covers C sources on libFuzzer, AFL++ and honggfuzz. The Go, Python, Java, JavaScript and binary-only engines were not rerun for 0.9.11; their last live results are the 0.9.8 related record, made on a different commit.",
+    "The qualification drives the service operations from a test, not from the desktop app."
+  ]
+}
