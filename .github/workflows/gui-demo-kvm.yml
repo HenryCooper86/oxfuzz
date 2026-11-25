@@ -8,7 +8,7 @@ name: GUI demo - kernel campaign with KVM
 # What this is and is not:
 # - The app is the published v0.9.11 .deb, unmodified; the sandbox image is
 #   the published GHCR 0.2.4 image, pulled with scripts/pull-sandbox.sh.
-# - The kernel is the cached build of kernel-kvm.yml (same recipe); the Debian
+# - The kernel is built from kernel-kvm.yml's recipe (cached); the Debian
 #   rootfs and its SSH key are built here for this run. Neither, nor the key,
 #   is uploaded: the artifact holds the video, screenshots, page sources,
 #   the step log and host evidence only.
@@ -39,6 +39,7 @@ permissions:
 
 env:
   LINUX_VERSION: 6.12.118
+  LINUX_SHA256: 08308460320e852ac0745b2be3c7ae1cd81bdad713506ed7d817ba1ec9e1a5a5
   KERNEL_RECIPE: x86_64-kcov-kasan-r1
   CREATE_IMAGE_SHA256: be1588c107f8fa096cdd8c81eefddc46d789ea83ab3f082ba1c5b89b4f2ddf34
   ROOTFS_RELEASE: bookworm
@@ -49,7 +50,7 @@ jobs:
   record:
     name: Record the kernel demo
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 240
     steps:
       - name: Check out the repository
         uses: actions/checkout@v7
@@ -78,12 +79,76 @@ jobs:
           docker system prune -af
           df -h /
 
-      - name: Restore the kernel built by kernel-kvm.yml
+      # Same recipe and cache key as kernel-kvm.yml. Caches are scoped to the
+      # branch that saved them, so the first run on main builds the kernel.
+      - name: Restore a kernel built from the same recipe
+        id: cache
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/kernel-out
           key: kvm-kernel-${{ env.LINUX_VERSION }}-${{ env.KERNEL_RECIPE }}
-          fail-on-cache-miss: true
+
+      - name: Build the kernel
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flex bison bc libelf-dev libssl-dev
+          build="$RUNNER_TEMP/kernel-build"
+          out="$RUNNER_TEMP/kernel-out"
+          mkdir -p "$build" "$out"
+          cd "$build"
+          curl -fsSL --retry 3 -o linux.tar.xz \
+            "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${LINUX_VERSION}.tar.xz"
+          echo "${LINUX_SHA256}  linux.tar.xz" | sha256sum -c -
+          tar -xf linux.tar.xz
+          cd "linux-${LINUX_VERSION}"
+          make defconfig
+          make kvm_guest.config
+          ./scripts/config \
+            -e CONFIG_KCOV \
+            -e CONFIG_KCOV_INSTRUMENT_ALL \
+            -e CONFIG_KCOV_ENABLE_COMPARISONS \
+            -e CONFIG_DEBUG_INFO_DWARF4 \
+            -e CONFIG_KASAN \
+            -e CONFIG_KASAN_INLINE \
+            -e CONFIG_CONFIGFS_FS \
+            -e CONFIG_SECURITYFS \
+            -e CONFIG_DEBUG_FS \
+            -e CONFIG_BINFMT_MISC \
+            -e CONFIG_NET_9P \
+            -e CONFIG_NET_9P_VIRTIO \
+            -e CONFIG_CMDLINE_BOOL
+          make olddefconfig
+          for option in KCOV KCOV_INSTRUMENT_ALL KCOV_ENABLE_COMPARISONS KASAN \
+            KASAN_INLINE CONFIGFS_FS SECURITYFS DEBUG_FS BINFMT_MISC KVM_GUEST; do
+            grep -qx "CONFIG_${option}=y" .config || { echo "CONFIG_${option} is not set" >&2; exit 1; }
+          done
+          started=$SECONDS
+          make -j"$(nproc)" bzImage
+          cp arch/x86/boot/bzImage "$out/bzImage"
+          cp .config "$out/kernel.config"
+          {
+            echo "linux_version=${LINUX_VERSION}"
+            echo "linux_tarball_sha256=${LINUX_SHA256}"
+            echo "kernel_recipe=${KERNEL_RECIPE}"
+            echo "bzImage_sha256=$(sha256sum "$out/bzImage" | cut -d' ' -f1)"
+            echo "kernel_config_sha256=$(sha256sum "$out/kernel.config" | cut -d' ' -f1)"
+            echo "compiler=$(gcc --version | head -n 1)"
+            echo "build_seconds=$((SECONDS - started))"
+            echo "build_cpus=$(nproc)"
+            echo "built_by_run=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "built_from_commit=${GITHUB_SHA}"
+            grep -E '^CONFIG_(DEBUG_INFO[A-Z0-9_]*|KASAN[A-Z_]*|KCOV[A-Z_]*)=' .config | sed 's/^/config: /'
+          } > "$out/identity.txt"
+          cat "$out/identity.txt"
+
+      - name: Save the kernel
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/kernel-out
+          key: kvm-kernel-${{ env.LINUX_VERSION }}-${{ env.KERNEL_RECIPE }}
 
       - name: Install the display, recorder and WebDriver tools
         run: |
