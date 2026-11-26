@@ -353,6 +353,125 @@ button:disabled {
   box-shadow: 0 0 0 3px var(--accent-glow);
 }
 
+/* Native checkboxes and radios pick up the brand accent instead of the
+   platform blue. */
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: var(--accent);
+}
+
+/* Selectable option card (a radio group drawn as cards). The real radio stays
+   in the DOM for keyboard and screen readers, visually hidden; the card and a
+   drawn indicator show the state. */
+.hf-choice {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-primary);
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease, box-shadow 120ms ease;
+}
+.hf-choice > input {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+  pointer-events: none;
+}
+.hf-choice:hover {
+  border-color: var(--border-focus);
+  background: var(--surface-hover);
+}
+.hf-choice-dot {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+  border-radius: 999px;
+  border: 1.5px solid var(--border-focus);
+  background: var(--surface-raised);
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+.hf-choice:has(input:checked) {
+  border-color: var(--accent-border);
+  background: var(--accent-subtle);
+}
+.hf-choice:has(input:checked) .hf-choice-dot {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 3.5px var(--surface-raised);
+  background: var(--accent);
+}
+.hf-choice:has(input:focus-visible) {
+  box-shadow:
+    0 0 0 2px var(--surface-primary),
+    0 0 0 4px var(--accent);
+}
+
+/* Field label used by dense forms (matches the Run view's labels). */
+.hf-field-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+/* Dense form building blocks (Binary view): divided bands inside one card, a
+   tinted footer for the primary action, fit-to-width grids, stat tiles, an
+   inline error block and a stack-frame list. */
+.hf-form-section {
+  padding: var(--space-md) var(--space-lg);
+}
+.hf-form-section + .hf-form-section,
+.hf-form-section + .hf-form-footer {
+  border-top: 1px solid var(--border);
+}
+.hf-form-footer {
+  padding: 12px var(--space-lg);
+  background: var(--surface-secondary);
+}
+.hf-grid-260 {
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+.hf-grid-300 {
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+}
+.hf-stat {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-primary);
+}
+.hf-stat-value {
+  margin-top: 2px;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+.hf-alert-error {
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid color-mix(in srgb, var(--error) 35%, transparent);
+  border-radius: var(--radius-md);
+  background: var(--error-subtle);
+  color: var(--error);
+  overflow-wrap: anywhere;
+}
+.hf-frames {
+  margin-bottom: var(--space-sm);
+  padding: var(--space-sm) var(--space-sm) var(--space-sm) 2rem;
+  border-radius: var(--radius-md);
+  background: var(--surface-code);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  list-style: decimal;
+}
+
 /* Icons. Lucide's default 2px stroke reads heavy next to 12-13px UI text; one
    lighter weight everywhere keeps glyphs crisp and consistent at 14-18px.
    (A CSS stroke-width wins over the SVG presentation attribute.) */

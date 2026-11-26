@@ -1,8 +1,8 @@
 import "../i18n.parityBinary";
 import { Fragment, useState } from "react";
-import { Cpu, FileSearch, GitPullRequest } from "lucide-react";
+import { Cpu, FileSearch, FolderOpen, GitPullRequest, Info, Play } from "lucide-react";
 import { PathActions } from "../components/PathActions";
-import { Button, Input, Textarea, ViewHeader } from "../components/ui";
+import { Badge, Button, EmptyState, Input, Textarea, ViewHeader } from "../components/ui";
 import { DurationInput } from "../components/ui/DurationInput";
 import { useI18n } from "../i18nContext";
 import { openExternal, pickFile, pickFolder } from "../lib";
@@ -24,22 +24,28 @@ import { useConfirm } from "../providers/confirm";
 import { useProject } from "../providers/project";
 import type { CreatedIssue, IssueExport } from "../types";
 
-const LABEL_STYLE = { color: "var(--text-secondary)" };
-
 function Label({ htmlFor, children }: { htmlFor?: string; children: React.ReactNode }) {
-  return <label htmlFor={htmlFor} className="text-xs font-medium" style={LABEL_STYLE}>{children}</label>;
+  return <label htmlFor={htmlFor} className="hf-field-label">{children}</label>;
 }
 
-function PathField({ id, label, value, onChange, placeholder, pickLabel, onPick, help }: {
+/** One divided band of the session form. */
+function FormSection({ children }: { children: React.ReactNode }) {
+  return <div className="hf-form-section flex flex-col gap-3">{children}</div>;
+}
+
+function PathField({ id, label, value, onChange, placeholder, pickLabel, pickIcon, onPick, help }: {
   id: string; label: string; value: string; onChange: (value: string) => void;
-  placeholder?: string; pickLabel: string; onPick: () => Promise<string | null>; help?: string;
+  placeholder?: string; pickLabel: string; pickIcon: React.ReactNode; onPick: () => Promise<string | null>; help?: string;
 }) {
   return (
-    <div className="flex flex-col gap-1">
+    <div className="flex flex-col gap-1.5 min-w-0">
       <Label htmlFor={id}>{label}</Label>
-      <div className="flex gap-2">
-        <Input id={id} mono value={value} placeholder={placeholder} onChange={(e) => onChange(e.target.value)} />
-        <Button variant="outline" size="sm" onClick={() => void onPick().then((picked) => { if (picked) onChange(picked); })}>{pickLabel}</Button>
+      <div className="flex gap-2 min-w-0">
+        <Input id={id} mono className="h-8 min-w-0" value={value} placeholder={placeholder} onChange={(e) => onChange(e.target.value)} />
+        <Button variant="outline" className="shrink-0 whitespace-nowrap" onClick={() => void onPick().then((picked) => { if (picked) onChange(picked); })}>
+          {pickIcon}
+          {pickLabel}
+        </Button>
       </div>
       {help && <p className="text-xs text-text-muted">{help}</p>}
     </div>
@@ -132,9 +138,9 @@ function IssueActions({ project, report, finding, compact }: { project: string; 
 
 function Stat({ label, value }: { label: string; value: string }) {
   return (
-    <div className="surface-card" style={{ padding: "var(--space-sm) var(--space-md)" }}>
-      <div className="text-xs text-text-muted">{label}</div>
-      <div className="text-lg font-semibold">{value}</div>
+    <div className="hf-stat">
+      <div className="hf-field-label">{label}</div>
+      <div className="hf-stat-value">{value}</div>
     </div>
   );
 }
@@ -152,11 +158,11 @@ function FindingsTable({ project, outcome }: { project: string; outcome: BinaryF
     <div className="overflow-x-auto">
       <table className="w-full text-sm">
         <thead>
-          <tr className="text-left text-xs text-text-muted">
+          <tr className="text-left">
             {["sha", "size", "fuzzerSignal", "replaySignal", "confirmed", "kind", "summary", "duplicateOf", "minimized"].map((col) => (
-              <th key={col} scope="col" className="py-1 pr-3 font-medium">{t(`binary.col.${col}`)}</th>
+              <th key={col} scope="col" className="hf-field-label py-2 pr-3 whitespace-nowrap">{t(`binary.col.${col}`)}</th>
             ))}
-            <th scope="col" className="py-1 font-medium">{t("binary.col.actions")}</th>
+            <th scope="col" className="hf-field-label py-2">{t("binary.col.actions")}</th>
           </tr>
         </thead>
         <tbody>
@@ -164,12 +170,12 @@ function FindingsTable({ project, outcome }: { project: string; outcome: BinaryF
             const expanded = open === finding.sha256;
             return (
               <Fragment key={finding.sha256}>
-                <tr className="align-top" style={{ borderTop: "1px solid var(--border)" }}>
+                <tr className="align-top hover:bg-surface-hover transition-colors" style={{ borderTop: "1px solid var(--border)" }}>
                   <td className="py-2 pr-3 font-mono" title={finding.sha256}>{finding.sha256.slice(0, 8)}</td>
                   <td className="py-2 pr-3">{finding.size}</td>
                   <td className="py-2 pr-3">{finding.fuzzer_signal ?? "-"}</td>
                   <td className="py-2 pr-3">{signal(finding, finding.replay_signal)}</td>
-                  <td className="py-2 pr-3">{finding.confirmed ? t("binary.yes") : t("binary.no")}</td>
+                  <td className="py-2 pr-3"><Badge variant={finding.confirmed ? "error" : "default"}>{finding.confirmed ? t("binary.yes") : t("binary.no")}</Badge></td>
                   <td className="py-2 pr-3">{finding.kind ?? "-"}</td>
                   <td className="py-2 pr-3">{finding.summary || "-"}</td>
                   <td className="py-2 pr-3 font-mono">{finding.duplicate_of ? finding.duplicate_of.slice(0, 8) : "-"}</td>
@@ -189,7 +195,7 @@ function FindingsTable({ project, outcome }: { project: string; outcome: BinaryF
                   <tr>
                     <td colSpan={10} className="pb-3">
                       {finding.frames.length > 0 ? (
-                        <ol className="font-mono text-xs list-decimal pl-5" aria-label={t("binary.showFrames")}>
+                        <ol className="hf-frames" aria-label={t("binary.showFrames")}>
                           {finding.frames.map((frame, index) => <li key={index}>{frame}</li>)}
                         </ol>
                       ) : <p className="text-xs text-text-muted">{t("binary.noFrames")}</p>}
@@ -209,11 +215,13 @@ function FindingsTable({ project, outcome }: { project: string; outcome: BinaryF
 function Outcome({ project, outcome }: { project: string; outcome: BinaryFuzzOutcome }) {
   const { t } = useI18n();
   return (
-    <section className="flex flex-col gap-3" aria-label={t("binary.result")}>
-      <h2 className="text-base font-semibold">{t("binary.result")}</h2>
-      <p className="text-xs text-text-muted font-mono">
-        {outcome.binary_name} · {outcome.machine} · {outcome.input} · {formatDuration(outcome.duration_secs)} · {t("binary.session")} {outcome.session}
-      </p>
+    <section className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md) var(--space-lg)" }} aria-label={t("binary.result")}>
+      <div className="flex flex-col gap-1">
+        <h2 className="text-sm font-semibold text-text-primary">{t("binary.result")}</h2>
+        <p className="text-xs text-text-muted font-mono">
+          {outcome.binary_name} · {outcome.machine} · {outcome.input} · {formatDuration(outcome.duration_secs)} · {t("binary.session")} {outcome.session}
+        </p>
+      </div>
       <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))" }}>
         <Stat label={t("binary.stat.execs")} value={count(outcome.execs_done)} />
         <Stat label={t("binary.stat.execsPerSec")} value={outcome.execs_per_sec === null ? "-" : outcome.execs_per_sec.toFixed(1)} />
@@ -229,7 +237,7 @@ function Outcome({ project, outcome }: { project: string; outcome: BinaryFuzzOut
         <span className="font-mono truncate">{outcome.workspace}</span>
         <PathActions path={outcome.workspace} />
       </div>
-      <h3 className="text-sm font-semibold">{t("binary.findings")}</h3>
+      <h3 className="text-sm font-semibold text-text-primary border-t border-border" style={{ paddingTop: "var(--space-md)" }}>{t("binary.findings")}</h3>
       <FindingsTable project={project} outcome={outcome} />
     </section>
   );
@@ -241,20 +249,30 @@ function EarlierReport({ project }: { project: string }) {
   const [finding, setFinding] = useState("");
   const findingValid = validFindingId(finding);
   return (
-    <section className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)" }}>
-      <h2 className="text-base font-semibold flex items-center gap-2"><FileSearch size={16} />{t("binary.earlier")}</h2>
-      <p className="text-xs text-text-muted">{t("binary.earlierHelp")}</p>
-      <PathField
-        id="binary-report" label={t("binary.reportPath")} value={report} onChange={setReport}
-        placeholder={t("binary.reportPlaceholder")} pickLabel={t("binary.pickReport")} onPick={() => pickFile(t("binary.pickReport"))}
-      />
-      <div className="flex flex-col gap-1">
-        <Label htmlFor="binary-finding">{t("binary.findingId")}</Label>
-        <Input id="binary-finding" mono value={finding} onChange={(e) => setFinding(e.target.value.trim())} aria-invalid={finding !== "" && !findingValid} />
-        {finding !== "" && !findingValid && <p role="alert" className="text-xs text-error">{t("binary.invalidFinding")}</p>}
+    <section className="surface-card overflow-hidden">
+      <div className="hf-form-section flex flex-col gap-1">
+        <h2 className="text-sm font-semibold flex items-center gap-2 text-text-primary">
+          <FileSearch size={16} className="text-text-muted" />
+          {t("binary.earlier")}
+        </h2>
+        <p className="text-xs text-text-secondary">{t("binary.earlierHelp")}</p>
+      </div>
+      <div className="hf-form-section hf-grid-300 grid gap-4">
+        <PathField
+          id="binary-report" label={t("binary.reportPath")} value={report} onChange={setReport}
+          placeholder={t("binary.reportPlaceholder")} pickLabel={t("binary.pickReport")} pickIcon={<FileSearch size={14} />}
+          onPick={() => pickFile(t("binary.pickReport"))}
+        />
+        <div className="flex flex-col gap-1.5 min-w-0">
+          <Label htmlFor="binary-finding">{t("binary.findingId")}</Label>
+          <Input id="binary-finding" mono className="h-8" value={finding} onChange={(e) => setFinding(e.target.value.trim())} aria-invalid={finding !== "" && !findingValid} />
+          {finding !== "" && !findingValid && <p role="alert" className="text-xs text-error">{t("binary.invalidFinding")}</p>}
+        </div>
       </div>
       {report.trim() !== "" && findingValid && project && (
-        <IssueActions project={project} report={report.trim()} finding={finding} compact />
+        <div className="hf-form-section">
+          <IssueActions project={project} report={report.trim()} finding={finding} compact />
+        </div>
       )}
     </section>
   );
@@ -302,46 +320,68 @@ export function BinaryView() {
     <div className="flex flex-col gap-4">
       <ViewHeader title={t("title.binary")} description={t("binary.subtitle")} />
       <p className="text-sm text-text-secondary">{t("binary.requirement")}</p>
-      <section className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)" }}>
-        <PathField
-          id="binary-path" label={t("binary.path")} value={binary} onChange={setBinary}
-          placeholder={t("binary.pathPlaceholder")} pickLabel={t("binary.browse")} onPick={() => pickFile(t("binary.path"))}
-        />
-        <fieldset className="flex flex-col gap-2" style={{ border: 0, padding: 0, margin: 0 }}>
-          <legend className="text-xs font-medium mb-1" style={LABEL_STYLE}>{t("binary.inputMode")}</legend>
-          {BINARY_INPUT_MODES.map((mode) => (
-            <label key={mode} className="flex items-start gap-2 text-sm cursor-pointer">
-              <input type="radio" name="binary-input" className="mt-1" value={mode} checked={input === mode} onChange={() => setInput(mode)} />
-              <span>
-                <span className="font-medium">{t(`binary.mode.${mode}`)}</span>
-                <span className="block text-xs text-text-muted">{t(`binary.mode.${mode}.help`)}</span>
-              </span>
-            </label>
-          ))}
-        </fieldset>
-        <PathField
-          id="binary-seeds" label={t("binary.seeds")} value={seeds} onChange={setSeeds} help={t("binary.seedsHelp")}
-          pickLabel={t("binary.pickFolder")} onPick={() => pickFolder(t("binary.seeds"))}
-        />
-        <PathField
-          id="binary-libraries" label={t("binary.libraries")} value={libraries} onChange={setLibraries} help={t("binary.librariesHelp")}
-          pickLabel={t("binary.pickFolder")} onPick={() => pickFolder(t("binary.libraries"))}
-        />
-        <div className="flex gap-4 flex-wrap">
-          <div className="flex flex-col gap-1">
-            <Label>{t("binary.duration")}</Label>
-            <DurationInput ariaLabel={t("binary.duration")} seconds={duration} onChange={setDuration} invalid={!validDuration} />
-            {!validDuration && <p role="alert" className="text-xs text-error">{t("binary.invalidDuration")}</p>}
+      <section className="surface-card overflow-hidden">
+        <FormSection>
+          <PathField
+            id="binary-path" label={t("binary.path")} value={binary} onChange={setBinary}
+            placeholder={t("binary.pathPlaceholder")} pickLabel={t("binary.browse")} pickIcon={<FileSearch size={14} />}
+            onPick={() => pickFile(t("binary.path"))}
+          />
+        </FormSection>
+        <FormSection>
+          <fieldset className="flex flex-col gap-2 min-w-0" style={{ border: 0, padding: 0, margin: 0 }}>
+            <legend className="hf-field-label" style={{ marginBottom: 8 }}>{t("binary.inputMode")}</legend>
+            <div className="hf-grid-260 grid gap-2">
+              {BINARY_INPUT_MODES.map((mode) => (
+                <label key={mode} className="hf-choice">
+                  <input type="radio" name="binary-input" value={mode} checked={input === mode} onChange={() => setInput(mode)} />
+                  <span className="hf-choice-dot" aria-hidden="true" />
+                  <span className="min-w-0">
+                    <span className="block text-13px font-medium text-text-primary">{t(`binary.mode.${mode}`)}</span>
+                    <span className="block text-xs text-text-secondary" style={{ marginTop: 2, lineHeight: 1.45 }}>{t(`binary.mode.${mode}.help`)}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+          </fieldset>
+        </FormSection>
+        <FormSection>
+          <div className="hf-grid-300 grid gap-4">
+            <PathField
+              id="binary-seeds" label={t("binary.seeds")} value={seeds} onChange={setSeeds} help={t("binary.seedsHelp")}
+              pickLabel={t("binary.pickFolder")} pickIcon={<FolderOpen size={14} />} onPick={() => pickFolder(t("binary.seeds"))}
+            />
+            <PathField
+              id="binary-libraries" label={t("binary.libraries")} value={libraries} onChange={setLibraries} help={t("binary.librariesHelp")}
+              pickLabel={t("binary.pickFolder")} pickIcon={<FolderOpen size={14} />} onPick={() => pickFolder(t("binary.libraries"))}
+            />
           </div>
-          <div className="flex flex-col gap-1">
-            <Label htmlFor="binary-timeout">{t("binary.timeout")}</Label>
-            <Input id="binary-timeout" type="number" min={1} value={timeoutMs} onChange={(e) => setTimeoutMs(e.target.value)} aria-invalid={!validTimeout} />
-            {!validTimeout && <p role="alert" className="text-xs text-error">{t("binary.invalidTimeout")}</p>}
+        </FormSection>
+        <FormSection>
+          <div className="flex gap-6 flex-wrap items-start">
+            <div className="flex flex-col gap-1.5">
+              <Label>{t("binary.duration")}</Label>
+              <DurationInput ariaLabel={t("binary.duration")} seconds={duration} onChange={setDuration} invalid={!validDuration} />
+              {!validDuration && <p role="alert" className="text-xs text-error">{t("binary.invalidDuration")}</p>}
+            </div>
+            <div className="flex flex-col gap-1.5" style={{ width: 180 }}>
+              <Label htmlFor="binary-timeout">{t("binary.timeout")}</Label>
+              <Input id="binary-timeout" type="number" min={1} className="h-8" value={timeoutMs} onChange={(e) => setTimeoutMs(e.target.value)} aria-invalid={!validTimeout} />
+              {!validTimeout && <p role="alert" className="text-xs text-error">{t("binary.invalidTimeout")}</p>}
+            </div>
           </div>
-        </div>
-        {!project && <p className="text-sm text-text-muted">{t("binary.noProject")}</p>}
-        <div>
-          <Button disabled={!canStart} onClick={() => void start()}>{t("binary.start")}</Button>
+        </FormSection>
+        <div className="hf-form-footer flex items-center justify-between gap-3 flex-wrap">
+          {project ? <span /> : (
+            <p className="flex items-center gap-1.5 text-xs text-text-secondary">
+              <Info size={14} />
+              {t("binary.noProject")}
+            </p>
+          )}
+          <Button variant="primary" disabled={!canStart} loading={running} onClick={() => void start()}>
+            {!running && <Play size={14} />}
+            {t("binary.start")}
+          </Button>
         </div>
       </section>
 
@@ -355,18 +395,15 @@ export function BinaryView() {
         </div>
       )}
       {error && (
-        <div role="alert" className="text-sm text-error">
+        <div role="alert" className="hf-alert-error text-sm">
           <div className="font-semibold">{t("binary.failed")}</div>
-          <div>{error}</div>
+          <div style={{ overflowWrap: "anywhere" }}>{error}</div>
         </div>
       )}
       {outcome ? (
         <Outcome project={project} outcome={outcome} />
       ) : !running && !error && (
-        <div className="surface-card" style={{ padding: "var(--space-md)" }}>
-          <div className="text-sm font-semibold">{t("binary.emptyTitle")}</div>
-          <p className="text-sm text-text-muted">{t("binary.emptyBody")}</p>
-        </div>
+        <EmptyState icon={<Cpu size={22} />} title={t("binary.emptyTitle")} hint={t("binary.emptyBody")} />
       )}
       <EarlierReport project={project} />
     </div>

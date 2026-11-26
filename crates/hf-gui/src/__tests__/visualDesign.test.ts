@@ -185,6 +185,17 @@ describe("buttons, icons and navigation", () => {
     }
   });
 
+  it("draws the binary form with themed choice cards and a primary start action", () => {
+    const binary = source("views/BinaryView.tsx");
+    expect(css).toMatch(/\.hf-choice\s*\{/);
+    expect(css).toMatch(/\.hf-choice:has\(input:checked\)/);
+    expect(css).toMatch(/input\[type="checkbox"\][^{]*\{[^}]*accent-color:\s*var\(--accent\)/);
+    expect(binary).toContain('className="hf-choice');
+    expect(binary).toMatch(/<Button\s+variant="primary"[^>]*onClick=\{\(\) => void start\(\)\}/);
+    expect(binary).toContain("whitespace-nowrap");
+    expect(binary).toContain("<EmptyState");
+  });
+
   it("renders the settings title upright like every other view title", () => {
     expect(source("components/settings/SettingsView.tsx")).not.toMatch(/fontStyle:\s*"italic"/);
   });
