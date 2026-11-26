@@ -6,7 +6,7 @@ name: GUI demo - kernel campaign with KVM
 # (scripts/demo/drive_kernel_demo.py), and ffmpeg records the display.
 #
 # What this is and is not:
-# - By default the app is the published v0.9.11 .deb, unmodified. With
+# - By default the app is the published v0.9.12 .deb, unmodified. With
 #   app_source=commit it is a .deb built here from the dispatched commit (to
 #   show unreleased GUI changes); app-identity.txt records which. The sandbox
 #   image is the published GHCR 0.2.4 image, pulled with scripts/pull-sandbox.sh.
@@ -50,7 +50,7 @@ env:
   KERNEL_RECIPE: x86_64-kcov-kasan-r1
   CREATE_IMAGE_SHA256: be1588c107f8fa096cdd8c81eefddc46d789ea83ab3f082ba1c5b89b4f2ddf34
   ROOTFS_RELEASE: bookworm
-  RELEASE_TAG: v0.9.11
+  RELEASE_TAG: v0.9.12
   DISPLAY: ":99"
 
 jobs:

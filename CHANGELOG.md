@@ -10,6 +10,8 @@ retain only the current release; older entries remain here as the record.
 
 ## Unreleased
 
+## 0.9.12 - 2026-11-26
+
 ### Added
 
 - Binary-only fuzzing in the desktop app: the Binary view reads the ELF
