@@ -10,6 +10,43 @@ retain only the current release; older entries remain here as the record.
 
 ## Unreleased
 
+### Added
+
+- Binary-only fuzzing in the desktop app: the Binary view reads the ELF
+  without running it (architecture, linking, imports) and suggests an input
+  mode with its reasons; the model can draft seeds from the binary's strings
+  and imports and refine the dictionary taken from them, and nothing it
+  proposes is used until you choose it. A running session shows live progress
+  (stage, executions, speed, edges, crashes, hangs, stability) and can be
+  stopped, keeping and replaying what it found. Earlier sessions are listed
+  with Open and Continue, and the Triage view lists binary sessions and their
+  findings, read from the session reports.
+- Binary findings can be explained by the model: likely bug class, severity
+  guidance and next steps, from the replay, the input, and the disassembly
+  around the fault and its first caller. The disassembly comes from GNU
+  objdump in the sandbox, is kept with the session, and is shown with the
+  note. Every binary-fuzzing prompt is retained before it is sent
+  (migration 0056, `binary_llm_drafts`).
+- `oxfuzz binary --compcov` splits multi-byte comparisons in the emulator
+  (`AFL_COMPCOV_LEVEL=2`, on by default in the desktop form). In sandbox image
+  0.2.4 it found a crash behind a 32-bit constant that the plain run missed,
+  at about 2% lower speed. It does not split `memcmp` or `strcmp`.
+- `oxfuzz binary --persistent <entry>` runs AFL++ QEMU persistent mode for
+  file-input sessions: a function name such as `main` or a module offset,
+  `--persistent-iterations` (default 1000) and `--restore-memory`. On a small
+  file reader it ran 5,953 instead of 1,024 executions per second at 100%
+  stability. Replay and minimization still use a fresh process, and the report
+  records the entry and AFL++'s stability.
+- `oxfuzz binary --dict <file>` passes a dictionary, and `--continue-from
+  <session-id>` seeds a session from an earlier session of the same binary.
+- The in-app Help has a Binary-only Fuzzing section, in English and Chinese.
+
+### Changed
+
+- The desktop app has a refreshed visual design: colour tokens, buttons,
+  inputs and native selects, icons, the sidebar, and binary findings shown as
+  cards.
+
 ## 0.9.11 - 2026-11-25
 
 ### Added

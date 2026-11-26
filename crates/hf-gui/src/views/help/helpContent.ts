@@ -888,6 +888,61 @@ const REF_GLOSSARY = `
   oxfuzz can push findings to it.
 `;
 
+const SCREEN_BINARY = `
+# Binary-only Fuzzing
+
+**Purpose:** fuzz a compiled Linux program when you have no source. AFL++ runs
+it in QEMU mode inside the sandbox: nothing is compiled, and the binary
+never runs on the host. Sessions belong to the active project.
+
+**Steps:**
+
+1. **Binary** -- type or browse to a 64-bit Linux ELF built for the sandbox's
+   architecture. It is read without running it: architecture, linking, size,
+   imports, and a suggested input mode with its reasons.
+2. **How the target takes its input** -- a file argument, standard input, a
+   server socket (the first connection it accepts, or the datagrams it
+   receives), or a message sequence separated by the bytes FF FE FD FC.
+3. **Seeds** -- a flat directory of inputs, or **Draft seeds with AI**: describe
+   the input in one line and the model proposes seeds from the binary's strings
+   and imports. They are shown first and used only after **Use these seeds**.
+4. **Dictionary** -- tokens taken from the binary's strings. **Refine with AI**
+   lets the model prune and extend them; **Edit tokens** changes them by hand.
+5. **Split comparisons (CompCov)** -- on by default. The emulator turns
+   multi-byte comparisons into byte-sized steps so AFL++ can reach magic
+   numbers. It does not split memcmp or strcmp; the dictionary covers strings.
+6. **Persistent mode** (file input only) -- loop on one function, the **Loop
+   entry** (usually main, or a module offset such as 0x9d8), inside one emulated
+   process instead of starting a process per input. Often several times faster.
+   **Restore memory each iteration** is for targets that keep state between
+   inputs, and is slower.
+7. **Start session.** It passes the same approval as running a generated
+   harness.
+
+**While it runs:** the progress panel shows the stage, executions, speed,
+edges, corpus, crashes, hangs and stability. **Stop** ends the fuzz run early;
+the session still replays, groups and minimizes what it found.
+
+**Results:** each finding is a card with its signal, crash kind, whether a
+replay in a fresh process confirmed it, and its minimized size. **Show stack
+frames** lists the frames as module offsets. **Explain with AI** asks the model
+for a likely bug class, severity guidance and next steps, from the replay, the
+input and the disassembly around the fault; the disassembly it was sent is
+shown under the note. The note is model output: it never changes the finding
+and does not prove exploitability. **Draft issue** and **File issue** use the
+project's issue tracker.
+
+**Session history:** **Open** shows an earlier session's results, and
+**Continue** starts a new session of the same binary from its corpus. Binary
+sessions are also listed in **Triage**, read from their reports.
+
+**Gotchas:** stability below about 90% in persistent mode means the loop entry
+leaks state between inputs; restore memory or choose another entry. There is no
+sanitizer, so memory errors that do not fault are not seen. Findings are not
+rows of the crash table, reports or SARIF. The AI actions need a configured
+provider, and every prompt is retained before it is sent.
+`;
+
 export const HELP_SECTIONS: HelpSection[] = [
   { id: "welcome", group: "start", title: "Welcome & Safety Model", keywords: "intro overview what is fuzzing safe sandbox hitl", body: WELCOME },
   { id: "first-run", group: "start", title: "First Run & Setup", keywords: "wizard provider api key docker install onboarding getting started", body: FIRST_RUN },
@@ -901,6 +956,7 @@ export const HELP_SECTIONS: HelpSection[] = [
   { id: "run", group: "pipeline", title: "Run the Fuzzer", keywords: "campaign engine duration syzkaller kernel edges execs stop coverage", body: SCREEN_RUN },
   { id: "triage", group: "pipeline", title: "Triage Crashes", keywords: "casr severity dedup stack signature bug report defectdojo export", body: SCREEN_TRIAGE },
   { id: "corpus", group: "pipeline", title: "Manage the Corpus", keywords: "seed grow prune minimize inputs ai generate", body: SCREEN_CORPUS },
+  { id: "binary", group: "pipeline", title: "Binary-only Fuzzing", keywords: "elf qemu no source compcov persistent seeds dictionary explain disassembly stability", body: SCREEN_BINARY },
 
   { id: "projects", group: "library", title: "Projects", keywords: "recent add delete remove folder workspace", body: SCREEN_PROJECTS },
   { id: "artifacts", group: "library", title: "Artifacts", keywords: "crashes corpus inputs browse export clear", body: SCREEN_ARTIFACTS },

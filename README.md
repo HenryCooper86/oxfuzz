@@ -164,6 +164,7 @@ Details are in the [Safety Model](docs/guides/SAFETY_MODEL.md).
 | **Harness Qualification Evidence** | Retained AFL++ input and persistent-sequence observations appear in Harness and History; unavailable or suspect measurements remain explicit. |
 | **Native Custom Mutators** | Import reviewed C/C++ source for upstream AFL++ or libFuzzer APIs, qualify a new harness revision, and retain artifact/image identity for replay. |
 | **Engine Integration** | AFL++, honggfuzz, libFuzzer, and syzkaller behind one `EngineAdapter` trait. |
+| **Binary-only Fuzzing** | Fuzz a compiled Linux ELF without its source in AFL++ QEMU mode: file, stdin, TCP/UDP server, or message-sequence input, with CompCov and persistent mode; crashes are replayed, grouped, and minimized. The desktop Binary view adds model-drafted seeds and a model explanation of each crash that reads its disassembly. |
 | **Crash Triage** | Dedup by stack signature, CASR severity/exploitability, minimize, and LLM-drafted bug reports under human review. |
 | **Corpus & Coverage** | Seed, grow, prune, and merge corpora; track coverage deltas; feed crashes back into the corpus. |
 | **AI Assistant** | A conversational control surface for the same service-owned workflow, with visible tool activity and policy-enforced human approval gates. |

@@ -373,8 +373,8 @@ normally, with no crash found, and 5,953 with `main` as the loop entry at
 
 ## Out of scope
 
-Binaries for another architecture; persistent, snapshot, and CompCov QEMU
-modes; Frida and Unicorn modes; Windows and macOS binaries; network services
+Binaries for another architecture; snapshot QEMU mode and `libcompcov`
+(`memcmp`/`strcmp` splitting); Frida and Unicorn modes; Windows and macOS binaries; network services
 beyond the single-connection and single-socket servers above; coverage reports; and
 the crash table, proof, and report surfaces for these findings.
 

@@ -407,6 +407,41 @@ successful one, and findings after it are marked as not attributable to the
 sequence that followed, because the starting state was never established.
 
 
+### Fuzz a program without its source
+
+The **Binary** view fuzzes a compiled Linux ELF in AFL++ QEMU mode inside the
+sandbox, for when there is no source to build a harness from. The binary is
+never run on the host, and a session passes the same approval as a generated
+harness. Sessions belong to the active project.
+
+1. Name the binary. It is read without running it: architecture, linking,
+   size, imports, and a suggested input mode with its reasons.
+2. Choose how it takes its input: a file argument, standard input, a server
+   socket, or a message sequence separated by the bytes `FF FE FD FC`.
+3. Give seeds as a folder, or describe the input in one line and use **Draft
+   seeds with AI**. The model's proposals are shown first and used only after
+   **Use these seeds**.
+4. The dictionary comes from the binary's strings. **Refine with AI** lets the
+   model prune and extend it.
+5. **Split comparisons (CompCov)** is on by default. **Persistent mode** (file
+   input only) loops on one function, usually `main`, inside one emulated
+   process; it is often several times faster. Turn on **Restore memory each
+   iteration** for targets that keep state between inputs.
+6. **Start session.** The progress panel shows the stage, executions, speed,
+   edges, crashes, hangs, and stability. **Stop** ends the fuzz run early and
+   still replays and minimizes what was found.
+
+Each finding is a card with its signal, crash kind, replay confirmation, and
+minimized size. **Explain with AI** asks the model for a likely bug class and
+next steps from the replay, the input, and the disassembly around the fault,
+and shows the disassembly it was sent. The note is model output: it never
+changes the finding and does not prove exploitability. Earlier sessions can be
+opened or continued from **Session history**, and they are listed in
+**Triage** as well. In a recorded one-minute session on a small image parser,
+persistent mode ran 420,504 executions at 100% stability and found the planted
+crash. See the [design](../design/binary-only-fuzzing-design.md) for the
+limits.
+
 ### Talk to it instead
 
 Everything above is also available conversationally. The **AI Assistant** uses

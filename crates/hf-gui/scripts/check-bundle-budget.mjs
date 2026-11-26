@@ -31,8 +31,11 @@ const limits = {
   // (binary analysis, dictionary and AI seed panels, live progress, session
   // history, AI triage notes and the Binary-only section of Triage) add
   // 20,252 B, again only in the lazily loaded Binary and Triage chunks:
-  // measured 1,589,611 B.
-  app: budget("HF_GUI_APP_JS_BUDGET", 1_600_000),
+  // measured 1,589,611 B. CompCov, stop, the disassembly with the AI note and
+  // persistent mode bring it to 1,597,097 B, and the Binary-only Fuzzing help
+  // section in English and Chinese to 1,603,551 B; the initial bundle is
+  // unchanged.
+  app: budget("HF_GUI_APP_JS_BUDGET", 1_650_000),
   vendor: budget("HF_GUI_VENDOR_JS_BUDGET", 3_700_000),
 };
 

@@ -487,6 +487,20 @@ with no `minimized` entry could not be shrunk, or its shrunk form was a
 different crash and was discarded. There is no sanitizer in this mode, so
 memory errors that do not fault are not seen at all.
 
+`--persistent` is refused with `--stdin`, `--socket`, or `--messages`, and
+when the entry is not a defined function; the message lists functions that
+exist. A stripped binary has none, so give a module offset such as `0x9d8`
+from a crash frame instead. Stability below about 90% in persistent mode means
+the loop entry leaves state behind between inputs: pass `--restore-memory`, or
+choose an entry closer to where the input is read. A crash that depends on
+such leftover state is not confirmed, because replay starts a fresh process.
+`--continue-from` is refused for a session of a different binary.
+
+In the desktop Binary view, **Draft seeds**, **Refine with AI**, and
+**Explain with AI** need a configured provider; without one nothing is sent.
+A finding with no frames in the target (a static binary, or no crash report)
+is explained without disassembly.
+
 `binary-issue` refuses a report that is not inside this project's own
 session directory, and a `--finding` prefix shorter than eight hex digits or
 matching more than one finding. See

@@ -27,6 +27,18 @@ describe("in-app documentation", () => {
     expect(chineseIds).toEqual(englishIds);
   });
 
+  it("documents binary-only fuzzing and its assists in both languages", () => {
+    const english = HELP_SECTIONS.find((section) => section.id === "binary");
+    const chinese = HELP_SECTIONS_ZH.find((section) => section.id === "binary");
+
+    for (const text of ["Persistent mode", "CompCov", "Use these seeds", "Explain with AI", "disassembly", "stability", "never runs on the host"]) {
+      expect(english?.body).toContain(text);
+    }
+    for (const text of ["持久模式", "CompCov", "用 AI 解释", "反汇编", "稳定性", "不会在主机上运行"]) {
+      expect(chinese?.body).toContain(text);
+    }
+  });
+
   it("documents installing the packaged app and the Gatekeeper first-launch step in both languages", () => {
     const englishFirstRun = HELP_SECTIONS.find((section) => section.id === "first-run");
     const chineseFirstRun = HELP_SECTIONS_ZH.find((section) => section.id === "first-run");
