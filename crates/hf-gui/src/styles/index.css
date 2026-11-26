@@ -511,6 +511,99 @@ input[type="radio"] {
   color: var(--error);
   overflow-wrap: anywhere;
 }
+/* Binary assists: chips for imports and tokens, a framed model-output note,
+   a warning line, the session stage stepper and progress bar, and history
+   rows. */
+.hf-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-primary);
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.6;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hf-chip-muted {
+  border-style: dashed;
+  color: var(--text-muted);
+}
+.hf-ai-note {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius-md);
+  background: var(--accent-subtle);
+}
+.hf-ai-note-text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.hf-alert-warning {
+  margin: 0;
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
+  border-radius: var(--radius-md);
+  background: var(--warning-subtle);
+  color: var(--warning);
+}
+.hf-stages {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.hf-stages li {
+  padding: 6px 0 0;
+  border-top: 3px solid var(--border-strong);
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+.hf-stages li[data-state="done"] {
+  border-top-color: var(--success);
+  color: var(--text-secondary);
+}
+.hf-stages li[data-state="current"] {
+  border-top-color: var(--accent);
+  color: var(--text-primary);
+  font-weight: 600;
+}
+.hf-progress-track {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--surface-tertiary);
+  overflow: hidden;
+}
+.hf-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 600ms ease;
+}
+.hf-history-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-primary);
+}
+
 .hf-finding {
   display: flex;
   flex-direction: column;

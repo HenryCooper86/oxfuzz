@@ -949,6 +949,12 @@ pub(crate) struct BinaryArgs {
     /// Per-input timeout in milliseconds.
     #[arg(long, default_value_t = 1000)]
     pub(crate) timeout_ms: u64,
+    /// An AFL++ dictionary file (`name="token"` lines) passed to the fuzzer.
+    #[arg(long = "dict")]
+    pub(crate) dictionary: Option<PathBuf>,
+    /// Seed the corpus from an earlier session of the same binary (its id).
+    #[arg(long)]
+    pub(crate) continue_from: Option<uuid::Uuid>,
     /// Print the result as JSON.
     #[arg(long)]
     pub(crate) json: bool,

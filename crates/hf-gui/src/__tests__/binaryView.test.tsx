@@ -8,7 +8,7 @@ import { ConfirmContext } from "../providers/confirm";
 import { ProjectContext } from "../providers/project";
 import { enParityBinary } from "../i18n.parityBinary";
 import { BinaryView } from "../views/BinaryView";
-import type { BinaryFuzzOutcome } from "../lib/parityBinary";
+import type { BinaryFuzzOutcome, BinaryProfile, BinarySessionSummary } from "../lib/parityBinary";
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -51,6 +51,21 @@ const outcome: BinaryFuzzOutcome = {
   }],
 };
 
+const summary: BinarySessionSummary = {
+  session: outcome.session, workspace: "/ws/session-1", binary_name: "server", binary_sha256: "b".repeat(64),
+  machine: "x86_64", input: "socket", duration_secs: 60, started_at: null, finished_at: "2026-11-26T00:00:00Z",
+  execs_done: 12345, findings: 1, distinct_findings: 1, confirmed: 1, minimized: 1, continued_from: null, can_continue: true,
+};
+
+const profile: BinaryProfile = {
+  machine: "x86_64", size: 4096, sha256: "b".repeat(64), linking: "dynamic", imports: ["accept", "recv"],
+  suggested_input: "socket", suggestion_reasons: ["imports accept: it serves stream connections"],
+  strings: ["LOGIN"], dictionary: ["LOGIN", "\\x00\\xff"], notes: [],
+};
+
+/** Let the analysis delay and pending promises run. */
+const settle = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 600)); });
+
 let host: HTMLDivElement;
 let root: Root;
 
@@ -83,6 +98,7 @@ const click = (el: HTMLElement) => act(async () => { el.click(); });
 
 beforeEach(() => {
   mocks.invoke.mockReset(); mocks.pickFile.mockReset(); mocks.confirm.mockReset(); mocks.openExternal.mockReset();
+  mocks.invoke.mockResolvedValue(null);
   host = document.createElement("div");
   document.body.append(host);
   root = createRoot(host);
@@ -112,7 +128,7 @@ describe("BinaryView", () => {
     await click(button("Start session"));
     expect(mocks.invoke).toHaveBeenCalledWith("binary_fuzz", { options: {
       project: "/proj", binary: "/bin/server", input: "socket", seeds: "/seeds",
-      libraries: "/libs", durationSecs: 60, timeoutMs: 250,
+      libraries: "/libs", durationSecs: 60, timeoutMs: 250, dictionary: [], continueFrom: undefined,
     } });
     expect(host.textContent).toContain("12,345");
     expect(host.textContent).toContain("aaaaaaaa");
@@ -136,26 +152,138 @@ describe("BinaryView", () => {
     expect(host.textContent).toContain("Crash in parse");
   });
 
-  it("files an issue only after confirmation and shows the URL", async () => {
-    mocks.invoke.mockResolvedValue({ url: "https://example.test/issues/5", number: 5 });
+  it("opens an earlier session from history and files an issue only after confirmation", async () => {
+    mocks.invoke.mockImplementation(async (name: string) => {
+      if (name === "binary_sessions") return [summary];
+      if (name === "binary_session") return outcome;
+      if (name === "binary_file_issue") return { url: "https://example.test/issues/5", number: 5 };
+      return null;
+    });
     render();
-    await setValue(host.querySelector("#binary-report") as HTMLInputElement, "/old/report.json");
-    await setValue(host.querySelector("#binary-finding") as HTMLInputElement, "deadbeef");
+    await settle();
+    expect(host.textContent).toContain(enParityBinary["binary.history"]);
+    await click(button("Open"));
+    expect(mocks.invoke).toHaveBeenCalledWith("binary_session", { project: "/proj", session: outcome.session });
+    await click(button("Show stack frames"));
     mocks.confirm.mockResolvedValueOnce(false);
     await click(button("File issue"));
-    expect(mocks.invoke).not.toHaveBeenCalled();
+    expect(mocks.invoke).not.toHaveBeenCalledWith("binary_file_issue", expect.anything());
     mocks.confirm.mockResolvedValueOnce(true);
     await click(button("File issue"));
-    expect(mocks.invoke).toHaveBeenCalledWith("binary_file_issue", { project: "/proj", report: "/old/report.json", finding: "deadbeef" });
+    expect(mocks.invoke).toHaveBeenCalledWith("binary_file_issue", { project: "/proj", report: "/ws/session-1/report.json", finding: SHA });
     expect(host.textContent).toContain("https://example.test/issues/5");
   });
 
-  it("rejects a finding id shorter than 8 hex digits", async () => {
+  it("analyzes the binary, applies the suggested mode and sends the dictionary", async () => {
+    mocks.invoke.mockImplementation(async (name: string) => {
+      if (name === "binary_inspect") return profile;
+      if (name === "binary_fuzz") return outcome;
+      return null;
+    });
     render();
-    await setValue(host.querySelector("#binary-report") as HTMLInputElement, "/old/report.json");
-    await setValue(host.querySelector("#binary-finding") as HTMLInputElement, "abc");
-    expect(host.textContent).toContain(enParityBinary["binary.invalidFinding"]);
-    expect(button("File issue")).toBeUndefined();
+    await setValue(host.querySelector("#binary-path") as HTMLInputElement, "/bin/server");
+    await settle();
+    expect(mocks.invoke).toHaveBeenCalledWith("binary_inspect", { binary: "/bin/server" });
+    expect(host.textContent).toContain("accept");
+    expect(host.textContent).toContain("imports accept");
+    expect((host.querySelector('input[value="socket"]') as HTMLInputElement).checked).toBe(true);
+    expect(host.textContent).toContain("Use the dictionary (2)");
+    await click(button("Start session"));
+    expect(mocks.invoke).toHaveBeenCalledWith("binary_fuzz", { options: expect.objectContaining({
+      input: "socket", dictionary: ["LOGIN", "\\x00\\xff"],
+    }) });
+  });
+
+  it("starts without the dictionary when it is switched off", async () => {
+    mocks.invoke.mockImplementation(async (name: string) => name === "binary_inspect" ? profile : name === "binary_fuzz" ? outcome : null);
+    render();
+    await setValue(host.querySelector("#binary-path") as HTMLInputElement, "/bin/server");
+    await settle();
+    await click(button("Use the dictionary (2)"));
+    await click(button("Start session"));
+    expect(mocks.invoke).toHaveBeenCalledWith("binary_fuzz", { options: expect.objectContaining({ dictionary: [] }) });
+  });
+
+  it("uses AI seed drafts only after the operator chooses them", async () => {
+    mocks.invoke.mockImplementation(async (name: string) => {
+      if (name === "binary_seed_drafts") return {
+        draft: "d1", directory: "/ws/.binary/x/seed-drafts/d1",
+        seeds: [{ name: "ai-seed-00", size: 5, sha256: "e".repeat(64), preview: "LOGIN" }],
+      };
+      if (name === "binary_fuzz") return outcome;
+      return null;
+    });
+    render();
+    await setValue(host.querySelector("#binary-path") as HTMLInputElement, "/bin/server");
+    await setValue(host.querySelector('input[aria-label="What does the input look like? (optional)"]') as HTMLInputElement, "a login line");
+    await click(button("Draft seeds"));
+    expect(mocks.invoke).toHaveBeenCalledWith("binary_seed_drafts", {
+      project: "/proj", binary: "/bin/server", input: "file", description: "a login line", count: 8,
+    });
+    expect(host.textContent).toContain("Proposed seeds: 1");
+    expect((host.querySelector("#binary-seeds") as HTMLInputElement).value).toBe("");
+    await click(button("Use these seeds"));
+    expect((host.querySelector("#binary-seeds") as HTMLInputElement).value).toBe("/ws/.binary/x/seed-drafts/d1");
+    await click(button("Start session"));
+    expect(mocks.invoke).toHaveBeenCalledWith("binary_fuzz", { options: expect.objectContaining({ seeds: "/ws/.binary/x/seed-drafts/d1" }) });
+  });
+
+  it("shows live progress while a session runs", async () => {
+    let finish: (value: BinaryFuzzOutcome) => void = () => undefined;
+    mocks.invoke.mockImplementation((name: string) => {
+      if (name === "binary_fuzz") return new Promise<BinaryFuzzOutcome>((resolve) => { finish = resolve; });
+      if (name === "binary_progress") return Promise.resolve({
+        session: "s", binary_name: "server", stage: "fuzzing", started_at: "2026-11-26T00:00:00Z",
+        duration_secs: 60, elapsed_secs: 30, execs_done: 4200, execs_per_sec: 140, edges_found: 31,
+        corpus_count: 7, saved_crashes: 2, saved_hangs: 0,
+      });
+      return Promise.resolve(null);
+    });
+    mocks.pickFile.mockResolvedValue("/bin/server");
+    render();
+    await click(button("Browse"));
+    await click(button("Start session"));
+    await settle();
+    const panel = host.querySelector('[aria-label="Session progress"]') as HTMLElement;
+    expect(panel.textContent).toContain("4,200");
+    expect(panel.querySelector('[data-state="current"]')?.textContent).toBe("Fuzzing");
+    expect(panel.querySelector('[data-state="done"]')?.textContent).toBe("Preparing");
+    await act(async () => finish(outcome));
+    expect(host.querySelector('[aria-label="Session progress"]')).toBeNull();
+  });
+
+  it("continues an earlier session of the same binary", async () => {
+    mocks.invoke.mockImplementation(async (name: string) => name === "binary_sessions" ? [summary] : name === "binary_fuzz" ? outcome : null);
+    render();
+    await settle();
+    await click(button("Continue"));
+    expect((host.querySelector("#binary-path") as HTMLInputElement).value).toBe("/ws/session-1/target");
+    expect(host.textContent).toContain("Continuing session 11111111 of server");
+    // The form's start button now reads Continue; it comes before the history row's.
+    await click(button("Continue"));
+    expect(mocks.invoke).toHaveBeenCalledWith("binary_fuzz", { options: expect.objectContaining({
+      binary: "/ws/session-1/target", input: "socket", continueFrom: outcome.session,
+    }) });
+  });
+
+  it("shows a stored AI note and drafts a new one on request", async () => {
+    mocks.invoke.mockImplementation(async (name: string) => {
+      if (name === "binary_sessions") return [summary];
+      if (name === "binary_session") return outcome;
+      if (name === "binary_finding_explanation") return { session: outcome.session, finding_sha256: SHA, text: "Likely bug class: stored note", created_at: "2026-11-26T00:00:00Z" };
+      if (name === "binary_finding_explain") return { session: outcome.session, finding_sha256: SHA, text: "Likely bug class: out-of-bounds write", created_at: "2026-11-26T00:01:00Z" };
+      return null;
+    });
+    render();
+    await settle();
+    await click(button("Open"));
+    await click(button("Show stack frames"));
+    await settle();
+    expect(host.textContent).toContain("stored note");
+    expect(host.textContent).toContain("Model output");
+    await click(button("Explain again"));
+    expect(mocks.invoke).toHaveBeenCalledWith("binary_finding_explain", { project: "/proj", session: outcome.session, finding: SHA });
+    expect(host.textContent).toContain("out-of-bounds write");
   });
 
   it("reports a failed session", async () => {

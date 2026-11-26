@@ -29,7 +29,7 @@ fn invalid(message: impl Into<String>) -> ClassifiedError {
 
 /// Read a session report that lies inside `sessions`, the project's own
 /// directory of binary-only sessions.
-fn read_session_report(
+pub(super) fn read_session_report(
     sessions: &Path,
     report: &Path,
 ) -> Result<BinaryFuzzOutcome, ClassifiedError> {
@@ -70,7 +70,7 @@ fn read_session_report(
 }
 
 /// The one finding of `outcome` whose input digest starts with `prefix`.
-fn finding_in_report<'a>(
+pub(super) fn finding_in_report<'a>(
     outcome: &'a BinaryFuzzOutcome,
     prefix: &str,
 ) -> Result<&'a BinaryFinding, ClassifiedError> {
@@ -327,6 +327,10 @@ mod tests {
             distinct_findings: findings.len(),
             findings,
             findings_omitted: 0,
+            started_at: None,
+            finished_at: None,
+            continued_from: None,
+            dictionary_tokens: 0,
         }
     }
 

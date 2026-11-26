@@ -439,6 +439,22 @@ macro_rules! webview_commands {
             parity_binary::binary_issue_export,
             #[cfg(feature = "binary-only-fuzzing")]
             parity_binary::binary_file_issue,
+            #[cfg(feature = "binary-only-fuzzing")]
+            parity_binary::binary_inspect,
+            #[cfg(feature = "binary-only-fuzzing")]
+            parity_binary::binary_seed_drafts,
+            #[cfg(feature = "binary-only-fuzzing")]
+            parity_binary::binary_dictionary_refine,
+            #[cfg(feature = "binary-only-fuzzing")]
+            parity_binary::binary_progress,
+            #[cfg(feature = "binary-only-fuzzing")]
+            parity_binary::binary_sessions,
+            #[cfg(feature = "binary-only-fuzzing")]
+            parity_binary::binary_session,
+            #[cfg(feature = "binary-only-fuzzing")]
+            parity_binary::binary_finding_explanation,
+            #[cfg(feature = "binary-only-fuzzing")]
+            parity_binary::binary_finding_explain,
             #[cfg(feature = "crash-bisection")]
             parity_analysis::bisect_crash,
             parity_analysis::verify_regressions,

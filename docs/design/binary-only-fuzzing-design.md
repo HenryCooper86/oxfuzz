@@ -1,6 +1,7 @@
 # Binary-Only Fuzzing Design
 
-Status: **implemented as a standalone session, acceptance open** (2026-11-21).
+Status: **implemented as a standalone session, acceptance open** (2026-11-21);
+assists, history, progress and triage section added 2026-11-26.
 Owners: `hf-service` (`container/binary_only.rs`) for admission, staging, and
 the session; `hf-engine` for the AFL++ argv; `hf-runtime` for every process.
 Feature flag: `binary-only-fuzzing` (default on). Presentation: `oxfuzz binary`.
@@ -229,16 +230,75 @@ the existing issue. Host paths are not part of the body.
 
 There is no sanitizer, so memory errors that do not fault are not seen.
 Findings are written to the session directory and the report; they are not
-rows of the crash table and do not appear in triage, proof, reports, or
-SARIF, because every consumer of that table assumes a target, a harness, and
-a run record that a binary-only session does not have.
+rows of the crash table and do not appear in proof, reports, or SARIF,
+because every consumer of that table assumes a target, a harness, and a run
+record that a binary-only session does not have. The Triage view reads them
+from the session reports instead (Sessions and triage, below).
+
+## Assists (2026-11-26)
+
+### Inspection
+
+`binary_inspect` reads the ELF without running it (bounded, memory-safe
+parsing on the host): the undefined dynamic symbols from `.dynsym`, whether
+the binary is statically linked (no `PT_INTERP` and no `.dynsym`), and its
+printable strings. From the imports it suggests an input mode with its
+reasons: `accept` means a stream server, a bound socket read with
+`recvfrom`/`recvmsg` a datagram server, a file-opening call a file argument,
+and only standard-input readers standard input. A static binary is flagged:
+the replay reporter and the socket shim are preloads and do not load into it.
+
+### Dictionary
+
+QEMU mode gets no automatic dictionary, so tokens are taken from the
+binary's strings (short keyword- and magic-like strings, bounded) and staged
+as `dictionary.dict`, passed with a second `-x` beside the message
+separator dictionary. The operator chooses whether to use it. With a
+provider, the model may prune and extend the list; its answer is parsed as
+AFL dictionary entries and bounded like the heuristic list.
+
+### Seed drafts
+
+With a provider, the model drafts seeds from the binary's name, machine,
+input mode, imports and strings, and an optional description from the
+operator. They are written under `.binary/<sha16>/seed-drafts/<draft>/` and
+shown as previews; the operator decides to use them as the session's seed
+directory. Nothing the model proposes is used without that choice.
+
+### Crash explanation
+
+For one finding, the model receives the signal, kind, summary, frames,
+replay result, duplicate count and a bounded hex preview of the (minimized)
+input, and answers with a likely bug class, what the evidence supports,
+severity guidance and next steps. It is shown as model output and never
+changes the finding. One explanation is kept per session and finding.
+
+Every prompt above is retained in `binary_llm_drafts` before it is sent
+(Engineering Protocol 2.13); text taken from the binary is fenced in the
+prompt as untrusted data. Without a store or a provider nothing is sent.
+
+## Sessions and triage (2026-11-26)
+
+- **History.** `binary_sessions` lists the project's sessions from their
+  reports (bounded count and size, contained in the project's `.binary`
+  directory); `binary_session` opens one. Reports carry `started_at` and
+  `finished_at`; older reports read without them.
+- **Progress.** While a session runs, the service keeps its stage (staging,
+  fuzzing, replaying, minimizing) and reads `fuzzer_stats` on request, so the
+  desktop polls executions, speed, edges, corpus, saved crashes and hangs.
+- **Continue.** A session may start from an earlier session of the same
+  binary (same digest): that session's queue seeds the new corpus, bounded
+  like operator seeds.
+- **Triage.** The Triage view lists the sessions and their findings with
+  signal, kind, confirmation, minimization, frames, the explanation, and
+  the issue draft. It reads reports and stored explanations only.
 
 ## Out of scope
 
 Binaries for another architecture; persistent, snapshot, and CompCov QEMU
 modes; Frida and Unicorn modes; Windows and macOS binaries; network services
 beyond the single-connection and single-socket servers above; coverage reports; and
-the crash table, triage, proof, and report surfaces for these findings.
+the crash table, proof, and report surfaces for these findings.
 
 ## Verification
 

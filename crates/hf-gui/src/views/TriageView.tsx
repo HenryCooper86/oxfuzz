@@ -14,6 +14,7 @@ import { emitDataChanged, getTransport, isTauriEnvironment } from "../lib";
 import { useI18n } from "../i18nContext";
 import { useFindingSelection } from "../providers/findingSelection";
 import { usePipeline } from "../providers/pipeline";
+import { BinaryTriageSection } from "../components/binary/BinaryTriage";
 import { useProject } from "../providers/project";
 import { useRunOutput } from "../providers/runOutput";
 import { useTarget } from "../providers/target";
@@ -574,6 +575,7 @@ function ScopedTriageView({ embedded, initialRunId, onNavigate }: { embedded: bo
       </div>}
       {reportMd !== null && <Suspense fallback={null}><ReportPreview markdown={reportMd} onClose={() => setReportMd(null)} onExport={(format) => void exportReport(format)} formats={formats} /></Suspense>}
       {isKernelRun && summary && <div className="surface-card text-sm" style={{ padding: "var(--space-md)" }}>{t("triage.kernelReportedPrefix")} {summary.crashes}{t("triage.kernelExplanation")}</div>}
+      {activeProject && !embedded && <BinaryTriageSection project={activeProject} />}
     </div>
   );
 }

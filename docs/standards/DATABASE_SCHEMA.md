@@ -1,6 +1,6 @@
 # Database Schema
 
-Status: **implemented through migration 0055**. Scope: `hf-storage` and
+Status: **implemented through migration 0056**. Scope: `hf-storage` and
 `hf-diagnostics`.
 
 ## 1. Storage and migration ownership
@@ -1402,6 +1402,7 @@ bounded deterministic history, and both cleanup operations.
 | `0053_run_execution_totals.sql` | adds `runs.execs_total` and moves syzkaller's cumulative executed count there from `execs` |
 | `0054_build_profile_bazel.sql` | widens saved build profiles to Bazel by rebuilding the profile table's system check |
 | `0055_finding_harness_repairs.sql` | retains each finding-driven harness repair prompt before dispatch and its response and outcome once |
+| `0056_binary_llm_drafts.sql` | retains each binary-only-fuzzing model prompt before dispatch and its response once |
 
 ## 7. Read failure contract
 
@@ -1718,6 +1719,34 @@ row, once.
 | `completed_at` | `TEXT` | Response time; NULL exactly when `response` is NULL |
 
 Index: `idx_dictionary_llm_drafts_reuse(project_root, target, static_dict_sha256, created_at DESC, id DESC)`.
+
+### `binary_llm_drafts`
+
+Migration 0056 retains each binary-only-fuzzing model prompt (seed drafting,
+dictionary drafting, crash explanation) before provider dispatch and the
+response once it arrives. The prompt carries disassembly, strings, and crash
+evidence of an untrusted binary, so the exact text is kept rather than
+rebuilt. A row whose prompt cannot be written is never dispatched. The latest
+completed `explain` row for a `(project_root, session, finding_sha256)` key is
+shown without another provider call. There is no run or crash foreign key.
+The only permitted update sets `response` and `completed_at` on a pending
+row, once.
+
+| Column | Type | Meaning |
+| --- | --- | --- |
+| `id` | `TEXT PRIMARY KEY` | Immutable draft UUID |
+| `project_root` | `TEXT NOT NULL` | Canonical project root |
+| `binary_sha256` | `TEXT NOT NULL` | 64-character hex SHA-256 of the binary |
+| `purpose` | `TEXT NOT NULL` | `seeds`, `dictionary`, or `explain` |
+| `session` | `TEXT` | Fuzzing session UUID; set exactly when `purpose = 'explain'` |
+| `finding_sha256` | `TEXT` | 64-character hex SHA-256 of the finding; set exactly when `purpose = 'explain'` |
+| `prompt_version` | `INTEGER NOT NULL` | Prompt renderer version, at least 1 |
+| `prompt` | `TEXT NOT NULL` | Exact provider prompt, at most 64 KiB |
+| `response` | `TEXT` | Provider response, at most 64 KiB; NULL while pending |
+| `created_at` | `TEXT NOT NULL` | UTC capture time, RFC 3339 with nanoseconds |
+| `completed_at` | `TEXT` | Response time; NULL exactly when `response` is NULL |
+
+Index: `idx_binary_llm_drafts_explain(project_root, session, finding_sha256, created_at DESC, id DESC)`.
 
 ## Crash verification drafts (0048)
 

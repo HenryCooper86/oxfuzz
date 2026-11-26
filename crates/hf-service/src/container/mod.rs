@@ -24,9 +24,15 @@ pub use ai_target_ranking::{RankedDiscoveryResult, RankedDiscoveryStatus, Ranked
 mod operation_registry;
 pub use operation_registry::OperationCancelOutcome;
 #[cfg(feature = "binary-only-fuzzing")]
+mod binary_assist;
+#[cfg(feature = "binary-only-fuzzing")]
 mod binary_issue;
 #[cfg(feature = "binary-only-fuzzing")]
 mod binary_only;
+#[cfg(feature = "binary-only-fuzzing")]
+pub(crate) mod binary_profile;
+#[cfg(feature = "binary-only-fuzzing")]
+mod binary_sessions;
 #[cfg(feature = "crash-bisection")]
 mod bisect;
 #[cfg(feature = "clang-analysis")]
@@ -35,10 +41,17 @@ mod clang_analysis;
 mod concolic;
 mod corpus;
 #[cfg(feature = "binary-only-fuzzing")]
+pub use binary_assist::{BinaryExplanation, BinarySeedDraft, SeedPreview};
+#[cfg(feature = "binary-only-fuzzing")]
 pub use binary_only::{
     signal_name as binary_signal_name, BinaryFinding, BinaryFuzzOutcome, BinaryFuzzRequest,
-    BinaryInput, ElfMachine, MinimizedInput, MESSAGE_SEPARATOR as BINARY_MESSAGE_SEPARATOR,
+    BinaryInput, BinaryStage, ElfMachine, MinimizedInput,
+    MESSAGE_SEPARATOR as BINARY_MESSAGE_SEPARATOR,
 };
+#[cfg(feature = "binary-only-fuzzing")]
+pub use binary_profile::{parse_dictionary as parse_binary_dictionary, BinaryProfile, Linking};
+#[cfg(feature = "binary-only-fuzzing")]
+pub use binary_sessions::{BinaryProgress, BinarySessionSummary};
 #[cfg(feature = "crash-bisection")]
 pub use bisect::{BisectOutcome, BisectResult, BisectStep, BisectVerdict};
 mod coverage_cache;
@@ -859,6 +872,10 @@ pub struct ServiceContainer {
     /// A turn registers via [`Self::track_agent`] and is removed when the
     /// returned guard drops. Shared across clones of this container.
     active_agents: Arc<std::sync::Mutex<Vec<String>>>,
+    /// Binary-only sessions running in this process, so the desktop can poll
+    /// their stage and counters. Shared across clones of this container.
+    #[cfg(feature = "binary-only-fuzzing")]
+    binary_sessions: binary_sessions::BinarySessionRegistry,
     /// Per-session locks serializing every chat read-modify-write operation.
     /// Turns, rollback, branching, and deletion share this lock so transcript,
     /// metadata, and checkpoint mutations cannot interleave. Different

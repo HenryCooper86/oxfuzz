@@ -451,6 +451,10 @@ fn kernel_summary(summary: &hf_service::SyzkallerSummary, duration_secs: u64) ->
 pub(crate) async fn cmd_binary(args: crate::args::BinaryArgs) -> anyhow::Result<()> {
     use hf_service::{BinaryFuzzRequest, BinaryInput};
     let duration_secs = crate::parse::parse_duration(&args.duration)?;
+    let dictionary = match &args.dictionary {
+        Some(path) => hf_service::parse_binary_dictionary(&std::fs::read_to_string(path)?)?,
+        None => Vec::new(),
+    };
     let container = crate::approval::bootstrap().await;
     let outcome = container
         .binary_fuzz(&BinaryFuzzRequest {
@@ -469,6 +473,8 @@ pub(crate) async fn cmd_binary(args: crate::args::BinaryArgs) -> anyhow::Result<
             libraries: args.libs,
             duration_secs,
             timeout_ms: args.timeout_ms,
+            dictionary,
+            continue_from: args.continue_from,
         })
         .await?;
     if args.json {

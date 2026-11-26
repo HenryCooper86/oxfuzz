@@ -189,6 +189,8 @@ describe("retained finding navigation", () => {
       if (command === "finding_review") {
         return Promise.resolve(args?.findingId === older.crash.id ? older : projectB);
       }
+      // Triage also lists binary-only sessions; these projects have none.
+      if (command === "binary_sessions") return Promise.resolve([]);
       throw new Error(`unexpected command ${command}`);
     });
     container = document.createElement("div");
@@ -206,6 +208,8 @@ describe("retained finding navigation", () => {
     invoke.mockImplementation((command: string) => {
       if (command === "finding_review_queue") return Promise.resolve([repeat("first-hit", "run-1"), newer, repeat("second-hit", "run-1"), repeat("third-hit", "run-2")]);
       if (command === "finding_review") return Promise.resolve(older);
+      // Triage also lists binary-only sessions; these projects have none.
+      if (command === "binary_sessions") return Promise.resolve([]);
       throw new Error(`unexpected command ${command}`);
     });
     const translate = (key: string, params?: Record<string, string | number>) => params ? `${key}:${Object.values(params).join("/")}` : key;
@@ -226,6 +230,8 @@ describe("retained finding navigation", () => {
       if (command === "finding_review_queue") return Promise.resolve([newer, older]);
       if (command === "finding_review") return Promise.resolve(older);
       if (command === "issue_export") return Promise.resolve({ crash_id: args?.crashId, provider: "gitlab", title: "Heap overflow in parse_legacy_frame", description: "body", labels: ["fuzzing"], project_web_url: null, issue_url: null, can_file: false });
+      // Triage also lists binary-only sessions; these projects have none.
+      if (command === "binary_sessions") return Promise.resolve([]);
       throw new Error(`unexpected command ${command}`);
     });
     await act(async () => root.render(<Providers><TriageView /></Providers>));
@@ -250,6 +256,8 @@ describe("retained finding navigation", () => {
       if (command === "sarif_document") return Promise.resolve("{\"version\":\"2.1.0\"}");
       if (command === "export_sarif") return Promise.resolve("/exports/latest_target.sarif");
       if (command === "report_formats") return Promise.resolve(["md"]);
+      // Triage also lists binary-only sessions; these projects have none.
+      if (command === "binary_sessions") return Promise.resolve([]);
       throw new Error(`unexpected command ${command}`);
     });
     try {
@@ -294,6 +302,8 @@ describe("retained finding navigation", () => {
         current = args?.accepted ? released : held;
         return Promise.resolve(current);
       }
+      // Triage also lists binary-only sessions; these projects have none.
+      if (command === "binary_sessions") return Promise.resolve([]);
       throw new Error(`unexpected command ${command}`);
     });
     await act(async () => root.render(<Providers><TriageView /></Providers>));
@@ -320,6 +330,8 @@ describe("retained finding navigation", () => {
       if (command === "finding_review_queue") return Promise.resolve([newer, older]);
       if (command === "finding_review") return Promise.resolve(triaged ? minimized : older);
       if (command === "triage") { triaged = true; return Promise.resolve([older.crash]); }
+      // Triage also lists binary-only sessions; these projects have none.
+      if (command === "binary_sessions") return Promise.resolve([]);
       throw new Error(`unexpected command ${command}`);
     });
     await act(async () => root.render(<Providers><TriageView /></Providers>));
@@ -387,6 +399,8 @@ describe("retained finding navigation", () => {
       if (command === "effective_auto_revert_policy") return Promise.reject(new Error("unconfigured"));
       if (command === "finding_review_queue") return Promise.resolve([newer, older]);
       if (command === "finding_review") return Promise.resolve(args?.findingId === older.crash.id ? older : newer);
+      // Triage also lists binary-only sessions; these projects have none.
+      if (command === "binary_sessions") return Promise.resolve([]);
       throw new Error(`unexpected command ${command}`);
     });
 
@@ -411,6 +425,8 @@ describe("retained finding navigation", () => {
     invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
       if (command === "finding_review_queue") return args?.project === PROJECT_A ? queueA : Promise.resolve([projectB]);
       if (command === "finding_review") return args?.project === PROJECT_A ? detailA : Promise.resolve(projectB);
+      // Triage also lists binary-only sessions; these projects have none.
+      if (command === "binary_sessions") return Promise.resolve([]);
       throw new Error(`unexpected command ${command}`);
     });
 
@@ -436,6 +452,8 @@ describe("retained finding navigation", () => {
         return Promise.resolve(filter.disposition?.value === "resolved" ? [resolved] : [older]);
       }
       if (command === "finding_review") return Promise.resolve(args?.findingId === resolved.crash.id ? resolved : older);
+      // Triage also lists binary-only sessions; these projects have none.
+      if (command === "binary_sessions") return Promise.resolve([]);
       throw new Error(`unexpected command ${command}`);
     });
     await act(async () => root.render(<Providers><TriageView /></Providers>));
@@ -479,6 +497,8 @@ describe("retained finding navigation", () => {
         confidence: "high",
         reasons: ["distinctive retained verdict reason"],
       });
+      // Triage also lists binary-only sessions; these projects have none.
+      if (command === "binary_sessions") return Promise.resolve([]);
       throw new Error(`unexpected command ${command}`);
     });
 
@@ -508,6 +528,8 @@ describe("retained finding navigation", () => {
     invoke.mockImplementation((command: string) => {
       if (command === "finding_review_queue") return Promise.resolve([]);
       if (command === "finding_review") return Promise.resolve(resolved);
+      // Triage also lists binary-only sessions; these projects have none.
+      if (command === "binary_sessions") return Promise.resolve([]);
       throw new Error(`unexpected command ${command}`);
     });
 
@@ -529,6 +551,8 @@ describe("retained finding navigation", () => {
           ? Promise.resolve(newer)
           : Promise.reject(new Error(`validation error: finding ${String(args?.findingId)} not found`));
       }
+      // Triage also lists binary-only sessions; these projects have none.
+      if (command === "binary_sessions") return Promise.resolve([]);
       throw new Error(`unexpected command ${command}`);
     });
 
@@ -548,6 +572,8 @@ describe("retained finding navigation", () => {
       if (command === "finding_review") {
         return Promise.reject(new Error(`validation error: finding ${String(args?.findingId)} not found`));
       }
+      // Triage also lists binary-only sessions; these projects have none.
+      if (command === "binary_sessions") return Promise.resolve([]);
       throw new Error(`unexpected command ${command}`);
     });
 
@@ -566,6 +592,8 @@ describe("retained finding navigation", () => {
     invoke.mockImplementation((command: string) => {
       if (command === "finding_review_queue") return Promise.resolve([]);
       if (command === "finding_review") return pendingDetail;
+      // Triage also lists binary-only sessions; these projects have none.
+      if (command === "binary_sessions") return Promise.resolve([]);
       throw new Error(`unexpected command ${command}`);
     });
 
@@ -593,6 +621,8 @@ describe("retained finding navigation", () => {
       if (command === "finding_review_queue") return Promise.resolve([older, newer]);
       if (command === "finding_review") return Promise.resolve(args?.findingId === newer.crash.id ? newer : older);
       if (command === "scan_crashes") return pendingScan;
+      // Triage also lists binary-only sessions; these projects have none.
+      if (command === "binary_sessions") return Promise.resolve([]);
       throw new Error(`unexpected command ${command}`);
     });
 
@@ -698,6 +728,8 @@ describe("retained finding navigation", () => {
       if (command === "save_report_draft") return Promise.resolve({ id: "draft-id" });
       if (command === "export_repro") return Promise.resolve("/tmp/reproduction");
       if (command === "push_to_defectdojo") return Promise.resolve({ findings_pushed: 1 });
+      // Triage also lists binary-only sessions; these projects have none.
+      if (command === "binary_sessions") return Promise.resolve([]);
       throw new Error(`unexpected command ${command}`);
     });
     const translate = (key: string, params?: Record<string, string | number>) => (
@@ -765,6 +797,8 @@ describe("retained finding navigation", () => {
       if (command === "report_formats") return Promise.resolve(["md", "pdf"]);
       if (command === "generate_report") return Promise.resolve("# Report");
       if (command === "save_report_draft") return Promise.resolve({ id: "draft-id" });
+      // Triage also lists binary-only sessions; these projects have none.
+      if (command === "binary_sessions") return Promise.resolve([]);
       throw new Error(`unexpected command ${command}`);
     });
 

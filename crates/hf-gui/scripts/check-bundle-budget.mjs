@@ -27,8 +27,12 @@ const limits = {
   // fuzzing, campaigns, the CI gate, bisection, coverage reports, Clang
   // analysis, remote arming and the rest of the 2026-11-23 parity work) add
   // 133,552 B, all of it in lazily loaded view chunks: measured 1,558,356 B.
-  // The initial budget is unchanged.
-  app: budget("HF_GUI_APP_JS_BUDGET", 1_570_000),
+  // The initial budget is unchanged. The binary-only assists of 2026-11-26
+  // (binary analysis, dictionary and AI seed panels, live progress, session
+  // history, AI triage notes and the Binary-only section of Triage) add
+  // 20,252 B, again only in the lazily loaded Binary and Triage chunks:
+  // measured 1,589,611 B.
+  app: budget("HF_GUI_APP_JS_BUDGET", 1_600_000),
   vendor: budget("HF_GUI_VENDOR_JS_BUDGET", 3_700_000),
 };
 

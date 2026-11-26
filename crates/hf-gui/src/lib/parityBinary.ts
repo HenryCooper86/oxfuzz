@@ -19,6 +19,10 @@ export interface BinaryFuzzOptions {
   libraries?: string;
   durationSecs: number;
   timeoutMs: number;
+  /** AFL dictionary tokens in escaped form; empty for none. */
+  dictionary?: string[];
+  /** An earlier session of the same binary whose queue seeds this one. */
+  continueFrom?: string;
 }
 
 export interface MinimizedInput {
@@ -59,10 +63,128 @@ export interface BinaryFuzzOutcome {
   findings: BinaryFinding[];
   distinct_findings: number;
   findings_omitted: number;
+  started_at?: string | null;
+  finished_at?: string | null;
+  continued_from?: string | null;
+  dictionary_tokens?: number;
+}
+
+export interface BinaryProfile {
+  machine: "aarch64" | "x86_64";
+  size: number;
+  sha256: string;
+  linking: "dynamic" | "static";
+  imports: string[];
+  suggested_input: BinaryInputMode;
+  suggestion_reasons: string[];
+  strings: string[];
+  dictionary: string[];
+  notes: string[];
+}
+
+export interface SeedPreview {
+  name: string;
+  size: number;
+  sha256: string;
+  preview: string;
+}
+
+export interface BinarySeedDraft {
+  draft: string;
+  directory: string;
+  seeds: SeedPreview[];
+}
+
+export type BinaryStage = "preparing" | "fuzzing" | "replaying" | "minimizing";
+
+export const BINARY_STAGES: BinaryStage[] = ["preparing", "fuzzing", "replaying", "minimizing"];
+
+export interface BinaryProgress {
+  session: string;
+  binary_name: string;
+  stage: BinaryStage;
+  started_at: string;
+  duration_secs: number;
+  elapsed_secs: number;
+  execs_done: number | null;
+  execs_per_sec: number | null;
+  edges_found: number | null;
+  corpus_count: number | null;
+  saved_crashes: number | null;
+  saved_hangs: number | null;
+}
+
+export interface BinarySessionSummary {
+  session: string;
+  workspace: string;
+  binary_name: string;
+  binary_sha256: string;
+  machine: "aarch64" | "x86_64";
+  input: BinaryInputMode;
+  duration_secs: number;
+  started_at: string | null;
+  finished_at: string | null;
+  execs_done: number | null;
+  findings: number;
+  distinct_findings: number;
+  confirmed: number;
+  minimized: number;
+  continued_from: string | null;
+  can_continue: boolean;
+}
+
+export interface BinaryExplanation {
+  session: string;
+  finding_sha256: string;
+  text: string;
+  created_at: string;
 }
 
 export function binaryFuzz(options: BinaryFuzzOptions): Promise<BinaryFuzzOutcome> {
   return getTransport().invoke<BinaryFuzzOutcome>("binary_fuzz", { options });
+}
+
+export function binaryInspect(binary: string): Promise<BinaryProfile> {
+  return getTransport().invoke<BinaryProfile>("binary_inspect", { binary });
+}
+
+export function binarySeedDrafts(
+  project: string, binary: string, input: BinaryInputMode, description: string | null, count: number,
+): Promise<BinarySeedDraft> {
+  return getTransport().invoke<BinarySeedDraft>("binary_seed_drafts", { project, binary, input, description, count });
+}
+
+export function binaryDictionaryRefine(
+  project: string, binary: string, input: BinaryInputMode, tokens: string[],
+): Promise<string[]> {
+  return getTransport().invoke<string[]>("binary_dictionary_refine", { project, binary, input, tokens });
+}
+
+export function binaryProgress(project: string): Promise<BinaryProgress | null> {
+  return getTransport().invoke<BinaryProgress | null>("binary_progress", { project });
+}
+
+export function binarySessions(project: string): Promise<BinarySessionSummary[]> {
+  return getTransport().invoke<BinarySessionSummary[]>("binary_sessions", { project });
+}
+
+export function binarySession(project: string, session: string): Promise<BinaryFuzzOutcome> {
+  return getTransport().invoke<BinaryFuzzOutcome>("binary_session", { project, session });
+}
+
+export function binaryFindingExplanation(
+  project: string, session: string, finding: string,
+): Promise<BinaryExplanation | null> {
+  return getTransport().invoke<BinaryExplanation | null>("binary_finding_explanation", { project, session, finding });
+}
+
+export function binaryFindingExplain(project: string, session: string, finding: string): Promise<BinaryExplanation> {
+  return getTransport().invoke<BinaryExplanation>("binary_finding_explain", { project, session, finding });
+}
+
+/** The session directory's binary, which a continued session fuzzes again. */
+export function sessionBinary(workspace: string): string {
+  return `${workspace.replace(/[\\/]+$/, "")}/target`;
 }
 
 export function binaryIssueExport(project: string, report: string, finding: string): Promise<IssueExport> {
@@ -71,6 +193,11 @@ export function binaryIssueExport(project: string, report: string, finding: stri
 
 export function binaryFileIssue(project: string, report: string, finding: string): Promise<CreatedIssue> {
   return getTransport().invoke<CreatedIssue>("binary_file_issue", { project, report, finding });
+}
+
+/** A counter for display: grouped digits, or "-" when unknown. */
+export function formatCount(value: number | null | undefined): string {
+  return value === null || value === undefined ? "-" : value.toLocaleString();
 }
 
 /** The `report.json` of a session workspace. */

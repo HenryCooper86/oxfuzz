@@ -22,6 +22,8 @@ pub use finding_harness_repairs::{
 };
 mod crash_verify_drafts;
 pub use crash_verify_drafts::{CrashVerifyDraftRecord, MAX_CRASH_VERIFY_DRAFT_BYTES};
+mod binary_llm_drafts;
+pub use binary_llm_drafts::{BinaryDraftPurpose, BinaryLlmDraftRecord, MAX_BINARY_LLM_DRAFT_BYTES};
 mod dictionary_llm_drafts;
 pub use dictionary_llm_drafts::{DictionaryLlmDraftRecord, MAX_DICTIONARY_LLM_DRAFT_BYTES};
 mod seed_llm_drafts;

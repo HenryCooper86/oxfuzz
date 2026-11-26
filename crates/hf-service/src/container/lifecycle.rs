@@ -120,6 +120,8 @@ impl ServiceContainer {
             #[cfg(feature = "campaign-health")]
             campaign_health_delivery: Arc::new(std::sync::Mutex::new(Vec::new())),
             active_agents: Arc::new(std::sync::Mutex::new(Vec::new())),
+            #[cfg(feature = "binary-only-fuzzing")]
+            binary_sessions: Arc::default(),
             session_turn_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             chat_turns: super::operation_registry::OperationRegistry::default(),
             turn_cancel: None,
@@ -562,6 +564,8 @@ impl ServiceContainer {
             #[cfg(feature = "campaign-health")]
             campaign_health_delivery: Arc::new(std::sync::Mutex::new(Vec::new())),
             active_agents: Arc::new(std::sync::Mutex::new(Vec::new())),
+            #[cfg(feature = "binary-only-fuzzing")]
+            binary_sessions: Arc::default(),
             session_turn_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             chat_turns: super::operation_registry::OperationRegistry::default(),
             turn_cancel: None,

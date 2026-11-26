@@ -1,28 +1,40 @@
 import "../i18n.parityBinary";
-import { useState } from "react";
-import { Cpu, FileSearch, FolderOpen, GitPullRequest, Info, Play } from "lucide-react";
-import { PathActions } from "../components/PathActions";
-import { Badge, Button, EmptyState, Input, Textarea, ViewHeader } from "../components/ui";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Cpu, FileSearch, FolderOpen, Info, Play } from "lucide-react";
+import { BinaryOutcome } from "../components/binary/BinaryFindings";
+import {
+  ContinueBanner,
+  DictionaryPanel,
+  ProfilePanel,
+  ProgressPanel,
+  SeedDraftPanel,
+  SessionHistory,
+} from "../components/binary/BinaryAssist";
+import { Badge, Button, EmptyState, Input, ViewHeader } from "../components/ui";
 import { DurationInput } from "../components/ui/DurationInput";
 import { useI18n } from "../i18nContext";
-import { openExternal, pickFile, pickFolder } from "../lib";
+import { pickFile, pickFolder } from "../lib";
 import {
   BINARY_INPUT_MODES,
   DEFAULT_BINARY_DURATION_SECS,
   DEFAULT_BINARY_TIMEOUT_MS,
-  binaryFileIssue,
   binaryFuzz,
-  binaryIssueExport,
-  reportPath,
-  validFindingId,
-  type BinaryFinding,
+  binaryInspect,
+  binaryProgress,
+  binarySession,
+  binarySessions,
+  sessionBinary,
   type BinaryFuzzOutcome,
   type BinaryInputMode,
+  type BinaryProfile,
+  type BinaryProgress,
+  type BinarySessionSummary,
 } from "../lib/parityBinary";
-import { formatDuration } from "../lib/duration";
-import { useConfirm } from "../providers/confirm";
 import { useProject } from "../providers/project";
-import type { CreatedIssue, IssueExport } from "../types";
+
+/** How long typing pauses before the binary is analyzed, and how often a run is polled. */
+const INSPECT_DELAY_MS = 450;
+const PROGRESS_POLL_MS = 1500;
 
 function Label({ htmlFor, children }: { htmlFor?: string; children: React.ReactNode }) {
   return <label htmlFor={htmlFor} className="hf-field-label">{children}</label>;
@@ -52,235 +64,30 @@ function PathField({ id, label, value, onChange, placeholder, pickLabel, pickIco
   );
 }
 
-/** Draft and file issues for one finding, named by report and sha256. */
-function IssueActions({ project, report, finding, compact }: { project: string; report: string; finding: string; compact?: boolean }) {
-  const { t } = useI18n();
-  const confirm = useConfirm();
-  const [busy, setBusy] = useState<"draft" | "file" | null>(null);
-  const [draft, setDraft] = useState<IssueExport | null>(null);
-  const [created, setCreated] = useState<CreatedIssue | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
-
-  async function makeDraft() {
-    setBusy("draft"); setError(null);
-    try {
-      setDraft(await binaryIssueExport(project, report, finding));
-    } catch (e) {
-      setError(`${t("binary.draftFailed")}: ${String(e)}`);
-    } finally { setBusy(null); }
-  }
-
-  async function file() {
-    const approved = await confirm({
-      title: t("binary.confirmFileTitle"),
-      message: t("binary.confirmFileMessage", { finding: finding.slice(0, 12) }),
-      confirmLabel: t("binary.fileIssue"),
-    });
-    if (!approved) return;
-    setBusy("file"); setError(null);
-    try {
-      setCreated(await binaryFileIssue(project, report, finding));
-    } catch (e) {
-      setError(`${t("binary.fileFailed")}: ${String(e)}`);
-    } finally { setBusy(null); }
-  }
-
-  async function copy() {
-    if (!draft) return;
-    try {
-      await navigator.clipboard.writeText(`${draft.title}\n\n${draft.description}`);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1600);
-    } catch { /* clipboard unavailable */ }
-  }
-
-  return (
-    <div className={`flex flex-col gap-2 ${compact ? "" : "mt-2"}`}>
-      <div className="flex gap-2 flex-wrap">
-        <Button variant="outline" size="sm" disabled={busy !== null} onClick={() => void makeDraft()}>
-          {busy === "draft" ? t("binary.drafting") : t("binary.draftIssue")}
-        </Button>
-        <Button variant="outline" size="sm" disabled={busy !== null} onClick={() => void file()}>
-          {busy === "file" ? t("binary.filing") : t("binary.fileIssue")}
-        </Button>
-      </div>
-      {error && <p role="alert" className="text-sm text-error">{error}</p>}
-      {created && (
-        <p role="status" className="text-sm">
-          {t("binary.issueFiled")}:{" "}
-          <button type="button" className="underline" onClick={() => void openExternal(created.url)}>{created.url}</button>
-        </p>
-      )}
-      {draft && (
-        <section className="surface-card flex flex-col gap-2" style={{ padding: "var(--space-md)" }} aria-label={t("binary.issueDraft")}>
-          <div className="flex items-center gap-2 text-sm font-semibold"><GitPullRequest size={15} />{t("binary.issueDraft")}</div>
-          <div className="text-sm font-medium">{draft.title}</div>
-          {draft.labels.length > 0 && (
-            <div className="flex flex-wrap gap-1" aria-label={t("binary.labels")}>
-              {draft.labels.map((label) => (
-                <span key={label} className="text-xs px-2 py-0.5 rounded-sm" style={{ background: "var(--surface-active)", color: "var(--text-secondary)" }}>{label}</span>
-              ))}
-            </div>
-          )}
-          <Textarea readOnly rows={10} value={draft.description} aria-label={t("binary.issueDraft")} />
-          <div className="flex gap-2 flex-wrap">
-            <Button variant="outline" size="sm" onClick={() => void copy()}>{copied ? t("binary.copied") : t("binary.copyDraft")}</Button>
-            {draft.issue_url && (
-              <Button variant="outline" size="sm" onClick={() => void openExternal(draft.issue_url!)}>{t("binary.openNewIssue")}</Button>
-            )}
-          </div>
-        </section>
-      )}
-    </div>
-  );
-}
-
-function Stat({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="hf-stat">
-      <div className="hf-field-label">{label}</div>
-      <div className="hf-stat-value">{value}</div>
-    </div>
-  );
-}
-
-const count = (value: number | null) => (value === null ? "-" : value.toLocaleString());
-
-function FindingsTable({ project, outcome }: { project: string; outcome: BinaryFuzzOutcome }) {
-  const { t } = useI18n();
-  const [open, setOpen] = useState<string | null>(null);
-  const report = reportPath(outcome.workspace);
-  const signal = (finding: BinaryFinding, value: number | null) =>
-    value !== null ? String(value) : finding.replayed ? "-" : t("binary.notReplayed");
-  if (outcome.findings.length === 0) return <p className="text-sm text-text-muted">{t("binary.noFindings")}</p>;
-  return (
-    <div className="flex flex-col gap-2">
-      {outcome.findings.map((finding) => {
-        const expanded = open === finding.sha256;
-        const facts: [string, React.ReactNode][] = [
-          ["size", finding.size],
-          ["fuzzerSignal", finding.fuzzer_signal ?? "-"],
-          ["replaySignal", signal(finding, finding.replay_signal)],
-          ["confirmed", <Badge variant={finding.confirmed ? "error" : "default"}>{finding.confirmed ? t("binary.yes") : t("binary.no")}</Badge>],
-          ["duplicateOf", finding.duplicate_of ? finding.duplicate_of.slice(0, 8) : "-"],
-          ["minimized", finding.minimized ? finding.minimized.size : "-"],
-        ];
-        return (
-          <article key={finding.sha256} className="hf-finding">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <div className="flex items-center gap-2 flex-wrap text-sm">
-                  <span className="font-mono text-text-primary" title={`${t("binary.col.sha")} ${finding.sha256}`}>{finding.sha256.slice(0, 8)}</span>
-                  <span className="font-semibold text-text-primary">{finding.kind ?? "-"}</span>
-                </div>
-                <p className="text-xs text-text-secondary" style={{ marginTop: 2, overflowWrap: "anywhere" }}>{finding.summary || "-"}</p>
-              </div>
-              <Button variant="outline" size="sm" className="shrink-0 whitespace-nowrap" aria-expanded={expanded} onClick={() => setOpen(expanded ? null : finding.sha256)}>
-                {expanded ? t("binary.hideFrames") : t("binary.showFrames")}
-              </Button>
-            </div>
-            <dl className="hf-finding-facts">
-              {facts.map(([key, value]) => (
-                <div key={key}><dt className="hf-field-label">{t(`binary.col.${key}`)}</dt><dd>{value}</dd></div>
-              ))}
-            </dl>
-            {expanded && (
-              <div>
-                {finding.frames.length > 0 ? (
-                  <ol className="hf-frames" aria-label={t("binary.showFrames")}>
-                    {finding.frames.map((frame, index) => <li key={index}>{frame}</li>)}
-                  </ol>
-                ) : <p className="text-xs text-text-muted">{t("binary.noFrames")}</p>}
-                <IssueActions project={project} report={report} finding={finding.sha256} />
-              </div>
-            )}
-          </article>
-        );
-      })}
-    </div>
-  );
-}
-
-function Outcome({ project, outcome }: { project: string; outcome: BinaryFuzzOutcome }) {
-  const { t } = useI18n();
-  return (
-    <section className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md) var(--space-lg)" }} aria-label={t("binary.result")}>
-      <div className="flex flex-col gap-1">
-        <h2 className="text-sm font-semibold text-text-primary">{t("binary.result")}</h2>
-        <p className="text-xs text-text-muted font-mono">
-          {outcome.binary_name} · {outcome.machine} · {outcome.input} · {formatDuration(outcome.duration_secs)} · {t("binary.session")} {outcome.session}
-        </p>
-      </div>
-      <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))" }}>
-        <Stat label={t("binary.stat.execs")} value={count(outcome.execs_done)} />
-        <Stat label={t("binary.stat.execsPerSec")} value={outcome.execs_per_sec === null ? "-" : outcome.execs_per_sec.toFixed(1)} />
-        <Stat label={t("binary.stat.edges")} value={count(outcome.edges_found)} />
-        <Stat label={t("binary.stat.corpus")} value={count(outcome.corpus_count)} />
-        <Stat label={t("binary.stat.hangs")} value={count(outcome.saved_hangs)} />
-        <Stat label={t("binary.stat.distinct")} value={String(outcome.distinct_findings)} />
-        <Stat label={t("binary.stat.omitted")} value={String(outcome.findings_omitted)} />
-      </div>
-      {outcome.findings_omitted > 0 && <p className="text-xs text-text-muted">{t("binary.omittedNote", { count: outcome.findings_omitted })}</p>}
-      <div className="flex items-center gap-2 text-sm">
-        <span className="text-text-muted">{t("binary.workspace")}</span>
-        <span className="font-mono truncate">{outcome.workspace}</span>
-        <PathActions path={outcome.workspace} />
-      </div>
-      <h3 className="text-sm font-semibold text-text-primary border-t border-border" style={{ paddingTop: "var(--space-md)" }}>{t("binary.findings")}</h3>
-      <FindingsTable project={project} outcome={outcome} />
-    </section>
-  );
-}
-
-function EarlierReport({ project }: { project: string }) {
-  const { t } = useI18n();
-  const [report, setReport] = useState("");
-  const [finding, setFinding] = useState("");
-  const findingValid = validFindingId(finding);
-  return (
-    <section className="surface-card overflow-hidden">
-      <div className="hf-form-section flex flex-col gap-1">
-        <h2 className="text-sm font-semibold flex items-center gap-2 text-text-primary">
-          <FileSearch size={16} className="text-text-muted" />
-          {t("binary.earlier")}
-        </h2>
-        <p className="text-xs text-text-secondary">{t("binary.earlierHelp")}</p>
-      </div>
-      <div className="hf-form-section hf-grid-300 grid gap-4">
-        <PathField
-          id="binary-report" label={t("binary.reportPath")} value={report} onChange={setReport}
-          placeholder={t("binary.reportPlaceholder")} pickLabel={t("binary.pickReport")} pickIcon={<FileSearch size={14} />}
-          onPick={() => pickFile(t("binary.pickReport"))}
-        />
-        <div className="flex flex-col gap-1.5 min-w-0">
-          <Label htmlFor="binary-finding">{t("binary.findingId")}</Label>
-          <Input id="binary-finding" mono className="h-8" value={finding} onChange={(e) => setFinding(e.target.value.trim())} aria-invalid={finding !== "" && !findingValid} />
-          {finding !== "" && !findingValid && <p role="alert" className="text-xs text-error">{t("binary.invalidFinding")}</p>}
-        </div>
-      </div>
-      {report.trim() !== "" && findingValid && project && (
-        <div className="hf-form-section">
-          <IssueActions project={project} report={report.trim()} finding={finding} compact />
-        </div>
-      )}
-    </section>
-  );
-}
-
 export function BinaryView() {
   const { t } = useI18n();
   const { activeProject } = useProject();
   const project = activeProject || "";
-  const [binary, setBinary] = useState("");
-  const [input, setInput] = useState<BinaryInputMode>("file");
+  const [binary, setBinaryValue] = useState("");
+  const [input, setInputValue] = useState<BinaryInputMode>("file");
+  // Whether the operator picked a mode; an analysis suggestion applies only until then.
+  const inputTouched = useRef(false);
   const [seeds, setSeeds] = useState("");
   const [libraries, setLibraries] = useState("");
   const [duration, setDuration] = useState(String(DEFAULT_BINARY_DURATION_SECS));
   const [timeoutMs, setTimeoutMs] = useState(String(DEFAULT_BINARY_TIMEOUT_MS));
+  const [profile, setProfile] = useState<BinaryProfile | null>(null);
+  const [inspecting, setInspecting] = useState(false);
+  const [inspectError, setInspectError] = useState<string | null>(null);
+  const [tokens, setTokens] = useState<string[]>([]);
+  const [useDictionary, setUseDictionary] = useState(false);
+  const [continueFrom, setContinueFrom] = useState<BinarySessionSummary | null>(null);
   const [running, setRunning] = useState(false);
+  const [progress, setProgress] = useState<BinaryProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [outcome, setOutcome] = useState<BinaryFuzzOutcome | null>(null);
+  const [history, setHistory] = useState<BinarySessionSummary[]>([]);
+  const [opening, setOpening] = useState(false);
 
   const durationSecs = Number(duration);
   const timeout = Number(timeoutMs);
@@ -288,8 +95,60 @@ export function BinaryView() {
   const validTimeout = timeoutMs.trim() !== "" && Number.isSafeInteger(timeout) && timeout >= 1;
   const canStart = !running && !!project && binary.trim() !== "" && validDuration && validTimeout;
 
+  function setBinary(value: string) {
+    setBinaryValue(value);
+    setContinueFrom(null);
+    if (!value.trim()) { setProfile(null); setInspectError(null); }
+  }
+  function setInput(mode: BinaryInputMode) {
+    setInputValue(mode);
+    inputTouched.current = true;
+  }
+
+  const loadHistory = useCallback(() => {
+    if (!project) return;
+    binarySessions(project)
+      .then((sessions) => setHistory(Array.isArray(sessions) ? sessions : []))
+      .catch(() => setHistory([])); // no history can be read (web mode, no workspace): show none
+  }, [project]);
+  useEffect(loadHistory, [loadHistory]);
+
+  // Analyze the binary once typing pauses; nothing is run.
+  useEffect(() => {
+    const path = binary.trim();
+    if (!path) return;
+    let live = true;
+    const timer = window.setTimeout(() => {
+      setInspecting(true);
+      binaryInspect(path)
+        .then((found) => {
+          if (!live || !found || !Array.isArray(found.dictionary)) return;
+          setProfile(found); setInspectError(null);
+          setTokens(found.dictionary);
+          setUseDictionary(found.dictionary.length > 0);
+          if (!inputTouched.current) setInputValue(found.suggested_input);
+        })
+        .catch((e) => { if (live) { setProfile(null); setInspectError(String(e)); } })
+        .finally(() => { if (live) setInspecting(false); });
+    }, INSPECT_DELAY_MS);
+    return () => { live = false; window.clearTimeout(timer); };
+  }, [binary]);
+
+  // Poll the running session's stage and counters.
+  useEffect(() => {
+    if (!running || !project) return;
+    let live = true;
+    const poll = () => binaryProgress(project)
+      .then((found) => { if (live && found && typeof found.stage === "string") setProgress(found); })
+      .catch(() => undefined); // a missed poll is retried on the next tick
+    void poll();
+    const timer = window.setInterval(() => void poll(), PROGRESS_POLL_MS);
+    return () => { live = false; window.clearInterval(timer); };
+  }, [running, project]);
+
   async function start() {
     if (!canStart) return;
+    setProgress(null);
     setRunning(true); setError(null);
     try {
       setOutcome(await binaryFuzz({
@@ -300,10 +159,31 @@ export function BinaryView() {
         libraries: libraries.trim() || undefined,
         durationSecs,
         timeoutMs: timeout,
+        dictionary: useDictionary ? tokens : [],
+        continueFrom: continueFrom?.session,
       }));
+      setContinueFrom(null);
+      loadHistory();
     } catch (e) {
       setError(String(e));
     } finally { setRunning(false); }
+  }
+
+  async function open(session: BinarySessionSummary) {
+    setOpening(true); setError(null);
+    try {
+      setOutcome(await binarySession(project, session.session));
+    } catch (e) {
+      setError(String(e));
+    } finally { setOpening(false); }
+  }
+
+  function continueSession(session: BinarySessionSummary) {
+    setBinaryValue(sessionBinary(session.workspace));
+    setInputValue(session.input);
+    inputTouched.current = true;
+    setContinueFrom(session);
+    document.querySelector(".view-scroll")?.scrollTo({ top: 0, behavior: "smooth" });
   }
 
   return (
@@ -311,23 +191,41 @@ export function BinaryView() {
       <ViewHeader title={t("title.binary")} description={t("binary.subtitle")} />
       <p className="text-sm text-text-secondary">{t("binary.requirement")}</p>
       <section className="surface-card overflow-hidden">
+        {continueFrom && (
+          <FormSection><ContinueBanner session={continueFrom} onCancel={() => setContinueFrom(null)} /></FormSection>
+        )}
         <FormSection>
           <PathField
             id="binary-path" label={t("binary.path")} value={binary} onChange={setBinary}
             placeholder={t("binary.pathPlaceholder")} pickLabel={t("binary.browse")} pickIcon={<FileSearch size={14} />}
             onPick={() => pickFile(t("binary.path"))}
           />
+          {inspecting && <p role="status" className="text-xs text-text-muted">{t("binary.inspecting")}</p>}
+          {inspectError && !inspecting && <p role="alert" className="text-xs text-error">{t("binary.inspectFailed")}: {inspectError}</p>}
+          {profile && <ProfilePanel profile={profile} />}
         </FormSection>
         <FormSection>
           <fieldset className="flex flex-col gap-2 min-w-0" style={{ border: 0, padding: 0, margin: 0 }}>
             <legend className="hf-field-label" style={{ marginBottom: 8 }}>{t("binary.inputMode")}</legend>
+            {profile && profile.suggestion_reasons.length > 0 && (
+              <p className="text-xs text-text-secondary flex items-center gap-2 flex-wrap" style={{ marginBottom: 4 }}>
+                <Badge variant="accent">{t("binary.suggested")}: {t(`binary.mode.${profile.suggested_input}`)}</Badge>
+                {profile.suggestion_reasons.join(" ")}
+                {input !== profile.suggested_input && (
+                  <Button variant="ghost" size="sm" onClick={() => setInput(profile.suggested_input)}>{t("binary.useSuggested")}</Button>
+                )}
+              </p>
+            )}
             <div className="hf-grid-260 grid gap-2">
               {BINARY_INPUT_MODES.map((mode) => (
                 <label key={mode} className="hf-choice">
                   <input type="radio" name="binary-input" value={mode} checked={input === mode} onChange={() => setInput(mode)} />
                   <span className="hf-choice-dot" aria-hidden="true" />
                   <span className="min-w-0">
-                    <span className="block text-13px font-medium text-text-primary">{t(`binary.mode.${mode}`)}</span>
+                    <span className="flex items-center gap-2 text-13px font-medium text-text-primary">
+                      {t(`binary.mode.${mode}`)}
+                      {profile?.suggested_input === mode && <Badge variant="accent">{t("binary.suggested")}</Badge>}
+                    </span>
                     <span className="block text-xs text-text-secondary" style={{ marginTop: 2, lineHeight: 1.45 }}>{t(`binary.mode.${mode}.help`)}</span>
                   </span>
                 </label>
@@ -346,7 +244,18 @@ export function BinaryView() {
               pickLabel={t("binary.pickFolder")} pickIcon={<FolderOpen size={14} />} onPick={() => pickFolder(t("binary.libraries"))}
             />
           </div>
+          {binary.trim() !== "" && (
+            <SeedDraftPanel project={project} binary={binary.trim()} input={input} usedDirectory={seeds} onUse={setSeeds} />
+          )}
         </FormSection>
+        {profile && (
+          <FormSection>
+            <DictionaryPanel
+              project={project} binary={binary.trim()} input={input} tokens={tokens} enabled={useDictionary}
+              onTokens={setTokens} onEnabled={setUseDictionary}
+            />
+          </FormSection>
+        )}
         <FormSection>
           <div className="flex gap-6 flex-wrap items-start">
             <div className="flex flex-col gap-1.5">
@@ -370,20 +279,12 @@ export function BinaryView() {
           )}
           <Button variant="primary" disabled={!canStart} loading={running} onClick={() => void start()}>
             {!running && <Play size={14} />}
-            {t("binary.start")}
+            {t(continueFrom ? "binary.continue" : "binary.start")}
           </Button>
         </div>
       </section>
 
-      {running && (
-        <div role="status" className="surface-card flex items-start gap-2" style={{ padding: "var(--space-md)" }}>
-          <Cpu size={16} />
-          <div>
-            <div className="text-sm font-semibold">{t("binary.running")}</div>
-            <div className="text-xs text-text-muted">{t("binary.runningBody")}</div>
-          </div>
-        </div>
-      )}
+      {running && <ProgressPanel progress={progress} />}
       {error && (
         <div role="alert" className="hf-alert-error text-sm">
           <div className="font-semibold">{t("binary.failed")}</div>
@@ -391,11 +292,11 @@ export function BinaryView() {
         </div>
       )}
       {outcome ? (
-        <Outcome project={project} outcome={outcome} />
+        <BinaryOutcome project={project} outcome={outcome} />
       ) : !running && !error && (
         <EmptyState icon={<Cpu size={22} />} title={t("binary.emptyTitle")} hint={t("binary.emptyBody")} />
       )}
-      <EarlierReport project={project} />
+      {project && <SessionHistory sessions={history} onOpen={(session) => void open(session)} onContinue={continueSession} busy={running || opening} />}
     </div>
   );
 }

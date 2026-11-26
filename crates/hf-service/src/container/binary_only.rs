@@ -20,6 +20,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use hf_core::crash::CrashKind;
 use hf_core::engine::{EngineKind, FuzzRunConfig};
 use hf_core::error::ClassifiedError;
@@ -67,6 +68,10 @@ const DESOCK_DIR: &str = "desock";
 const DESOCK_SOURCE_NAME: &str = "oxfuzz_desock.c";
 const DESOCK_LIBRARY_NAME: &str = "oxfuzz_desock.so";
 const MESSAGE_DICTIONARY_NAME: &str = "messages.dict";
+/// The operator's dictionary, from `BinaryFuzzRequest::dictionary`.
+const DICTIONARY_NAME: &str = "dictionary.dict";
+/// Name prefix of corpus entries carried over from an earlier session.
+const CARRIED_PREFIX: &str = "carried-";
 /// What tells the socket shim to split the input into messages.
 const DESOCK_MESSAGES_ENV: &str = "OXFUZZ_DESOCK_MESSAGES=1";
 /// The preload shim a socket session compiles in the sandbox.
@@ -260,6 +265,7 @@ pub fn fuzz_command(
     input: BinaryInput,
     duration_secs: u64,
     timeout_ms: u64,
+    dictionary: bool,
 ) -> Result<Vec<String>, ClassifiedError> {
     let mut extra_args = vec!["-Q".to_owned()];
     if input == BinaryInput::SocketMessages {
@@ -267,6 +273,10 @@ pub fn fuzz_command(
             "-x".to_owned(),
             format!("/work/{DESOCK_DIR}/{MESSAGE_DICTIONARY_NAME}"),
         ]);
+    }
+    // AFL++ takes up to four `-x` dictionaries; the operator's is the second.
+    if dictionary {
+        extra_args.extend(["-x".to_owned(), format!("/work/{DICTIONARY_NAME}")]);
     }
     let config = FuzzRunConfig {
         harness_id: Uuid::nil(),
@@ -425,6 +435,12 @@ pub struct BinaryFuzzRequest {
     pub duration_secs: u64,
     /// Per-input timeout in milliseconds.
     pub timeout_ms: u64,
+    /// AFL++ dictionary tokens in escaped form (as `binary_inspect` returns
+    /// them), staged as `dictionary.dict` and passed with `-x`. Empty: none.
+    pub dictionary: Vec<String>,
+    /// An earlier session of the same binary in this project whose queue
+    /// seeds this session's corpus, so its coverage carries over.
+    pub continue_from: Option<Uuid>,
 }
 
 /// A finding's input after minimization, replayed and found to be the same
@@ -501,6 +517,41 @@ pub struct BinaryFuzzOutcome {
     pub distinct_findings: usize,
     /// Crash files AFL++ saved beyond the per-session cap, not read.
     pub findings_omitted: usize,
+    /// When the session started and finished; absent in reports written
+    /// before 2026-11-26.
+    #[serde(default)]
+    pub started_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub finished_at: Option<DateTime<Utc>>,
+    /// The earlier session whose queue seeded this one.
+    #[serde(default)]
+    pub continued_from: Option<Uuid>,
+    /// Tokens in the operator's dictionary; zero when none was used.
+    #[serde(default)]
+    pub dictionary_tokens: usize,
+}
+
+/// Where a running session is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BinaryStage {
+    /// Staging inputs and building the preload shims.
+    Preparing,
+    /// AFL++ is fuzzing.
+    Fuzzing,
+    /// Saved crashes are replayed for confirmation and a report.
+    Replaying,
+    /// Confirmed, distinct findings are being minimized.
+    Minimizing,
+}
+
+/// What a session stages beyond the request's own files.
+#[derive(Debug, Default)]
+struct StagedExtras {
+    /// Rendered AFL++ dictionary text, when the request carries tokens.
+    dictionary: Option<String>,
+    /// Queue entries of the earlier session the request continues.
+    carried: Vec<PathBuf>,
 }
 
 fn read_bounded(path: &Path, limit: u64, what: &str) -> Result<Vec<u8>, ClassifiedError> {
@@ -568,8 +619,12 @@ fn stage_session(
     root: &Path,
     image: &[u8],
     request: &BinaryFuzzRequest,
+    extras: &StagedExtras,
 ) -> Result<bool, ClassifiedError> {
     write_new(&root.join(TARGET_NAME), image, true)?;
+    if let Some(dictionary) = &extras.dictionary {
+        write_new(&root.join(DICTIONARY_NAME), dictionary.as_bytes(), false)?;
+    }
     for directory in [CORPUS_DIR, OUTPUT_DIR, FINDINGS_DIR, MINIMIZED_DIR] {
         ensure_workspace_directory(root, Path::new(directory))?;
     }
@@ -599,6 +654,18 @@ fn stage_session(
             seeds += 1;
         }
     }
+    for (index, path) in extras.carried.iter().enumerate() {
+        let data = read_bounded(path, MAX_FINDING_BYTES, "carried queue entry")?;
+        if data.is_empty() {
+            continue;
+        }
+        write_new(
+            &corpus.join(format!("{CARRIED_PREFIX}{index:05}")),
+            &data,
+            false,
+        )?;
+        seeds += 1;
+    }
     if seeds == 0 {
         write_new(&corpus.join("seed-default"), DEFAULT_SEED, false)?;
     }
@@ -617,6 +684,34 @@ fn stage_session(
         write_new(&libraries.join(name), &data, true)?;
     }
     Ok(true)
+}
+
+/// The queue entries an earlier session's AFL++ kept, as host paths in name
+/// order, bounded like operator seeds.
+fn previous_queue(previous: &Path) -> Result<Vec<PathBuf>, ClassifiedError> {
+    let queue = previous.join(OUTPUT_DIR).join("default").join("queue");
+    let entries = std::fs::read_dir(&queue).map_err(|error| {
+        invalid(format!(
+            "the earlier session kept no queue to continue from ({}): {error}",
+            queue.display()
+        ))
+    })?;
+    let mut files: Vec<PathBuf> = entries
+        // An entry that cannot be read is not carried; the rest still are.
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with("id:"))
+        })
+        // A symbolic link or directory in the queue is not an input.
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .map(|entry| entry.path())
+        .collect();
+    files.sort();
+    files.truncate(MAX_SEEDS);
+    Ok(files)
 }
 
 /// The crash files AFL++ saved in a session's output tree, as
@@ -972,7 +1067,9 @@ impl SessionRun<'_> {
 /// were beyond the per-session cap.
 async fn collect_findings(
     run: &SessionRun<'_>,
+    stage: &StageReporter<'_>,
 ) -> Result<(Vec<BinaryFinding>, usize, usize), ClassifiedError> {
+    stage(BinaryStage::Replaying);
     let crashes = saved_crashes(&run.root.join(OUTPUT_DIR));
     let omitted = crashes.len().saturating_sub(MAX_FINDINGS);
     let mut findings: Vec<BinaryFinding> = Vec::new();
@@ -1018,6 +1115,7 @@ async fn collect_findings(
         findings.push(finding);
     }
     let distinct = mark_duplicates(&mut findings);
+    stage(BinaryStage::Minimizing);
     let mut minimized = 0;
     for finding in &mut findings {
         if minimized >= MAX_MINIMIZED {
@@ -1031,6 +1129,9 @@ async fn collect_findings(
     }
     Ok((findings, distinct, omitted))
 }
+
+/// Told where a running session is, for progress reports.
+pub(super) type StageReporter<'a> = dyn Fn(BinaryStage) + Send + Sync + 'a;
 
 /// A request that passed validation, before anything is staged or run.
 struct AdmittedBinary {
@@ -1054,7 +1155,12 @@ fn admit(request: &BinaryFuzzRequest) -> Result<AdmittedBinary, ClassifiedError>
     let image = read_bounded(&request.binary, MAX_BINARY_BYTES, "binary")?;
     let machine = elf_machine(&image)?;
     let sha256 = sha256_hex(&image);
-    let command = fuzz_command(request.input, request.duration_secs, request.timeout_ms)?;
+    let command = fuzz_command(
+        request.input,
+        request.duration_secs,
+        request.timeout_ms,
+        !request.dictionary.is_empty(),
+    )?;
     Ok(AdmittedBinary {
         image,
         machine,
@@ -1070,8 +1176,12 @@ async fn run_session(
     session: Uuid,
     request: &BinaryFuzzRequest,
     admitted: AdmittedBinary,
+    extras: &StagedExtras,
+    stage: &StageReporter<'_>,
 ) -> Result<BinaryFuzzOutcome, ClassifiedError> {
-    let libraries = stage_session(root, &admitted.image, request)?;
+    let started_at = Utc::now();
+    stage(BinaryStage::Preparing);
+    let libraries = stage_session(root, &admitted.image, request, extras)?;
     let sandbox = sandbox_machine(runtime, root).await?;
     if sandbox != admitted.machine {
         return Err(invalid(format!(
@@ -1087,6 +1197,7 @@ async fn run_session(
         build_shim(runtime, root, &DESOCK).await?;
     }
 
+    stage(BinaryStage::Fuzzing);
     let result = runtime
         .run_command_opts(
             &admitted.command,
@@ -1119,13 +1230,16 @@ async fn run_session(
         )));
     };
 
-    let (findings, distinct_findings, findings_omitted) = collect_findings(&SessionRun {
-        runtime,
-        root,
-        input: request.input,
-        libraries,
-        timeout_ms: request.timeout_ms,
-    })
+    let (findings, distinct_findings, findings_omitted) = collect_findings(
+        &SessionRun {
+            runtime,
+            root,
+            input: request.input,
+            libraries,
+            timeout_ms: request.timeout_ms,
+        },
+        stage,
+    )
     .await?;
     let outcome = BinaryFuzzOutcome {
         session,
@@ -1147,6 +1261,10 @@ async fn run_session(
         findings,
         distinct_findings,
         findings_omitted,
+        started_at: Some(started_at),
+        finished_at: Some(Utc::now()),
+        continued_from: request.continue_from,
+        dictionary_tokens: request.dictionary.len(),
     };
     let report = serde_json::to_vec_pretty(&outcome)
         .map_err(|error| ClassifiedError::Internal(format!("encode report: {error}")))?;
@@ -1169,19 +1287,61 @@ impl ServiceContainer {
         request: &BinaryFuzzRequest,
     ) -> Result<BinaryFuzzOutcome, ClassifiedError> {
         let admitted = admit(request)?;
+        let dictionary = if request.dictionary.is_empty() {
+            None
+        } else {
+            Some(super::binary_profile::render_dictionary(
+                &request.dictionary,
+            )?)
+        };
         self.authorize_recorded(Action::RunHarness, "binary_fuzz", Some(&request.project))
             .await?;
         let _workspace_operation = self.acquire_workspace_operation().await?;
 
+        let workspace_root = prepare_configured_workspace_root()?;
+        let binary_dir = PathBuf::from(project_slug(&request.project))
+            .join(".binary")
+            .join(&admitted.sha256[..16]);
+        let carried = match request.continue_from {
+            Some(previous) => {
+                let previous_root = workspace_root.join(&binary_dir).join(previous.to_string());
+                super::binary_sessions::verify_same_binary(&previous_root, &admitted.sha256)?;
+                previous_queue(&previous_root)?
+            }
+            None => Vec::new(),
+        };
         let session = Uuid::new_v4();
-        let root = ensure_workspace_directory(
-            &prepare_configured_workspace_root()?,
-            &PathBuf::from(project_slug(&request.project))
-                .join(".binary")
-                .join(&admitted.sha256[..16])
-                .join(session.to_string()),
-        )?;
-        run_session(self.runtime.as_ref(), &root, session, request, admitted).await
+        let root =
+            ensure_workspace_directory(&workspace_root, &binary_dir.join(session.to_string()))?;
+        let binary_name = request
+            .binary
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let _active = self.track_binary_session(
+            session,
+            &request.project,
+            binary_name,
+            &root,
+            request.duration_secs,
+        );
+        let registry = self.binary_session_registry();
+        let stage = move |stage: BinaryStage| {
+            super::binary_sessions::set_stage(&registry, session, stage);
+        };
+        run_session(
+            self.runtime.as_ref(),
+            &root,
+            session,
+            request,
+            admitted,
+            &StagedExtras {
+                dictionary,
+                carried,
+            },
+            &stage,
+        )
+        .await
     }
 }
 
@@ -1228,8 +1388,82 @@ mod tests {
     }
 
     #[test]
+    fn an_operator_dictionary_is_a_second_dictionary_beside_the_separator() {
+        let plain = fuzz_command(BinaryInput::File, 60, 1000, true).unwrap();
+        let dictionaries: Vec<_> = plain
+            .windows(2)
+            .filter(|pair| pair[0] == "-x")
+            .map(|pair| pair[1].clone())
+            .collect();
+        assert_eq!(dictionaries, ["/work/dictionary.dict"]);
+        let messages = fuzz_command(BinaryInput::SocketMessages, 60, 1000, true).unwrap();
+        let dictionaries: Vec<_> = messages
+            .windows(2)
+            .filter(|pair| pair[0] == "-x")
+            .map(|pair| pair[1].clone())
+            .collect();
+        assert_eq!(
+            dictionaries,
+            ["/work/desock/messages.dict", "/work/dictionary.dict"]
+        );
+        assert!(!fuzz_command(BinaryInput::File, 60, 1000, false)
+            .unwrap()
+            .contains(&"-x".to_owned()));
+    }
+
+    #[test]
+    fn a_continued_session_stages_the_dictionary_and_the_earlier_queue() {
+        let source = tempfile::tempdir().unwrap();
+        let earlier = tempfile::tempdir().unwrap();
+        let queue = earlier.path().join("out/default/queue");
+        std::fs::create_dir_all(queue.join(".state")).unwrap();
+        std::fs::write(queue.join("id:000000,time:0,orig:seed"), b"AAAA").unwrap();
+        std::fs::write(queue.join("id:000001,src:000000,op:havoc"), b"BBBB").unwrap();
+        std::fs::write(queue.join("id:000002,empty"), b"").unwrap();
+        std::fs::write(queue.join("README.txt"), b"not an input").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(
+            queue.join("id:000000,time:0,orig:seed"),
+            queue.join("id:000003,link"),
+        )
+        .unwrap();
+        let carried = previous_queue(earlier.path()).unwrap();
+        assert_eq!(carried.len(), 3, "{carried:?}");
+
+        let root = tempfile::tempdir().unwrap();
+        let request = BinaryFuzzRequest {
+            project: source.path().to_path_buf(),
+            binary: source.path().join("unused"),
+            input: BinaryInput::File,
+            seeds: None,
+            libraries: None,
+            duration_secs: 10,
+            timeout_ms: 1000,
+            dictionary: vec!["PIC1".to_owned()],
+            continue_from: None,
+        };
+        let extras = StagedExtras {
+            dictionary: Some("token_0001=\"PIC1\"\n".to_owned()),
+            carried,
+        };
+        stage_session(root.path(), b"\x7fELF", &request, &extras).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("dictionary.dict")).unwrap(),
+            "token_0001=\"PIC1\"\n"
+        );
+        let mut corpus: Vec<_> = std::fs::read_dir(root.path().join("corpus"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        corpus.sort();
+        // The empty queue entry adds nothing; no default seed is needed.
+        assert_eq!(corpus, ["carried-00000", "carried-00001"]);
+        assert!(previous_queue(source.path()).is_err());
+    }
+
+    #[test]
     fn the_fuzz_command_is_the_afl_adapter_argv_in_qemu_mode() {
-        let file = fuzz_command(BinaryInput::File, 60, 1000).unwrap();
+        let file = fuzz_command(BinaryInput::File, 60, 1000, false).unwrap();
         assert_eq!(
             file,
             [
@@ -1249,7 +1483,7 @@ mod tests {
             ]
         );
         // A stdin target gets no input-file placeholder.
-        let stdin = fuzz_command(BinaryInput::Stdin, 60, 1000).unwrap();
+        let stdin = fuzz_command(BinaryInput::Stdin, 60, 1000, false).unwrap();
         assert_eq!(stdin.last().map(String::as_str), Some("/work/target"));
         assert!(stdin.contains(&"-Q".to_owned()));
 
@@ -1318,8 +1552,16 @@ mod tests {
             libraries: Some(libs),
             duration_secs: 10,
             timeout_ms: 1000,
+            dictionary: Vec::new(),
+            continue_from: None,
         };
-        assert!(stage_session(root.path(), b"\x7fELF image", &request).unwrap());
+        assert!(stage_session(
+            root.path(),
+            b"\x7fELF image",
+            &request,
+            &StagedExtras::default()
+        )
+        .unwrap());
         assert_eq!(
             std::fs::read(root.path().join("target")).unwrap(),
             b"\x7fELF image"
@@ -1341,7 +1583,9 @@ mod tests {
         let bare = tempfile::tempdir().unwrap();
         request.seeds = None;
         request.libraries = None;
-        assert!(!stage_session(bare.path(), b"\x7fELF", &request).unwrap());
+        assert!(
+            !stage_session(bare.path(), b"\x7fELF", &request, &StagedExtras::default()).unwrap()
+        );
         assert_eq!(
             std::fs::read(bare.path().join("corpus/seed-default")).unwrap(),
             DEFAULT_SEED
@@ -1363,7 +1607,7 @@ mod tests {
     fn a_socket_session_takes_stdin_input_and_preloads_the_shim_into_the_target_only() {
         // The fuzzer delivers the input on standard input; the shim hands it
         // to the server as its first connection.
-        let command = fuzz_command(BinaryInput::Socket, 60, 1000).unwrap();
+        let command = fuzz_command(BinaryInput::Socket, 60, 1000, false).unwrap();
         assert_eq!(command.last().map(String::as_str), Some("/work/target"));
         assert_eq!(
             replay_command(BinaryInput::Socket, "findings/crash-0123456789abcdef"),
@@ -1395,8 +1639,10 @@ mod tests {
             libraries: None,
             duration_secs: 10,
             timeout_ms: 1000,
+            dictionary: Vec::new(),
+            continue_from: None,
         };
-        stage_session(root.path(), b"\x7fELF", &request).unwrap();
+        stage_session(root.path(), b"\x7fELF", &request, &StagedExtras::default()).unwrap();
         let shim = std::fs::read_to_string(root.path().join("desock/oxfuzz_desock.c")).unwrap();
         assert_eq!(shim, DESOCK_SOURCE);
         for symbol in ["accept4(", "listen(", "bind(", "MSG_NOSIGNAL"] {
@@ -1497,8 +1743,10 @@ mod tests {
             libraries: None,
             duration_secs: 10,
             timeout_ms: 1000,
+            dictionary: Vec::new(),
+            continue_from: None,
         };
-        stage_session(root.path(), b"\x7fELF", &request).unwrap();
+        stage_session(root.path(), b"\x7fELF", &request, &StagedExtras::default()).unwrap();
         let shim =
             std::fs::read_to_string(root.path().join("crashinfo/oxfuzz_crashinfo.c")).unwrap();
         assert_eq!(shim, CRASHINFO_SOURCE);
@@ -1633,6 +1881,10 @@ mod tests {
             }],
             distinct_findings: 1,
             findings_omitted: 0,
+            started_at: None,
+            finished_at: None,
+            continued_from: None,
+            dictionary_tokens: 0,
         };
         let json = serde_json::to_string(&outcome).unwrap();
         let read: BinaryFuzzOutcome = serde_json::from_str(&json).unwrap();
@@ -1661,11 +1913,11 @@ mod tests {
 
         // The fuzzer is given the separator as a dictionary token, and the
         // input still arrives on standard input.
-        let command = fuzz_command(BinaryInput::SocketMessages, 60, 1000).unwrap();
+        let command = fuzz_command(BinaryInput::SocketMessages, 60, 1000, false).unwrap();
         let at = command.iter().position(|arg| arg == "-x").unwrap();
         assert_eq!(command[at + 1], "/work/desock/messages.dict");
         assert_eq!(command.last().map(String::as_str), Some("/work/target"));
-        assert!(!fuzz_command(BinaryInput::Socket, 60, 1000)
+        assert!(!fuzz_command(BinaryInput::Socket, 60, 1000, false)
             .unwrap()
             .contains(&"-x".to_owned()));
 
@@ -1719,8 +1971,10 @@ mod tests {
             libraries: None,
             duration_secs: 10,
             timeout_ms: 1000,
+            dictionary: Vec::new(),
+            continue_from: None,
         };
-        stage_session(root.path(), b"\x7fELF", &request).unwrap();
+        stage_session(root.path(), b"\x7fELF", &request, &StagedExtras::default()).unwrap();
         assert!(root.path().join("desock/oxfuzz_desock.c").is_file());
         assert_eq!(
             std::fs::read_to_string(root.path().join("desock/messages.dict")).unwrap(),
@@ -1728,7 +1982,7 @@ mod tests {
         );
         let plain = tempfile::tempdir().unwrap();
         request.input = BinaryInput::Socket;
-        stage_session(plain.path(), b"\x7fELF", &request).unwrap();
+        stage_session(plain.path(), b"\x7fELF", &request, &StagedExtras::default()).unwrap();
         assert!(!plain.path().join("desock/messages.dict").exists());
 
         assert_eq!(
@@ -2000,6 +2254,8 @@ mod tests {
                 libraries: None,
                 duration_secs: 40,
                 timeout_ms: 1000,
+                dictionary: Vec::new(),
+                continue_from: None,
             };
             let session = Uuid::new_v4();
             let session_root = root.path().join(format!("session-{session}"));
@@ -2010,6 +2266,8 @@ mod tests {
                 session,
                 &request,
                 admit(&request).unwrap(),
+                &StagedExtras::default(),
+                &|_| {},
             )
             .await
             .unwrap();
@@ -2084,6 +2342,130 @@ mod tests {
         }
     }
 
+    const PLANTED_MAGIC_C: &str = "#include <stdio.h>\n#include <string.h>\n\nint main(int argc, char **argv) {\n  unsigned char b[64] = {0};\n  FILE *f = fopen(argv[1], \"rb\");\n  if (!f) return 1;\n  size_t n = fread(b, 1, sizeof b, f);\n  fclose(f);\n  if (n >= 14 && memcmp(b, \"MAGIC_TOKEN_42\", 14) == 0) {\n    volatile int *q = 0;\n    *q = 1;\n  }\n  return 0;\n}\n";
+
+    /// The operator's dictionary reaches AFL++: a crash behind a 14-byte
+    /// token that blind mutation does not find in seconds is found when the
+    /// token is in the dictionary. A continued session then starts from the
+    /// first session's queue.
+    #[tokio::test]
+    #[ignore = "requires a local Docker daemon and the pinned sandbox image"]
+    async fn live_dictionary_reaches_afl_and_a_session_continues_from_its_queue() {
+        assert!(hf_runtime::docker_daemon_ready());
+        let root = tempfile::tempdir().unwrap();
+        let runtime = hf_runtime::docker::DockerRuntime::new(
+            hf_runtime::RuntimeConfig::default(),
+            root.path(),
+        );
+        let build = root.path().join("build");
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::write(build.join("magic.c"), PLANTED_MAGIC_C).unwrap();
+        let compiled = runtime
+            .run_command_opts(
+                &["clang", "-O1", "/work/magic.c", "-o", "/work/magic"].map(str::to_owned),
+                &build,
+                &limits(120, HashMap::new()),
+                &SandboxOptions::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(compiled.exit_code, 0, "{}", compiled.stderr);
+        let image = std::fs::read(build.join("magic")).unwrap();
+        let profile = super::super::binary_profile::profile_binary(&image).unwrap();
+        assert_eq!(profile.suggested_input, BinaryInput::File, "{profile:?}");
+        assert!(
+            profile
+                .dictionary
+                .iter()
+                .any(|token| token == "MAGIC_TOKEN_42"),
+            "{profile:?}"
+        );
+
+        let tokens = vec!["MAGIC_TOKEN_42".to_owned()];
+        let request = BinaryFuzzRequest {
+            project: root.path().join("project"),
+            binary: build.join("magic"),
+            input: BinaryInput::File,
+            seeds: None,
+            libraries: None,
+            duration_secs: 30,
+            timeout_ms: 1000,
+            dictionary: tokens.clone(),
+            continue_from: None,
+        };
+        let first_root = root.path().join("first");
+        std::fs::create_dir_all(&first_root).unwrap();
+        let first = run_session(
+            &runtime,
+            &first_root,
+            Uuid::new_v4(),
+            &request,
+            admit(&request).unwrap(),
+            &StagedExtras {
+                dictionary: Some(super::super::binary_profile::render_dictionary(&tokens).unwrap()),
+                carried: Vec::new(),
+            },
+            &|_| {},
+        )
+        .await
+        .unwrap();
+        println!(
+            "first: execs {:?}, findings {}",
+            first.execs_done,
+            first.findings.len()
+        );
+        assert_eq!(first.dictionary_tokens, 1);
+        assert!(first.started_at.is_some() && first.finished_at.is_some());
+        assert!(
+            first.findings.iter().any(|finding| finding.confirmed
+                && std::fs::read(&finding.input)
+                    .unwrap()
+                    .starts_with(b"MAGIC_TOKEN_42")),
+            "the dictionary token led AFL++ to the crash: {:?}",
+            first.findings
+        );
+
+        let carried = previous_queue(&first_root).unwrap();
+        assert!(!carried.is_empty());
+        let continued = BinaryFuzzRequest {
+            dictionary: Vec::new(),
+            duration_secs: 10,
+            continue_from: Some(first.session),
+            ..request
+        };
+        let second_root = root.path().join("second");
+        std::fs::create_dir_all(&second_root).unwrap();
+        let second = run_session(
+            &runtime,
+            &second_root,
+            Uuid::new_v4(),
+            &continued,
+            admit(&continued).unwrap(),
+            &StagedExtras {
+                dictionary: None,
+                carried: carried.clone(),
+            },
+            &|_| {},
+        )
+        .await
+        .unwrap();
+        let staged = std::fs::read_dir(second_root.join(CORPUS_DIR))
+            .unwrap()
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(CARRIED_PREFIX)
+            })
+            .count();
+        println!("second: carried {staged}, execs {:?}", second.execs_done);
+        assert!(staged > 0 && staged <= carried.len());
+        assert_eq!(second.continued_from, Some(first.session));
+        assert!(second.execs_done.unwrap_or(0) > 0);
+    }
+
     const PLANTED_SERVER_C: &str = "#include <netinet/in.h>\n#include <poll.h>\n#include <string.h>\n#include <sys/socket.h>\n#include <unistd.h>\n\nint main(void) {\n  int one = 1;\n  int s = socket(AF_INET, SOCK_STREAM, 0);\n  struct sockaddr_in a;\n  memset(&a, 0, sizeof a);\n  a.sin_family = AF_INET;\n  a.sin_port = htons(80);\n  setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);\n  if (bind(s, (struct sockaddr *)&a, sizeof a) != 0) return 2;\n  if (listen(s, 8) != 0) return 3;\n  for (;;) {\n    struct pollfd p = {s, POLLIN, 0};\n    if (poll(&p, 1, -1) <= 0) return 4;\n    int c = accept(s, 0, 0);\n    if (c < 0) return 5;\n    setsockopt(c, IPPROTO_TCP, 1, &one, sizeof one);\n    unsigned char b[64];\n    ssize_t n = recv(c, b, sizeof b, 0);\n    if (n > 3 && b[0] == 'F' && b[1] == 'U' && b[2] == 'Z' && b[3] == 'Z') {\n      volatile int *q = 0;\n      *q = 1;\n    }\n    send(c, \"ok\\n\", 3, 0);\n    close(c);\n  }\n}\n";
 
     /// A server that binds a privileged port, waits in `poll`, and reads its
@@ -2130,6 +2512,8 @@ mod tests {
             libraries: None,
             duration_secs: 40,
             timeout_ms: 1000,
+            dictionary: Vec::new(),
+            continue_from: None,
         };
         let session = Uuid::new_v4();
         let session_root = root.path().join("session");
@@ -2140,6 +2524,8 @@ mod tests {
             session,
             &request,
             admit(&request).unwrap(),
+            &StagedExtras::default(),
+            &|_| {},
         )
         .await
         .unwrap();
@@ -2301,6 +2687,8 @@ mod tests {
                 libraries: None,
                 duration_secs: 40,
                 timeout_ms: 1000,
+                dictionary: Vec::new(),
+                continue_from: None,
             };
             let session_root = root.path().join(format!("session-{name}"));
             std::fs::create_dir_all(&session_root).unwrap();
@@ -2310,6 +2698,8 @@ mod tests {
                 Uuid::new_v4(),
                 &request,
                 admit(&request).unwrap(),
+                &StagedExtras::default(),
+                &|_| {},
             )
             .await
             .unwrap();

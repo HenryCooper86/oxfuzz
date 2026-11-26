@@ -166,6 +166,33 @@ fn requests(project: &str) -> Vec<(&'static str, Value)> {
             "binary_file_issue",
             json!({ "project": project, "report": format!("{project}/report.json"), "finding": "abcdef12" }),
         ),
+        ("binary_inspect", json!({ "binary": format!("{project}/no_such_binary") })),
+        (
+            "binary_seed_drafts",
+            json!({ "project": project, "binary": format!("{project}/no_such_binary"),
+                    "input": "file", "description": null, "count": 4 }),
+        ),
+        (
+            "binary_dictionary_refine",
+            json!({ "project": project, "binary": format!("{project}/no_such_binary"),
+                    "input": "stdin", "tokens": ["PIC1"] }),
+        ),
+        ("binary_progress", json!({ "project": project })),
+        ("binary_sessions", json!({ "project": project })),
+        (
+            "binary_session",
+            json!({ "project": project, "session": "00000000-0000-0000-0000-000000000000" }),
+        ),
+        (
+            "binary_finding_explanation",
+            json!({ "project": project, "session": "00000000-0000-0000-0000-000000000000",
+                    "finding": "abcdef12" }),
+        ),
+        (
+            "binary_finding_explain",
+            json!({ "project": project, "session": "00000000-0000-0000-0000-000000000000",
+                    "finding": "abcdef12" }),
+        ),
     ]);
     #[cfg(feature = "crash-bisection")]
     requests.push((
@@ -237,6 +264,22 @@ fn parity_handler() -> impl Fn(tauri::ipc::Invoke<tauri::test::MockRuntime>) -> 
         crate::parity_binary::binary_issue_export,
         #[cfg(feature = "binary-only-fuzzing")]
         crate::parity_binary::binary_file_issue,
+        #[cfg(feature = "binary-only-fuzzing")]
+        crate::parity_binary::binary_inspect,
+        #[cfg(feature = "binary-only-fuzzing")]
+        crate::parity_binary::binary_seed_drafts,
+        #[cfg(feature = "binary-only-fuzzing")]
+        crate::parity_binary::binary_dictionary_refine,
+        #[cfg(feature = "binary-only-fuzzing")]
+        crate::parity_binary::binary_progress,
+        #[cfg(feature = "binary-only-fuzzing")]
+        crate::parity_binary::binary_sessions,
+        #[cfg(feature = "binary-only-fuzzing")]
+        crate::parity_binary::binary_session,
+        #[cfg(feature = "binary-only-fuzzing")]
+        crate::parity_binary::binary_finding_explanation,
+        #[cfg(feature = "binary-only-fuzzing")]
+        crate::parity_binary::binary_finding_explain,
         #[cfg(feature = "crash-bisection")]
         crate::parity_analysis::bisect_crash,
         crate::parity_analysis::verify_regressions,
