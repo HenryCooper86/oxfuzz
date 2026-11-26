@@ -1,17 +1,17 @@
 WEBVTT
 
 1
-00:00:00.000 --> 00:00:15.000
+00:00:00.000 --> 00:00:19.000
 Binary-only: picinfo is an uninstrumented Linux ELF with a planted NULL read. It takes a file argument; seeds come from a folder.
 
 2
-00:00:15.000 --> 00:00:22.100
+00:00:19.000 --> 00:00:25.500
 AFL++ QEMU mode fuzzes it in the sandbox for one minute (sped up 10x).
 
 3
-00:00:22.100 --> 00:00:45.100
-173,393 executions and one distinct finding: SEGV, confirmed by replay.
+00:00:25.500 --> 00:00:52.500
+157,418 executions and one distinct finding: SEGV, confirmed by replay.
 
 4
-00:00:45.100 --> 00:01:13.100
+00:00:52.500 --> 00:01:28.000
 Stack frames as module offsets, and an issue drafted from the finding.

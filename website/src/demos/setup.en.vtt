@@ -1,17 +1,17 @@
 WEBVTT
 
 1
-00:00:00.000 --> 00:00:06.500
+00:00:00.000 --> 00:00:06.700
 First launch on macOS: the saved AI provider is found (DeepSeek here).
 
 2
-00:00:06.500 --> 00:00:29.500
+00:00:06.700 --> 00:00:18.900
 Sandbox check: Docker, the sandbox image and all four engines are available.
 
 3
-00:00:29.500 --> 00:00:38.500
+00:00:18.900 --> 00:00:26.700
 You review generated code and approve execution before anything runs.
 
 4
-00:00:38.500 --> 00:00:49.500
+00:00:26.700 --> 00:00:39.500
 Ready. The status bar keeps showing Docker, sandbox and engine health.

@@ -1,29 +1,33 @@
 WEBVTT
 
 1
-00:00:00.000 --> 00:00:24.000
+00:00:00.000 --> 00:00:11.300
 Fuzz this project: oxfuzz picks decode_utf8, the AI drafts a libFuzzer harness, and the sandbox compiles and smoke-tests it.
 
 2
-00:00:24.000 --> 00:00:31.000
-Build options and smoke-test evidence (sped up 4x).
+00:00:11.300 --> 00:00:22.000
+The drafted harness cannot run until a person reviews and approves it.
 
 3
-00:00:31.000 --> 00:00:46.000
-An independent model review passed and the smoke test already hit a crash. A person approves the harness.
+00:00:22.000 --> 00:00:40.000
+Smoke-test evidence and an independent model review; the smoke test already hit a crash (sped up 1.5x).
 
 4
-00:00:46.000 --> 00:00:56.500
-The approved harness runs in the sandbox for one minute (sped up 12x).
+00:00:40.000 --> 00:00:47.000
+A person approves the harness, and a one-minute run starts in the sandbox.
 
 5
-00:00:56.500 --> 00:01:07.833
-Run finished: one crash artifact retained. The panel shows the model calls this run made.
+00:00:47.000 --> 00:00:59.000
+libFuzzer stops at its first crash, so this run ends early (sped up 3x).
 
 6
-00:01:07.833 --> 00:01:16.333
-Triage: Scan for Crashes replays and classifies the crash in the sandbox, with no AI call (sped up 2x).
+00:00:59.000 --> 00:01:13.333
+Run finished: one crash artifact retained for review (sped up 1.5x).
 
 7
-00:01:16.333 --> 00:01:50.333
+00:01:13.333 --> 00:01:35.833
+Triage: Scan for Crashes replays and classifies the crash in the sandbox, with no AI call.
+
+8
+00:01:35.833 --> 00:01:59.833
 heap-buffer-overflow (read) at utf8.c:31 with the AddressSanitizer stack; not called exploitable until reviewed.
