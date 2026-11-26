@@ -112,9 +112,9 @@ export const locales = {
       "Linux kernel fuzzing in a VM. You supply the kernel and guest image.",
     engine_syzkaller_link: "syzkaller setup guide",
 
-    new_title: "New in 0.9.11: kernel fuzzing with KVM and a sandbox you can pull",
+    new_title: "New: help for programs without source on main, kernel fuzzing with KVM in 0.9.11",
     new_intro:
-      "Released in November 2026. The first two items are new in 0.9.11, the next two arrived in 0.9.10, and the others in 0.9.8. The two recordings are real command-line sessions on small sample programs with a planted bug.",
+      "The binary additions in the first item are on main since 0.9.11 and not yet in the packages below. Kernel fuzzing with KVM and the sandbox you can pull are new in 0.9.11, the two crash-review items arrived in 0.9.10, and the four languages and <code>oxfuzz binary</code> itself in 0.9.8. The two recordings are real command-line sessions on small sample programs with a planted bug.",
     new_1_title: "Kernel fuzzing with KVM",
     new_1_text:
       "On a Linux host with <code>/dev/kvm</code>, kernel campaigns use hardware acceleration, and that one device is all the sandbox gains. In our recorded run the test guest booted in 16 seconds instead of 126, and a 30-minute campaign ran 143,404 programs. Kernel crashes are now counted.",
@@ -132,7 +132,7 @@ export const locales = {
       "Go with native fuzzing, Python with Atheris, Java with Jazzer and JavaScript with Jazzer.js. Each is discovered, built and run in the same sandbox.",
     new_6_title: "Programs without source",
     new_6_text:
-      "<code>oxfuzz binary</code> fuzzes a compiled Linux program in AFL++ QEMU mode. It can feed a file, a TCP or UDP server, or a sequence of messages. Checked on Linux arm64 so far. On main since 0.9.11, not yet in the packages: the desktop Binary view adds model-drafted seeds, a dictionary from the program's strings, comparison splitting (CompCov), persistent mode, live progress you can stop and continue, and a model note on each crash that reads its disassembly.",
+      '<code>oxfuzz binary</code> fuzzes a compiled Linux program in AFL++ QEMU mode, fed a file, standard input, a TCP or UDP server, or a sequence of messages; checked on Linux arm64 so far. New on main: <code>--compcov</code> splits multi-byte comparisons so the fuzzer can reach magic values, and <code>--persistent</code> loops on one function inside one process, 5.8 times faster at 100% stability in our test. In the desktop app the model drafts seeds and explains each crash from its disassembly; <a href="#videos">the binary video</a> shows a whole session.',
     bin_fact_1: "Run",
     bin_fact_1_value: "30 seconds, AFL++ QEMU mode",
     bin_fact_2: "Executions",
@@ -186,7 +186,7 @@ export const locales = {
     vid_binary_meta:
       "macOS arm64 host, linux/arm64 sandbox image 0.2.4, oxfuzz built from main after 0.9.11 (commit 6fdb3aad), DeepSeek model. Recorded 2026-11-26.",
     new_status:
-      'These features are in the desktop packages below from v0.9.11. The <code>oxfuzz</code> command-line tool is not in those packages; <a href="https://github.com/HenryCooper86/oxfuzz/blob/main/docs/guides/INSTALL.md" rel="noopener">install it from source</a> at the v0.9.11 tag. The <a href="https://github.com/HenryCooper86/oxfuzz/blob/main/CHANGELOG.md" rel="noopener">changelog</a> lists every change.',
+      'Except for the binary additions on main, these features are in the desktop packages below from v0.9.11. The <code>oxfuzz</code> command-line tool is not in those packages; <a href="https://github.com/HenryCooper86/oxfuzz/blob/main/docs/guides/INSTALL.md" rel="noopener">install it from source</a> at the v0.9.11 tag, or from main for the binary additions. The <a href="https://github.com/HenryCooper86/oxfuzz/blob/main/CHANGELOG.md" rel="noopener">changelog</a> lists every change.',
 
     control_title: "The fuzzer runs untrusted code. You stay in charge of it.",
     control_1_title: "Sandboxed",
@@ -362,9 +362,9 @@ export const locales = {
       "在虚拟机中对 Linux 内核做模糊测试。内核和客户机镜像由你提供。",
     engine_syzkaller_link: "syzkaller 配置指南",
 
-    new_title: "0.9.11 新功能：KVM 加速的内核模糊测试与可直接拉取的沙箱",
+    new_title: "新功能：main 上为无源码程序提供的辅助，以及 0.9.11 中 KVM 加速的内核模糊测试",
     new_intro:
-      "2026 年 11 月发布。前两项是 0.9.11 的新功能，接下来两项在 0.9.10 加入，其余在 0.9.8 加入。下面两段录屏是真实的命令行运行过程，对象是带有预埋缺陷的小型示例程序。",
+      "第一项中的二进制新增功能在 0.9.11 之后已合入 main，尚未进入下方的安装包。KVM 加速的内核模糊测试和可直接拉取的沙箱是 0.9.11 的新功能，两项崩溃审查功能在 0.9.10 加入，四种语言和 <code>oxfuzz binary</code> 本身在 0.9.8 加入。下面两段录屏是真实的命令行运行过程，对象是带有预埋缺陷的小型示例程序。",
     new_1_title: "KVM 加速的内核模糊测试",
     new_1_text:
       "在带有 <code>/dev/kvm</code> 的 Linux 主机上，内核测试使用硬件加速，沙箱只额外获得这一个设备。在我们记录的运行中，测试虚拟机 16 秒完成启动（模拟环境下需要 126 秒），30 分钟执行了 143,404 个程序。内核崩溃现在也会被计数。",
@@ -382,7 +382,7 @@ export const locales = {
       "Go（原生模糊测试）、Python（Atheris）、Java（Jazzer）和 JavaScript（Jazzer.js）。它们都在同一个沙箱里完成目标发现、构建和运行。",
     new_6_title: "没有源码的程序",
     new_6_text:
-      "<code>oxfuzz binary</code> 以 AFL++ QEMU 模式对已编译的 Linux 程序做模糊测试，输入可以是文件、TCP 或 UDP 服务，也可以是一串消息。目前只在 Linux arm64 上验证过。0.9.11 之后已合入 main、尚未进入安装包：桌面端二进制视图新增由模型起草的种子、取自程序字符串的字典、比较拆分（CompCov）、持久模式、可停止和继续的实时进度，以及读取反汇编的崩溃说明。",
+      '<code>oxfuzz binary</code> 以 AFL++ QEMU 模式对已编译的 Linux 程序做模糊测试，输入可以是文件、标准输入、TCP 或 UDP 服务，也可以是一串消息；目前只在 Linux arm64 上验证过。main 上的新功能：<code>--compcov</code> 拆分多字节比较，使模糊器能命中魔数；<code>--persistent</code> 在一个进程内循环执行同一个函数，在我们的测试中快 5.8 倍，稳定性为 100%。在桌面应用中，模型会起草种子，并根据反汇编解释每个崩溃；<a href="#videos">二进制演示视频</a>展示了完整的会话。',
     bin_fact_1: "运行",
     bin_fact_1_value: "30 秒，AFL++ QEMU 模式",
     bin_fact_2: "执行次数",
@@ -436,7 +436,7 @@ export const locales = {
     vid_binary_meta:
       "macOS arm64 主机，linux/arm64 沙箱镜像 0.2.4，0.9.11 之后基于 main 构建的 oxfuzz（提交 6fdb3aad），DeepSeek 模型。录制于 2026-11-26。",
     new_status:
-      '从 v0.9.11 起，下方的桌面安装包已包含这些功能。<code>oxfuzz</code> 命令行工具不在安装包内，请在 v0.9.11 标签处<a href="https://github.com/HenryCooper86/oxfuzz/blob/main/docs/guides/INSTALL.md" rel="noopener">从源码安装</a>。全部改动见<a href="https://github.com/HenryCooper86/oxfuzz/blob/main/CHANGELOG.md" rel="noopener">更新日志</a>。',
+      '除 main 上的二进制新增功能外，从 v0.9.11 起，下方的桌面安装包已包含这些功能。<code>oxfuzz</code> 命令行工具不在安装包内，请在 v0.9.11 标签处<a href="https://github.com/HenryCooper86/oxfuzz/blob/main/docs/guides/INSTALL.md" rel="noopener">从源码安装</a>，二进制新增功能则需从 main 安装。全部改动见<a href="https://github.com/HenryCooper86/oxfuzz/blob/main/CHANGELOG.md" rel="noopener">更新日志</a>。',
 
     control_title: "模糊测试运行的是不可信代码，控制权始终在你手里。",
     control_1_title: "沙箱隔离",

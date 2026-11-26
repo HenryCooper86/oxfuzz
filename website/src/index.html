@@ -357,8 +357,10 @@
 
         <div class="showcase" data-reveal>
           <div class="showcase-copy">
-            <h3>{{new_2_title}}</h3>
-            <p>{{new_2_text}}</p>
+            <h3>{{new_6_title}}</h3>
+            <p>{{new_6_text}}</p>
+            <pre class="example"><code>oxfuzz binary . --binary ./picinfo \
+  --compcov --persistent main</code></pre>
             <dl class="showcase-facts">
               <div>
                 <dt>{{bin_fact_1}}</dt>
@@ -394,8 +396,8 @@
 
         <div class="showcase flip" data-reveal>
           <div class="showcase-copy">
-            <h3>{{new_1_title}}</h3>
-            <p>{{new_1_text}}</p>
+            <h3>{{new_5_title}}</h3>
+            <p>{{new_5_text}}</p>
             <dl class="showcase-facts">
               <div>
                 <dt>{{py_fact_1}}</dt>
@@ -431,28 +433,29 @@
 
         <div class="guarantees more" data-reveal="stagger">
           <div>
+            <h3>{{new_1_title}}</h3>
+            <p>{{new_1_text}}</p>
+            <pre class="example"><code>oxfuzz kernel . --kernel-image bzImage \
+  --rootfs rootfs.img --ssh-key id_rsa</code></pre>
+          </div>
+          <div>
+            <h3>{{new_2_title}}</h3>
+            <p>{{new_2_text}}</p>
+            <pre class="example"><code>./scripts/pull-sandbox.sh</code></pre>
+          </div>
+          <div>
             <h3>{{new_3_title}}</h3>
             <p>{{new_3_text}}</p>
-            <pre class="example"><code>oxfuzz fuzz . --sanitizer memory
-oxfuzz dict . --target parse --set http.dict</code></pre>
+            <pre class="example"><code>oxfuzz triage . --target parse \
+  --accept-usage &lt;finding-id&gt;</code></pre>
           </div>
           <div>
             <h3>{{new_4_title}}</h3>
             <p>{{new_4_text}}</p>
-            <pre class="example"><code>oxfuzz bisect . --target parse \
-  --crash &lt;id&gt; --good v1.2.0</code></pre>
-          </div>
-          <div>
-            <h3>{{new_5_title}}</h3>
-            <p>{{new_5_text}}</p>
-            <pre class="example"><code>oxfuzz coverage . --target parse \
-  --html coverage.html</code></pre>
-          </div>
-          <div>
-            <h3>{{new_6_title}}</h3>
-            <p>{{new_6_text}}</p>
-            <pre class="example"><code>oxfuzz kernel . --kernel-image Image \
-  --rootfs rootfs.img --ssh-key id_rsa</code></pre>
+            <pre class="example"><code>oxfuzz triage . --target parse \
+  --repair-harness &lt;finding-id&gt;
+oxfuzz harness . --target parse \
+  --engine afl++ --adopt &lt;harness-id&gt;</code></pre>
           </div>
         </div>
         <p class="also" data-reveal>{{new_status}}</p>
