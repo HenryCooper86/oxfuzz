@@ -6,8 +6,10 @@ name: GUI demo - kernel campaign with KVM
 # (scripts/demo/drive_kernel_demo.py), and ffmpeg records the display.
 #
 # What this is and is not:
-# - The app is the published v0.9.11 .deb, unmodified; the sandbox image is
-#   the published GHCR 0.2.4 image, pulled with scripts/pull-sandbox.sh.
+# - By default the app is the published v0.9.11 .deb, unmodified. With
+#   app_source=commit it is a .deb built here from the dispatched commit (to
+#   show unreleased GUI changes); app-identity.txt records which. The sandbox
+#   image is the published GHCR 0.2.4 image, pulled with scripts/pull-sandbox.sh.
 # - The kernel is built from kernel-kvm.yml's recipe (cached); the Debian
 #   rootfs and its SSH key are built here for this run. Neither, nor the key,
 #   is uploaded: the artifact holds the video, screenshots, page sources,
@@ -29,6 +31,11 @@ on:
         description: "Stop before launching (selector check, no campaign)"
         type: boolean
         default: false
+      app_source:
+        description: "Desktop app: the published release .deb, or one built from this commit"
+        type: choice
+        options: [release, commit]
+        default: release
 
 concurrency:
   group: gui-demo-kvm-${{ github.ref }}
@@ -47,8 +54,52 @@ env:
   DISPLAY: ":99"
 
 jobs:
+  build-deb:
+    name: Build the .deb from this commit
+    if: inputs.app_source == 'commit'
+    # Same glibc floor and recipe as the release build in release.yml.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      - name: Install Linux build dependencies
+        run: scripts/ci/install-linux-deps.sh
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/hf-gui/package-lock.json
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: demo-deb-x86_64-unknown-linux-gnu
+
+      - name: Build the .deb
+        working-directory: crates/hf-gui
+        run: |
+          set -euo pipefail
+          npm ci
+          npx tauri build --ci --bundles deb
+          ls -l ../../target/release/bundle/deb/
+
+      - name: Upload the .deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-deb
+          path: target/release/bundle/deb/*.deb
+          if-no-files-found: error
+          retention-days: 3
+
   record:
     name: Record the kernel demo
+    needs: [build-deb]
+    # Runs after build-deb, or without it when the release .deb is used.
+    if: ${{ !cancelled() && (needs.build-deb.result == 'success' || needs.build-deb.result == 'skipped') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     steps:
@@ -160,14 +211,24 @@ jobs:
           cargo install tauri-driver --locked
           which WebKitWebDriver tauri-driver
 
-      - name: Install the released desktop app
+      - name: Download the .deb built from this commit
+        if: inputs.app_source == 'commit'
+        uses: actions/download-artifact@v4
+        with:
+          name: demo-deb
+          path: ${{ runner.temp }}/release
+
+      - name: Install the desktop app
         env:
           GH_TOKEN: ${{ github.token }}
+          APP_SOURCE: ${{ inputs.app_source }}
         run: |
           set -euo pipefail
-          gh release download "$RELEASE_TAG" --pattern 'oxfuzz_*_amd64.deb' --pattern SHA256SUMS.txt \
-            --dir "$RUNNER_TEMP/release" || gh release download "$RELEASE_TAG" --pattern 'oxfuzz_*_amd64.deb' \
-            --dir "$RUNNER_TEMP/release"
+          if [ "$APP_SOURCE" != commit ]; then
+            gh release download "$RELEASE_TAG" --pattern 'oxfuzz_*_amd64.deb' --pattern SHA256SUMS.txt \
+              --dir "$RUNNER_TEMP/release" || gh release download "$RELEASE_TAG" --pattern 'oxfuzz_*_amd64.deb' \
+              --dir "$RUNNER_TEMP/release"
+          fi
           ls -l "$RUNNER_TEMP/release"
           sudo apt-get install -y "$RUNNER_TEMP"/release/oxfuzz_*_amd64.deb
           app="$(dpkg -L oxfuzz | grep -E '^/usr/bin/' | head -n 1)"
@@ -175,6 +236,8 @@ jobs:
           echo "APP=$app" >> "$GITHUB_ENV"
           {
             echo "app=$app"
+            echo "app_source=$APP_SOURCE"
+            echo "commit=$GITHUB_SHA"
             echo "deb_sha256=$(sha256sum "$RUNNER_TEMP"/release/oxfuzz_*_amd64.deb | cut -d' ' -f1)"
             dpkg -s oxfuzz | grep -E '^(Package|Version|Architecture):'
           } | tee "$DEMO/app-identity.txt"
