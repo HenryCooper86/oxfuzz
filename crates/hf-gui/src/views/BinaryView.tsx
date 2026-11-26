@@ -1,5 +1,5 @@
 import "../i18n.parityBinary";
-import { Fragment, useState } from "react";
+import { useState } from "react";
 import { Cpu, FileSearch, FolderOpen, GitPullRequest, Info, Play } from "lucide-react";
 import { PathActions } from "../components/PathActions";
 import { Badge, Button, EmptyState, Input, Textarea, ViewHeader } from "../components/ui";
@@ -155,59 +155,49 @@ function FindingsTable({ project, outcome }: { project: string; outcome: BinaryF
     value !== null ? String(value) : finding.replayed ? "-" : t("binary.notReplayed");
   if (outcome.findings.length === 0) return <p className="text-sm text-text-muted">{t("binary.noFindings")}</p>;
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full text-sm">
-        <thead>
-          <tr className="text-left">
-            {["sha", "size", "fuzzerSignal", "replaySignal", "confirmed", "kind", "summary", "duplicateOf", "minimized"].map((col) => (
-              <th key={col} scope="col" className="hf-field-label py-2 pr-3 whitespace-nowrap">{t(`binary.col.${col}`)}</th>
-            ))}
-            <th scope="col" className="hf-field-label py-2">{t("binary.col.actions")}</th>
-          </tr>
-        </thead>
-        <tbody>
-          {outcome.findings.map((finding) => {
-            const expanded = open === finding.sha256;
-            return (
-              <Fragment key={finding.sha256}>
-                <tr className="align-top hover:bg-surface-hover transition-colors" style={{ borderTop: "1px solid var(--border)" }}>
-                  <td className="py-2 pr-3 font-mono" title={finding.sha256}>{finding.sha256.slice(0, 8)}</td>
-                  <td className="py-2 pr-3">{finding.size}</td>
-                  <td className="py-2 pr-3">{finding.fuzzer_signal ?? "-"}</td>
-                  <td className="py-2 pr-3">{signal(finding, finding.replay_signal)}</td>
-                  <td className="py-2 pr-3"><Badge variant={finding.confirmed ? "error" : "default"}>{finding.confirmed ? t("binary.yes") : t("binary.no")}</Badge></td>
-                  <td className="py-2 pr-3">{finding.kind ?? "-"}</td>
-                  <td className="py-2 pr-3">{finding.summary || "-"}</td>
-                  <td className="py-2 pr-3 font-mono">{finding.duplicate_of ? finding.duplicate_of.slice(0, 8) : "-"}</td>
-                  <td className="py-2 pr-3">{finding.minimized ? finding.minimized.size : "-"}</td>
-                  <td className="py-2">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      aria-expanded={expanded}
-                      onClick={() => setOpen(expanded ? null : finding.sha256)}
-                    >
-                      {expanded ? t("binary.hideFrames") : t("binary.showFrames")}
-                    </Button>
-                  </td>
-                </tr>
-                {expanded && (
-                  <tr>
-                    <td colSpan={10} className="pb-3">
-                      {finding.frames.length > 0 ? (
-                        <ol className="hf-frames" aria-label={t("binary.showFrames")}>
-                          {finding.frames.map((frame, index) => <li key={index}>{frame}</li>)}
-                        </ol>
-                      ) : <p className="text-xs text-text-muted">{t("binary.noFrames")}</p>}
-                      <IssueActions project={project} report={report} finding={finding.sha256} />
-                    </td>
-                  </tr>
-                )}
-              </Fragment>
-            );
-          })}
-        </tbody>
-      </table>
+    <div className="flex flex-col gap-2">
+      {outcome.findings.map((finding) => {
+        const expanded = open === finding.sha256;
+        const facts: [string, React.ReactNode][] = [
+          ["size", finding.size],
+          ["fuzzerSignal", finding.fuzzer_signal ?? "-"],
+          ["replaySignal", signal(finding, finding.replay_signal)],
+          ["confirmed", <Badge variant={finding.confirmed ? "error" : "default"}>{finding.confirmed ? t("binary.yes") : t("binary.no")}</Badge>],
+          ["duplicateOf", finding.duplicate_of ? finding.duplicate_of.slice(0, 8) : "-"],
+          ["minimized", finding.minimized ? finding.minimized.size : "-"],
+        ];
+        return (
+          <article key={finding.sha256} className="hf-finding">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 flex-wrap text-sm">
+                  <span className="font-mono text-text-primary" title={`${t("binary.col.sha")} ${finding.sha256}`}>{finding.sha256.slice(0, 8)}</span>
+                  <span className="font-semibold text-text-primary">{finding.kind ?? "-"}</span>
+                </div>
+                <p className="text-xs text-text-secondary" style={{ marginTop: 2, overflowWrap: "anywhere" }}>{finding.summary || "-"}</p>
+              </div>
+              <Button variant="outline" size="sm" className="shrink-0 whitespace-nowrap" aria-expanded={expanded} onClick={() => setOpen(expanded ? null : finding.sha256)}>
+                {expanded ? t("binary.hideFrames") : t("binary.showFrames")}
+              </Button>
+            </div>
+            <dl className="hf-finding-facts">
+              {facts.map(([key, value]) => (
+                <div key={key}><dt className="hf-field-label">{t(`binary.col.${key}`)}</dt><dd>{value}</dd></div>
+              ))}
+            </dl>
+            {expanded && (
+              <div>
+                {finding.frames.length > 0 ? (
+                  <ol className="hf-frames" aria-label={t("binary.showFrames")}>
+                    {finding.frames.map((frame, index) => <li key={index}>{frame}</li>)}
+                  </ol>
+                ) : <p className="text-xs text-text-muted">{t("binary.noFrames")}</p>}
+                <IssueActions project={project} report={report} finding={finding.sha256} />
+              </div>
+            )}
+          </article>
+        );
+      })}
     </div>
   );
 }

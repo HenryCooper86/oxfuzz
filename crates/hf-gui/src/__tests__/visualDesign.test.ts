@@ -202,6 +202,10 @@ describe("buttons, icons and navigation", () => {
     expect(css).toMatch(/select\[class\]:focus\s*\{[^}]*border-color:\s*var\(--accent\)/);
   });
 
+  it("does not ring elements that only receive programmatic focus", () => {
+    expect(css).toMatch(/\[tabindex="-1"\]:focus-visible\s*\{[^}]*box-shadow:\s*none/);
+  });
+
   it("renders the settings title upright like every other view title", () => {
     expect(source("components/settings/SettingsView.tsx")).not.toMatch(/fontStyle:\s*"italic"/);
   });
