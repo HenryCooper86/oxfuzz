@@ -78,6 +78,7 @@ const NEW_TOKENS = [
   "--accent-border",
   "--scrollbar-thumb",
   "--scrollbar-thumb-hover",
+  "--select-chevron",
 ];
 
 describe("visual design tokens", () => {
@@ -194,6 +195,11 @@ describe("buttons, icons and navigation", () => {
     expect(binary).toMatch(/<Button\s+variant="primary"[^>]*onClick=\{\(\) => void start\(\)\}/);
     expect(binary).toContain("whitespace-nowrap");
     expect(binary).toContain("<EmptyState");
+  });
+
+  it("styles native selects like the shared inputs, with a themed chevron", () => {
+    expect(css).toMatch(/(^|\n)select,\s*select\[class\]\s*\{[^}]*appearance:\s*none[^}]*var\(--select-chevron\)[^}]*var\(--border-strong\)/);
+    expect(css).toMatch(/select\[class\]:focus\s*\{[^}]*border-color:\s*var\(--accent\)/);
   });
 
   it("renders the settings title upright like every other view title", () => {
