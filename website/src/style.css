@@ -1,15 +1,15 @@
 :root {
   color-scheme: light;
-  --bg: #fff;
-  --surface: #f5f4f1;
-  --raised: #edecea;
+  --bg: #faf9f7;
+  --surface: #f4f3ef;
+  --raised: #ebe9e5;
   --text: #1a1917;
-  --muted: #6b6560;
-  --accent: #9a7c2a;
-  --accent-hover: #7e6420;
-  --on-accent: #fff;
+  --muted: #68625c;
+  --accent: #87691f;
+  --accent-hover: #6f581b;
+  --on-accent: #ffffff;
   --line: rgba(0, 0, 0, 0.13);
-  --green: #397a52;
+  --green: #2b7550;
   --crash: #b23b2e;
   --shadow: 0 28px 80px rgba(22, 20, 10, 0.14);
   font-family:
@@ -25,14 +25,14 @@
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --bg: #0f0f0f;
-  --surface: #141414;
-  --raised: #1c1c1c;
-  --text: #e8e6e1;
+  --bg: #0f0f0e;
+  --surface: #151513;
+  --raised: #1e1d1b;
+  --text: #ece9e3;
   --muted: #aaa59e;
   --accent: #c8b560;
-  --accent-hover: #d4c26e;
-  --on-accent: #0f0f0f;
+  --accent-hover: #d6c46f;
+  --on-accent: #0f0f0e;
   --line: rgba(255, 255, 255, 0.13);
   --green: #6fcf97;
   --crash: #ef7a6a;
@@ -41,14 +41,14 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme]) {
     color-scheme: dark;
-    --bg: #0f0f0f;
-    --surface: #141414;
-    --raised: #1c1c1c;
-    --text: #e8e6e1;
+    --bg: #0f0f0e;
+    --surface: #151513;
+    --raised: #1e1d1b;
+    --text: #ece9e3;
     --muted: #aaa59e;
     --accent: #c8b560;
-    --accent-hover: #d4c26e;
-    --on-accent: #0f0f0f;
+    --accent-hover: #d6c46f;
+    --on-accent: #0f0f0e;
     --line: rgba(255, 255, 255, 0.13);
     --green: #6fcf97;
     --crash: #ef7a6a;
