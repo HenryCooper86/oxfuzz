@@ -1,17 +1,45 @@
 WEBVTT
 
 1
-00:00:00.000 --> 00:00:19.000
-Binary-only: picinfo is an uninstrumented Linux ELF with a planted NULL read. It takes a file argument; seeds come from a folder.
+00:00:00.000 --> 00:00:11.000
+Binary-only: picinfo is an uninstrumented Linux ELF with a planted NULL read. Reading it without running it shows its architecture, its imports, and that it opens a file.
 
 2
-00:00:19.000 --> 00:00:25.500
-AFL++ QEMU mode fuzzes it in the sandbox for one minute (sped up 10x).
+00:00:11.000 --> 00:00:21.000
+Seeds can come from the model: describe the input in one line and it drafts candidates from the binary's strings and imports (1.5x).
 
 3
-00:00:25.500 --> 00:00:52.500
-157,418 executions and one distinct finding: SEGV, confirmed by replay.
+00:00:21.000 --> 00:00:26.800
+Waiting for the model (sped up 20x).
 
 4
-00:00:52.500 --> 00:01:28.000
-Stack frames as module offsets, and an issue drafted from the finding.
+00:00:26.800 --> 00:00:46.800
+Eight proposed seeds, shown before anything is used. The dictionary below comes from the binary's strings.
+
+5
+00:00:46.800 --> 00:01:01.800
+Comparison splitting (CompCov) is on by default. Persistent mode loops on main inside one emulated process instead of starting one per input.
+
+6
+00:01:01.800 --> 00:01:08.100
+One minute in the sandbox (sped up 10x). The live panel shows executions, crashes and stability.
+
+7
+00:01:08.100 --> 00:01:34.100
+420,504 executions at 7,008 per second with 100% stability; the two earlier sessions in the history, from before persistent mode, ran 215,529 and 157,418. One distinct SEGV, confirmed by replay in a fresh process.
+
+8
+00:01:34.100 --> 00:01:47.100
+Stack frames as module offsets.
+
+9
+00:01:47.100 --> 00:01:53.100
+The model explains the crash from the replay, the input and the disassembly around the fault (sped up 4x).
+
+10
+00:01:53.100 --> 00:02:18.100
+It names the faulting load, ldrb w2, [x22, x0], and the input byte that zeroes x22. The disassembly sent with the request is shown under the note.
+
+11
+00:02:18.100 --> 00:02:41.100
+Binary sessions are also listed in Triage, with their findings.

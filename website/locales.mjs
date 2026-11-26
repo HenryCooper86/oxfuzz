@@ -132,7 +132,7 @@ export const locales = {
       "Go with native fuzzing, Python with Atheris, Java with Jazzer and JavaScript with Jazzer.js. Each is discovered, built and run in the same sandbox.",
     new_6_title: "Programs without source",
     new_6_text:
-      "<code>oxfuzz binary</code> fuzzes a compiled Linux program in AFL++ QEMU mode. It can feed a file, a TCP or UDP server, or a sequence of messages. Checked on Linux arm64 so far.",
+      "<code>oxfuzz binary</code> fuzzes a compiled Linux program in AFL++ QEMU mode. It can feed a file, a TCP or UDP server, or a sequence of messages. Checked on Linux arm64 so far. On main since 0.9.11, not yet in the packages: the desktop Binary view adds model-drafted seeds, a dictionary from the program's strings, comparison splitting (CompCov), persistent mode, live progress you can stop and continue, and a model note on each crash that reads its disassembly.",
     bin_fact_1: "Run",
     bin_fact_1_value: "30 seconds, AFL++ QEMU mode",
     bin_fact_2: "Executions",
@@ -156,7 +156,7 @@ export const locales = {
     videos_title:
       "See it in the desktop app",
     videos_intro:
-      "Screen recordings of the released 0.9.11 desktop app, cut for length. Long waits are sped up and marked on screen; nothing else is changed. Captions explain each step.",
+      "Screen recordings of the oxfuzz desktop app, version 0.9.11 or a build from main where noted, cut for length. Long waits are sped up and marked on screen; nothing else is changed. Captions explain each step.",
     caption_lang:
       "en",
     caption_label:
@@ -182,9 +182,9 @@ export const locales = {
     vid_binary_title:
       "Fuzzing a binary without its source",
     vid_binary_text:
-      "AFL++ QEMU mode on an uninstrumented Linux ELF with a planted NULL read: one minute, one distinct crash confirmed by replay, its stack frames and an issue draft.",
+      "AFL++ QEMU mode on an uninstrumented Linux ELF with a planted NULL read: seeds drafted by the model, CompCov and persistent mode on main, a one-minute run at 7,008 executions per second with 100% stability, one crash confirmed by replay, and a model note that reads the disassembly at the fault.",
     vid_binary_meta:
-      "macOS arm64 host, linux/arm64 sandbox image 0.2.4, oxfuzz built from main after 0.9.11. Recorded 2026-11-26.",
+      "macOS arm64 host, linux/arm64 sandbox image 0.2.4, oxfuzz built from main after 0.9.11 (commit 6fdb3aad), DeepSeek model. Recorded 2026-11-26.",
     new_status:
       'These features are in the desktop packages below from v0.9.11. The <code>oxfuzz</code> command-line tool is not in those packages; <a href="https://github.com/HenryCooper86/oxfuzz/blob/main/docs/guides/INSTALL.md" rel="noopener">install it from source</a> at the v0.9.11 tag. The <a href="https://github.com/HenryCooper86/oxfuzz/blob/main/CHANGELOG.md" rel="noopener">changelog</a> lists every change.',
 
@@ -382,7 +382,7 @@ export const locales = {
       "Go（原生模糊测试）、Python（Atheris）、Java（Jazzer）和 JavaScript（Jazzer.js）。它们都在同一个沙箱里完成目标发现、构建和运行。",
     new_6_title: "没有源码的程序",
     new_6_text:
-      "<code>oxfuzz binary</code> 以 AFL++ QEMU 模式对已编译的 Linux 程序做模糊测试，输入可以是文件、TCP 或 UDP 服务，也可以是一串消息。目前只在 Linux arm64 上验证过。",
+      "<code>oxfuzz binary</code> 以 AFL++ QEMU 模式对已编译的 Linux 程序做模糊测试，输入可以是文件、TCP 或 UDP 服务，也可以是一串消息。目前只在 Linux arm64 上验证过。0.9.11 之后已合入 main、尚未进入安装包：桌面端二进制视图新增由模型起草的种子、取自程序字符串的字典、比较拆分（CompCov）、持久模式、可停止和继续的实时进度，以及读取反汇编的崩溃说明。",
     bin_fact_1: "运行",
     bin_fact_1_value: "30 秒，AFL++ QEMU 模式",
     bin_fact_2: "执行次数",
@@ -406,7 +406,7 @@ export const locales = {
     videos_title:
       "在桌面应用中观看",
     videos_intro:
-      "以下是已发布的 0.9.11 桌面应用的录屏，仅为控制时长做了剪辑。较长的等待以加速播放，并在画面上标明；其余内容未作改动。字幕逐步说明操作。",
+      "以下是 oxfuzz 桌面应用的录屏（0.9.11 版本，或注明的基于 main 的构建），仅为控制时长做了剪辑。较长的等待以加速播放，并在画面上标明；其余内容未作改动。字幕逐步说明操作。",
     caption_lang:
       "zh",
     caption_label:
@@ -432,9 +432,9 @@ export const locales = {
     vid_binary_title:
       "在没有源码的情况下模糊测试二进制程序",
     vid_binary_text:
-      "用 AFL++ QEMU 模式测试一个未插桩、预埋空指针读取缺陷的 Linux ELF：一分钟内得到一个经重放确认的独立崩溃，并给出调用栈和 issue 草稿。",
+      "用 AFL++ QEMU 模式测试一个未插桩、预埋空指针读取缺陷的 Linux ELF：由模型起草种子，开启 CompCov 并在 main 上使用持久模式，运行一分钟、每秒 7,008 次执行、稳定性 100%，得到一个经重放确认的崩溃，以及读取故障处反汇编的模型说明。",
     vid_binary_meta:
-      "macOS arm64 主机，linux/arm64 沙箱镜像 0.2.4，0.9.11 之后基于 main 构建的 oxfuzz。录制于 2026-11-26。",
+      "macOS arm64 主机，linux/arm64 沙箱镜像 0.2.4，0.9.11 之后基于 main 构建的 oxfuzz（提交 6fdb3aad），DeepSeek 模型。录制于 2026-11-26。",
     new_status:
       '从 v0.9.11 起，下方的桌面安装包已包含这些功能。<code>oxfuzz</code> 命令行工具不在安装包内，请在 v0.9.11 标签处<a href="https://github.com/HenryCooper86/oxfuzz/blob/main/docs/guides/INSTALL.md" rel="noopener">从源码安装</a>。全部改动见<a href="https://github.com/HenryCooper86/oxfuzz/blob/main/CHANGELOG.md" rel="noopener">更新日志</a>。',
 
