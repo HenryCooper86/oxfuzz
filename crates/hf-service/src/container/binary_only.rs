@@ -93,6 +93,8 @@ const MINIMIZED_DIR: &str = "minimized";
 /// Distinct findings minimized per session, and the time each may take.
 const MAX_MINIMIZED: usize = 10;
 const MINIMIZE_SECS: u64 = 120;
+/// Replays the message pass after `afl-tmin` may spend on one finding.
+const MAX_MESSAGE_TRIALS: usize = 12;
 /// The seed used when the operator supplies none: AFL++ needs one input.
 const DEFAULT_SEED: &[u8] = b"0";
 
@@ -373,6 +375,39 @@ impl Shim {
             false,
         )
     }
+}
+
+/// The messages of a message-sequence input: the bytes between separators,
+/// empty ones included. An input without a separator is one message.
+fn split_messages(data: &[u8]) -> Vec<&[u8]> {
+    let mut messages = Vec::new();
+    let mut rest = data;
+    while let Some(at) = rest
+        .windows(MESSAGE_SEPARATOR.len())
+        .position(|window| window == MESSAGE_SEPARATOR)
+    {
+        messages.push(&rest[..at]);
+        rest = &rest[at + MESSAGE_SEPARATOR.len()..];
+    }
+    messages.push(rest);
+    messages
+}
+
+/// The same messages without the empty ones, so without doubled, leading
+/// or trailing separators.
+fn without_empty_messages(data: &[u8]) -> Vec<u8> {
+    let messages: Vec<&[u8]> = split_messages(data)
+        .into_iter()
+        .filter(|message| !message.is_empty())
+        .collect();
+    messages.join(MESSAGE_SEPARATOR.as_slice())
+}
+
+/// The same messages without the one at `index`.
+fn without_message(data: &[u8], index: usize) -> Vec<u8> {
+    let mut messages = split_messages(data);
+    messages.remove(index);
+    messages.join(MESSAGE_SEPARATOR.as_slice())
 }
 
 /// The command that shrinks one saved finding with `afl-tmin` under the
@@ -1185,35 +1220,101 @@ impl SessionRun<'_> {
                 &sandbox,
             )
             .await?;
-        let Ok(data) = read_bounded(&saved, MAX_FINDING_BYTES, "minimized input") else {
-            return Ok(None);
-        };
-        let size = data.len() as u64;
-        let sha256 = sha256_hex(&data);
-        let same_crash = if data.is_empty() || size >= finding.size {
-            false
-        } else {
-            self.replay(&format!("{MINIMIZED_DIR}/{name}"), data)
+        let saved_name = format!("{MINIMIZED_DIR}/{name}");
+        let minimized = match read_bounded(&saved, MAX_FINDING_BYTES, "minimized input") {
+            Ok(data) if !data.is_empty() && (data.len() as u64) < finding.size => self
+                .same_crash(finding, &saved_name, data.clone())
                 .await?
-                .is_some_and(|replay| {
-                    replay.signal.is_some()
-                        && replay.signal == finding.replay_signal
-                        && (finding.signature.is_empty()
-                            || replay
-                                .report
-                                .is_some_and(|report| report.signature == finding.signature))
-                })
+                .then_some(data),
+            _ => None,
         };
-        if !same_crash {
+        let minimized = if self.input == BinaryInput::SocketMessages {
+            let start = match &minimized {
+                Some(data) => data.clone(),
+                None => read_bounded(&finding.input, MAX_FINDING_BYTES, "finding input")?,
+            };
+            let reduced = self.reduce_messages(finding, &saved_name, start).await?;
+            minimized.into_iter().chain(reduced).min_by_key(Vec::len)
+        } else {
+            minimized
+        };
+        let Some(data) = minimized.filter(|data| (data.len() as u64) < finding.size) else {
             // Only inputs known to reproduce the finding stay in `minimized`.
             let _ = std::fs::remove_file(&saved);
             return Ok(None);
-        }
+        };
+        std::fs::write(&saved, &data).map_err(|error| {
+            ClassifiedError::Internal(format!("write {}: {error}", saved.display()))
+        })?;
         Ok(Some(MinimizedInput {
             input: saved,
-            sha256,
-            size,
+            sha256: sha256_hex(&data),
+            size: data.len() as u64,
         }))
+    }
+
+    /// Whether replaying `data` ends as `finding` did: the same signal, and
+    /// the same signature when the finding has one.
+    async fn same_crash(
+        &self,
+        finding: &BinaryFinding,
+        saved: &str,
+        data: Vec<u8>,
+    ) -> Result<bool, ClassifiedError> {
+        Ok(self.replay(saved, data).await?.is_some_and(|replay| {
+            replay.signal.is_some()
+                && replay.signal == finding.replay_signal
+                && (finding.signature.is_empty()
+                    || replay
+                        .report
+                        .is_some_and(|report| report.signature == finding.signature))
+        }))
+    }
+
+    /// `afl-tmin` deletes bytes on a fixed grid, so it cannot always take a
+    /// four-byte separator out whole: a message sequence can keep empty
+    /// messages, spare separators, or whole messages the fault does not need.
+    /// Try those reductions message by message, keeping each one only when it
+    /// still replays as the same crash, within [`MAX_MESSAGE_TRIALS`].
+    /// Returns the smallest input that did, or `None` when none did.
+    async fn reduce_messages(
+        &self,
+        finding: &BinaryFinding,
+        saved: &str,
+        start: Vec<u8>,
+    ) -> Result<Option<Vec<u8>>, ClassifiedError> {
+        let mut current = start;
+        let mut reduced = None;
+        let mut trials = 0;
+        let compact = without_empty_messages(&current);
+        if compact.len() < current.len() && !compact.is_empty() {
+            trials += 1;
+            if self.same_crash(finding, saved, compact.clone()).await? {
+                current = compact;
+                reduced = Some(current.clone());
+            }
+        }
+        // Later messages are more often the faulting one; try the earlier
+        // ones first and step back after each removal that held.
+        let mut index = 0;
+        while index < split_messages(&current).len() && trials < MAX_MESSAGE_TRIALS {
+            if split_messages(&current).len() < 2 {
+                break;
+            }
+            let candidate = without_message(&current, index);
+            if candidate.is_empty() {
+                index += 1;
+                continue;
+            }
+            trials += 1;
+            if self.same_crash(finding, saved, candidate.clone()).await? {
+                current = candidate;
+                reduced = Some(current.clone());
+            } else {
+                index += 1;
+            }
+        }
+        Ok(reduced)
     }
 }
 
@@ -2398,6 +2499,165 @@ mod tests {
         async fn read_file(&self, _path: &Path) -> Result<String, ClassifiedError> {
             Ok(String::new())
         }
+    }
+
+    /// A server that faults once a five-byte message with its top bit set
+    /// follows the opening `LOGIN`; empty messages change nothing. Replays
+    /// fault exactly then, and the minimizer's output is scripted.
+    struct MessageServer {
+        minimizer_output: Vec<u8>,
+        replays: std::sync::Mutex<Vec<Vec<u8>>>,
+    }
+
+    impl MessageServer {
+        fn faults(data: &[u8]) -> bool {
+            let messages: Vec<&[u8]> = split_messages(data)
+                .into_iter()
+                .filter(|message| !message.is_empty())
+                .collect();
+            messages.first() == Some(&b"LOGIN".as_slice())
+                && messages[1..]
+                    .iter()
+                    .any(|message| message.len() == 5 && message[0] & 0x80 != 0)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RuntimeAdapter for MessageServer {
+        async fn run_command(
+            &self,
+            _cmd: &[String],
+            cwd: &Path,
+            _limits: &ResourceLimits,
+        ) -> Result<CommandResult, ClassifiedError> {
+            unreachable!("{cwd:?}")
+        }
+
+        async fn run_command_opts(
+            &self,
+            cmd: &[String],
+            cwd: &Path,
+            _limits: &ResourceLimits,
+            opts: &SandboxOptions,
+        ) -> Result<CommandResult, ClassifiedError> {
+            let result = |exit_code, stderr: &str| CommandResult {
+                exit_code,
+                stdout: String::new(),
+                stderr: stderr.to_owned(),
+                workspace: cwd.to_path_buf(),
+                termination: CommandTermination::Completed,
+            };
+            if cmd[0] == "afl-tmin" {
+                let output = cmd[cmd.iter().position(|arg| arg == "-o").unwrap() + 1]
+                    .trim_start_matches("/work/");
+                std::fs::write(cwd.join(output), &self.minimizer_output).unwrap();
+                return Ok(result(0, ""));
+            }
+            let data = opts.stdin.clone().unwrap_or_default();
+            let faults = Self::faults(&data);
+            self.replays.lock().unwrap().push(data);
+            Ok(if faults {
+                result(139, REPLAY_REPORT)
+            } else {
+                result(0, "")
+            })
+        }
+
+        async fn write_file(&self, _path: &Path, _content: &str) -> Result<(), ClassifiedError> {
+            Ok(())
+        }
+
+        async fn read_file(&self, _path: &Path) -> Result<String, ClassifiedError> {
+            Ok(String::new())
+        }
+    }
+
+    fn joined_messages(messages: &[&[u8]]) -> Vec<u8> {
+        messages.join(MESSAGE_SEPARATOR.as_slice())
+    }
+
+    async fn minimized_message_input(
+        input: BinaryInput,
+        minimizer_output: Vec<u8>,
+    ) -> (Option<Vec<u8>>, Vec<Vec<u8>>) {
+        let root = tempfile::tempdir().unwrap();
+        for directory in [FINDINGS_DIR, MINIMIZED_DIR] {
+            std::fs::create_dir_all(root.path().join(directory)).unwrap();
+        }
+        let original = joined_messages(&[b"LOGIN", b"", b"\x98rash", b"junk", b"", b""]);
+        let input_path = root.path().join(FINDINGS_DIR).join("crash-a");
+        std::fs::write(&input_path, &original).unwrap();
+        let runtime = MessageServer {
+            minimizer_output,
+            replays: std::sync::Mutex::new(Vec::new()),
+        };
+        let run = SessionRun {
+            runtime: &runtime,
+            root: root.path(),
+            input,
+            libraries: false,
+            timeout_ms: 1000,
+        };
+        let finding = BinaryFinding {
+            input: input_path,
+            size: original.len() as u64,
+            replay_signal: Some(11),
+            signature: read_replay_report(REPLAY_REPORT).unwrap().signature,
+            ..finding(&sha256_hex(&original), "")
+        };
+        let kept = run
+            .minimize(&finding)
+            .await
+            .unwrap()
+            .map(|minimized| std::fs::read(minimized.input).unwrap());
+        let replays = runtime.replays.lock().unwrap().clone();
+        (kept, replays)
+    }
+
+    #[tokio::test]
+    async fn a_minimized_message_sequence_loses_empty_messages_and_spare_separators() {
+        // afl-tmin deletes bytes on a fixed grid, so it cannot always take a
+        // four-byte separator out whole: it left an empty message and a
+        // trailing separator around the faulting message.
+        let from_minimizer = joined_messages(&[b"LOGIN", b"", b"\xfd0000", b""]);
+        let (kept, replays) =
+            minimized_message_input(BinaryInput::SocketMessages, from_minimizer).await;
+        assert_eq!(kept.unwrap(), joined_messages(&[b"LOGIN", b"\xfd0000"]));
+        assert!(replays.len() <= 1 + MAX_MESSAGE_TRIALS, "{}", replays.len());
+    }
+
+    #[tokio::test]
+    async fn whole_messages_the_fault_does_not_need_are_removed() {
+        let from_minimizer = joined_messages(&[b"LOGIN", b"0", b"\x98rash", b"0000"]);
+        let (kept, _) = minimized_message_input(BinaryInput::SocketMessages, from_minimizer).await;
+        assert_eq!(kept.unwrap(), joined_messages(&[b"LOGIN", b"\x98rash"]));
+    }
+
+    #[tokio::test]
+    async fn the_message_pass_is_for_message_sequences_only() {
+        let from_minimizer = joined_messages(&[b"LOGIN", b"", b"\xfd0000", b""]);
+        let (kept, replays) =
+            minimized_message_input(BinaryInput::Socket, from_minimizer.clone()).await;
+        assert_eq!(kept.unwrap(), from_minimizer);
+        assert_eq!(replays.len(), 1);
+    }
+
+    #[test]
+    fn messages_split_and_join_on_the_separator() {
+        let data = joined_messages(&[b"LOGIN", b"", b"x", b""]);
+        assert_eq!(
+            split_messages(&data),
+            vec![b"LOGIN".as_slice(), b"", b"x", b""]
+        );
+        assert_eq!(
+            without_empty_messages(&data),
+            joined_messages(&[b"LOGIN", b"x"])
+        );
+        assert_eq!(split_messages(b"plain"), vec![b"plain".as_slice()]);
+        assert_eq!(
+            without_message(&joined_messages(&[b"a", b"b", b"c"]), 1),
+            joined_messages(&[b"a", b"c"])
+        );
     }
 
     fn writable_mounts(sandbox: &SandboxOptions) -> Vec<String> {

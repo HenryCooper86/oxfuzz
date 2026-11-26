@@ -10,6 +10,17 @@ retain only the current release; older entries remain here as the record.
 
 ## Unreleased
 
+### Fixed
+
+- Minimizing a binary-only finding whose input is a message sequence no
+  longer keeps empty messages or spare `FF FE FD FC` separators. afl-tmin
+  removes bytes on a fixed grid and cannot always drop a 4-byte separator
+  whole, so after it runs, oxfuzz drops empty messages and then tries removing
+  whole messages, keeping each step only when a replay in the sandbox shows the
+  same crash (at most 12 extra replays). The stateful TCP live test that kept
+  9 or 13 extra bytes in two of three 0.9.12 qualification runs now passes
+  every time.
+
 ## 0.9.12 - 2026-11-26
 
 ### Added
