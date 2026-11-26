@@ -191,9 +191,9 @@ pub use container::HarnessWorkOrderExportRequest;
 #[cfg(feature = "binary-only-fuzzing")]
 pub use container::{
     binary_signal_name, parse_binary_dictionary, BinaryExplanation, BinaryFinding,
-    BinaryFuzzOutcome, BinaryFuzzRequest, BinaryInput, BinaryProfile, BinaryProgress,
-    BinarySeedDraft, BinarySessionSummary, BinaryStage, ElfMachine, Linking, MinimizedInput,
-    SeedPreview, BINARY_MESSAGE_SEPARATOR,
+    BinaryFuzzOutcome, BinaryFuzzRequest, BinaryInput, BinaryPersistent, BinaryProfile,
+    BinaryProgress, BinarySeedDraft, BinarySessionSummary, BinaryStage, ElfMachine, Linking,
+    MinimizedInput, SeedPreview, BINARY_MAX_PERSISTENT_ITERATIONS, BINARY_MESSAGE_SEPARATOR,
 };
 pub use container::{
     build_sandbox_image, copy_project_sources, generate_target_seeds, initialize_workspace_root,

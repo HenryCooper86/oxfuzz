@@ -333,6 +333,8 @@ mod tests {
             dictionary_tokens: 0,
             compcov: false,
             stopped: false,
+            persistent_entry: None,
+            stability_pct: None,
         }
     }
 

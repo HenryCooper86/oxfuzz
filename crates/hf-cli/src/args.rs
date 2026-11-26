@@ -958,6 +958,17 @@ pub(crate) struct BinaryArgs {
     /// Split multi-byte comparisons in the emulator (`AFL_COMPCOV_LEVEL=2`).
     #[arg(long)]
     pub(crate) compcov: bool,
+    /// Persistent mode: loop on this function (a name such as main, or a
+    /// module offset such as 0x9d8) instead of a process per input. File
+    /// input only.
+    #[arg(long, value_name = "ENTRY")]
+    pub(crate) persistent: Option<String>,
+    /// Inputs per process in persistent mode.
+    #[arg(long, default_value_t = 1000, requires = "persistent")]
+    pub(crate) persistent_iterations: u32,
+    /// In persistent mode, also restore writable memory each iteration.
+    #[arg(long, requires = "persistent")]
+    pub(crate) restore_memory: bool,
     /// Print the result as JSON.
     #[arg(long)]
     pub(crate) json: bool,

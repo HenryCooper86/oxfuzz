@@ -70,7 +70,18 @@ pub struct BinaryProfile {
     /// Heuristic dictionary tokens in AFL escaped form, without quotes.
     pub dictionary: Vec<String>,
     pub notes: Vec<String>,
+    /// Defined function names from the symbol tables, sorted, at most
+    /// 2,000: candidate entries for persistent mode.
+    #[serde(default)]
+    pub functions: Vec<String>,
+    /// The suggested persistent-mode entry: `main` when the binary has it.
+    #[serde(default)]
+    pub persistent_entry: Option<String>,
 }
+
+/// Function names listed in a profile.
+pub const MAX_FUNCTIONS: usize = 2000;
+const STT_FUNC: u8 = 2;
 
 /// Profile an ELF image.
 ///
@@ -85,6 +96,15 @@ pub fn profile_binary(image: &[u8]) -> Result<BinaryProfile, ClassifiedError> {
     let symbols = symbol_names(image)?;
     let strings = interesting_strings(&printable_strings(image, usize::MAX), &imports, &symbols);
     let dictionary = dictionary_tokens(&strings, &imports);
+    let functions: Vec<String> = function_symbols(image)?
+        .into_iter()
+        .map(|(name, _)| name)
+        .take(MAX_FUNCTIONS)
+        .collect();
+    let persistent_entry = functions
+        .iter()
+        .any(|name| name == "main")
+        .then(|| "main".to_owned());
     let mut notes = Vec::new();
     if linking == Linking::Static {
         notes.push(
@@ -106,7 +126,50 @@ pub fn profile_binary(image: &[u8]) -> Result<BinaryProfile, ClassifiedError> {
         strings,
         dictionary,
         notes,
+        functions,
+        persistent_entry,
     })
+}
+
+/// The defined functions of the image's static and dynamic symbol tables,
+/// as (name, address), sorted by name, one entry per name.
+///
+/// # Errors
+/// Returns [`ClassifiedError::Validation`] when a header points outside the
+/// image.
+pub fn function_symbols(image: &[u8]) -> Result<Vec<(String, u64)>, ClassifiedError> {
+    let limit = usize::try_from(MAX_SYMBOLS).unwrap_or(usize::MAX);
+    let step = usize::try_from(SYM_SIZE).unwrap_or(24);
+    let mut functions: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+    for kind in [SHT_SYMTAB, SHT_DYNSYM] {
+        let Some((symbols, strtab)) = symbol_table(image, kind)? else {
+            continue;
+        };
+        for sym in symbols.chunks_exact(step).take(limit) {
+            let is_function = sym.get(4).is_some_and(|info| info & 0x0f == STT_FUNC);
+            let defined = u16_at(sym, 6).is_some_and(|section| section != 0);
+            let address = u64_at(sym, 8).unwrap_or(0);
+            if !is_function || !defined || address == 0 {
+                continue;
+            }
+            if let Some(name) = u32_at(sym, 0)
+                .filter(|&name| name != 0)
+                .and_then(|name| symbol_name(strtab, name))
+            {
+                functions.entry(name).or_insert(address);
+            }
+        }
+    }
+    Ok(functions.into_iter().collect())
+}
+
+/// Whether the image is position-independent (`ET_DYN`), so the emulator
+/// chooses where it loads.
+///
+/// # Errors
+/// Returns [`ClassifiedError::Validation`] when the header is truncated.
+pub fn is_position_independent(image: &[u8]) -> Result<bool, ClassifiedError> {
+    Ok(header_field(u16_at(image, 0x10))? == 3)
 }
 
 fn bytes_at<'a>(
@@ -668,6 +731,12 @@ mod tests {
             sym[0..4].copy_from_slice(&at.to_le_bytes());
             let shndx: u16 = u16::from(*defined);
             sym[6..8].copy_from_slice(&shndx.to_le_bytes());
+            if *defined {
+                // A global function at 0x1000 + 0x10 per symbol.
+                sym[4] = 0x12;
+                let value = 0x1000 + 0x10 * (syms.len() as u64 / 24);
+                sym[8..16].copy_from_slice(&value.to_le_bytes());
+            }
             syms.extend_from_slice(&sym);
         }
         let phnum: u16 = u16::from(interp);
@@ -717,6 +786,36 @@ mod tests {
 
     fn names(list: &[&str]) -> Vec<String> {
         list.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn defined_functions_are_listed_with_their_addresses() {
+        let image = elf(
+            true,
+            &[
+                ("read@GLIBC_2.17", false),
+                ("parse_header", true),
+                ("main", true),
+            ],
+            b"",
+        );
+        assert_eq!(
+            function_symbols(&image).unwrap(),
+            vec![
+                ("main".to_owned(), 0x1030),
+                ("parse_header".to_owned(), 0x1020)
+            ]
+        );
+        let profile = profile_binary(&image).unwrap();
+        assert_eq!(profile.functions, names(&["main", "parse_header"]));
+        assert_eq!(profile.persistent_entry.as_deref(), Some("main"));
+        let no_main = profile_binary(&elf(true, &[("parse_header", true)], b"")).unwrap();
+        assert_eq!(no_main.persistent_entry, None);
+        // The builder makes a PIE (ET_DYN); a fixed-address one is ET_EXEC.
+        assert!(is_position_independent(&image).unwrap());
+        let mut fixed = image.clone();
+        fixed[16..18].copy_from_slice(&2u16.to_le_bytes());
+        assert!(!is_position_independent(&fixed).unwrap());
     }
 
     #[test]

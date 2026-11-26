@@ -476,6 +476,11 @@ pub(crate) async fn cmd_binary(args: crate::args::BinaryArgs) -> anyhow::Result<
             dictionary,
             continue_from: args.continue_from,
             compcov: args.compcov,
+            persistent: args.persistent.map(|entry| hf_service::BinaryPersistent {
+                entry,
+                iterations: args.persistent_iterations,
+                restore_memory: args.restore_memory,
+            }),
         })
         .await?;
     if args.json {

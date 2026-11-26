@@ -29,6 +29,9 @@ pub struct BinaryFuzzOptions {
     /// Split multi-byte comparisons in the emulator; absent from older forms.
     #[serde(default)]
     compcov: bool,
+    /// Persistent mode; absent from older forms.
+    #[serde(default)]
+    persistent: Option<hf_service::BinaryPersistent>,
 }
 
 /// Fuzz an uninstrumented Linux binary in the sandbox and return the
@@ -50,6 +53,7 @@ pub async fn binary_fuzz(
             dictionary: options.dictionary,
             continue_from: options.continue_from,
             compcov: options.compcov,
+            persistent: options.persistent,
         })
         .await
         .map_err(|error| error.to_string())

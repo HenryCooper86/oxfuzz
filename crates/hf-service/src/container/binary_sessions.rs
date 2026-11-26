@@ -107,6 +107,9 @@ pub struct BinaryProgress {
     pub saved_hangs: Option<u64>,
     /// Whether a stop was requested; the fuzz run is ending.
     pub stopping: bool,
+    /// AFL++'s bitmap stability, in percent.
+    #[serde(default)]
+    pub stability_pct: Option<f64>,
 }
 
 /// One earlier session, as the history lists it.
@@ -160,6 +163,7 @@ fn progress_of(id: Uuid, active: &ActiveBinarySession, now: DateTime<Utc>) -> Bi
         saved_crashes: stats.as_ref().and_then(|stats| stats.saved_crashes),
         saved_hangs: stats.as_ref().and_then(|stats| stats.saved_hangs),
         stopping: active.stopping,
+        stability_pct: stats.as_ref().and_then(|stats| stats.stability_pct),
     }
 }
 
@@ -410,6 +414,8 @@ mod tests {
             dictionary_tokens: 0,
             compcov: false,
             stopped: false,
+            persistent_entry: None,
+            stability_pct: None,
         }
     }
 
@@ -574,6 +580,7 @@ mod tests {
         assert_eq!(during.corpus_count, Some(7));
         assert_eq!(during.edges_found, Some(31));
         assert_eq!(during.stage, BinaryStage::Fuzzing);
+        assert_eq!(during.stability_pct, None);
     }
 
     #[test]

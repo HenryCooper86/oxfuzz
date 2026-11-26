@@ -47,7 +47,8 @@ pub use binary_assist::{BinaryExplanation, BinarySeedDraft, SeedPreview};
 #[cfg(feature = "binary-only-fuzzing")]
 pub use binary_only::{
     signal_name as binary_signal_name, BinaryFinding, BinaryFuzzOutcome, BinaryFuzzRequest,
-    BinaryInput, BinaryStage, ElfMachine, MinimizedInput,
+    BinaryInput, BinaryPersistent, BinaryStage, ElfMachine, MinimizedInput,
+    MAX_PERSISTENT_ITERATIONS as BINARY_MAX_PERSISTENT_ITERATIONS,
     MESSAGE_SEPARATOR as BINARY_MESSAGE_SEPARATOR,
 };
 #[cfg(feature = "binary-only-fuzzing")]

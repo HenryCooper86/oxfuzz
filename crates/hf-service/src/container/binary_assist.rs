@@ -649,6 +649,8 @@ mod tests {
             ],
             dictionary: vec!["PIC1".to_owned()],
             notes: Vec::new(),
+            functions: vec!["main".to_owned()],
+            persistent_entry: Some("main".to_owned()),
         }
     }
 
@@ -733,6 +735,8 @@ mod tests {
             dictionary_tokens: 0,
             compcov: false,
             stopped: false,
+            persistent_entry: None,
+            stability_pct: None,
         };
         let prompt = explain_prompt(&outcome, &finding, 3, b"PIC1\x00\xff", None);
         assert!(prompt.contains("No disassembly is available"));

@@ -155,7 +155,8 @@ fn requests(project: &str) -> Vec<(&'static str, Value)> {
             json!({ "options": {
                 "project": project, "binary": format!("{project}/no_such_binary"),
                 "input": "socket_messages", "seeds": null, "libraries": null,
-                "durationSecs": 5, "timeoutMs": 1000,
+                "durationSecs": 5, "timeoutMs": 1000, "compcov": true,
+                "persistent": { "entry": "main", "iterations": 1000, "restore_memory": false },
             }}),
         ),
         (

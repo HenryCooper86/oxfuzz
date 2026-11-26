@@ -18,6 +18,8 @@ import {
   BINARY_INPUT_MODES,
   DEFAULT_BINARY_DURATION_SECS,
   DEFAULT_BINARY_TIMEOUT_MS,
+  DEFAULT_PERSISTENT_ITERATIONS,
+  MAX_PERSISTENT_ITERATIONS,
   binaryFuzz,
   binaryInspect,
   binaryProgress,
@@ -84,6 +86,10 @@ export function BinaryView() {
   const [useDictionary, setUseDictionary] = useState(false);
   const [continueFrom, setContinueFrom] = useState<BinarySessionSummary | null>(null);
   const [compcov, setCompcov] = useState(true);
+  const [persistent, setPersistent] = useState(false);
+  const [entry, setEntry] = useState("");
+  const [iterations, setIterations] = useState(String(DEFAULT_PERSISTENT_ITERATIONS));
+  const [restoreMemory, setRestoreMemory] = useState(false);
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState<BinaryProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -95,7 +101,14 @@ export function BinaryView() {
   const timeout = Number(timeoutMs);
   const validDuration = duration.trim() !== "" && Number.isSafeInteger(durationSecs) && durationSecs >= 1;
   const validTimeout = timeoutMs.trim() !== "" && Number.isSafeInteger(timeout) && timeout >= 1;
-  const canStart = !running && !!project && binary.trim() !== "" && validDuration && validTimeout;
+  const iterationCount = Number(iterations);
+  // Persistent mode reads one file per iteration, so it applies to file input only.
+  const persistentActive = persistent && input === "file";
+  const validEntry = entry.trim() !== "";
+  const validIterations = iterations.trim() !== "" && Number.isSafeInteger(iterationCount)
+    && iterationCount >= 1 && iterationCount <= MAX_PERSISTENT_ITERATIONS;
+  const canStart = !running && !!project && binary.trim() !== "" && validDuration && validTimeout
+    && (!persistentActive || (validEntry && validIterations));
 
   function setBinary(value: string) {
     setBinaryValue(value);
@@ -128,6 +141,7 @@ export function BinaryView() {
           setProfile(found); setInspectError(null);
           setTokens(found.dictionary);
           setUseDictionary(found.dictionary.length > 0);
+          setEntry(found.persistent_entry ?? "");
           if (!inputTouched.current) setInputValue(found.suggested_input);
         })
         .catch((e) => { if (live) { setProfile(null); setInspectError(String(e)); } })
@@ -164,6 +178,9 @@ export function BinaryView() {
         dictionary: useDictionary ? tokens : [],
         continueFrom: continueFrom?.session,
         compcov,
+        persistent: persistentActive
+          ? { entry: entry.trim(), iterations: iterationCount, restore_memory: restoreMemory }
+          : undefined,
       }));
       setContinueFrom(null);
       loadHistory();
@@ -276,6 +293,46 @@ export function BinaryView() {
             <Switch checked={compcov} onChange={setCompcov} label={t("binary.compcov")} />
             <p className="text-xs text-text-muted">{t("binary.compcovHint")}</p>
           </div>
+          {input === "file" && (
+            <div className="flex flex-col gap-3">
+              <div className="flex flex-col gap-1">
+                <Switch checked={persistent} onChange={setPersistent} label={t("binary.persistent")} />
+                <p className="text-xs text-text-muted">{t("binary.persistentHint")}</p>
+              </div>
+              {persistent && (
+                <div className="flex flex-col gap-3" style={{ paddingLeft: "var(--space-lg)" }}>
+                  <div className="flex gap-6 flex-wrap items-start">
+                    <div className="flex flex-col gap-1.5" style={{ width: 260 }}>
+                      <Label htmlFor="binary-persistent-entry">{t("binary.persistentEntry")}</Label>
+                      <Input
+                        id="binary-persistent-entry" mono className="h-8" list="binary-functions" value={entry}
+                        placeholder="main" onChange={(e) => setEntry(e.target.value)} aria-invalid={!validEntry}
+                      />
+                      <datalist id="binary-functions">
+                        {(profile?.functions ?? []).map((name) => <option key={name} value={name} />)}
+                      </datalist>
+                      {!validEntry && <p role="alert" className="text-xs text-error">{t("binary.invalidEntry")}</p>}
+                    </div>
+                    <div className="flex flex-col gap-1.5" style={{ width: 180 }}>
+                      <Label htmlFor="binary-persistent-iterations">{t("binary.persistentIterations")}</Label>
+                      <Input
+                        id="binary-persistent-iterations" type="number" min={1} max={MAX_PERSISTENT_ITERATIONS} className="h-8"
+                        value={iterations} onChange={(e) => setIterations(e.target.value)} aria-invalid={!validIterations}
+                      />
+                      {!validIterations && (
+                        <p role="alert" className="text-xs text-error">{t("binary.invalidIterations", { max: MAX_PERSISTENT_ITERATIONS.toLocaleString() })}</p>
+                      )}
+                    </div>
+                  </div>
+                  <p className="text-xs text-text-muted">{t("binary.persistentEntryHint")}</p>
+                  <div className="flex flex-col gap-1">
+                    <Switch checked={restoreMemory} onChange={setRestoreMemory} label={t("binary.restoreMemory")} />
+                    <p className="text-xs text-text-muted">{t("binary.restoreMemoryHint")}</p>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </FormSection>
         <div className="hf-form-footer flex items-center justify-between gap-3 flex-wrap">
           {project ? <span /> : (

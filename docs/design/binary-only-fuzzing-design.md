@@ -309,6 +309,45 @@ not found with or without it in the same time, which is what the dictionary
 is for. The desktop form turns it on by default; `oxfuzz binary --compcov`
 opts in. The report records whether it was used.
 
+### Persistent mode
+
+A file-argument session may name a loop entry: a function the emulator
+loops on instead of starting a new process for every input
+(`AFL_QEMU_PERSISTENT_ADDR`, with `AFL_QEMU_PERSISTENT_GPR=1` so the
+registers, and with them `argc` and `argv`, are restored each iteration, and
+`AFL_QEMU_PERSISTENT_CNT` iterations per process, 1,000 by default). The
+entry is a defined function symbol from `.symtab` or `.dynsym` (`main` is
+suggested when the binary has it) or a module offset such as `0x9d8`, the
+form crash frames use. Its address is resolved on the host from the ELF
+headers: for a position-independent executable the emulator's load base
+(`0x5500000000` on AArch64, `0x4000000000` on x86-64) plus the function's
+offset from the binary's own load base; for a fixed-address executable the
+symbol's address. With `restore_memory` the emulator also restores writable
+memory each iteration (`AFL_QEMU_PERSISTENT_MEM=1`): slower, but state a
+function leaves behind cannot leak into the next input.
+
+Only the fuzz run is persistent. Replay and minimization run the binary
+once per input as before, so a crash that only happens because of state left
+by an earlier iteration is not confirmed. Standard input cannot be rewound
+between iterations and the socket modes already loop through their shim, so
+persistent mode is refused for them. AFL++'s stability figure is reported
+in progress and in the report: below about 90% the loop entry leaks state,
+and restoring memory or choosing another entry helps.
+
+Measured on 2026-11-26 in the 0.2.4 image (linux/arm64), 25 seconds each on
+`picinfo` with `main` as the entry: 2,527 executions per second normally,
+8,126 persistent with registers restored (100% stability, the same two
+crashes), and 3,372 with memory restored as well (100% stability). Turning
+`exit` calls into loop restarts (`AFL_QEMU_PERSISTENT_EXITS`) dropped
+stability to 77% and is not offered. The x86-64 load base is AFL++'s
+documented value and was not measured here.
+
+The ignored live test `live_persistent_session_loops_on_main_faster_and_stays_stable`
+repeats this on a small file reader that crashes behind a 32-bit magic value
+(`CompCov` on in both runs, 25 seconds each): 1,024 executions per second
+normally, with no crash found, and 5,953 with `main` as the loop entry at
+100% stability, with the crash found and confirmed by a fresh-process replay.
+
 ## Sessions and triage (2026-11-26)
 
 - **History.** `binary_sessions` lists the project's sessions from their

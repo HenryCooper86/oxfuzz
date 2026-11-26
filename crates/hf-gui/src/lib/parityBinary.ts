@@ -25,7 +25,24 @@ export interface BinaryFuzzOptions {
   continueFrom?: string;
   /** Split multi-byte comparisons in the emulator (AFL_COMPCOV_LEVEL=2). */
   compcov?: boolean;
+  /** Loop on one function instead of starting a process per input; file input only. */
+  persistent?: BinaryPersistent;
 }
+
+/** Persistent QEMU mode (`--persistent`): the loop entry and how many inputs one process takes. */
+export interface BinaryPersistent {
+  /** A function name such as main, or a module offset such as 0x9d8. */
+  entry: string;
+  iterations: number;
+  /** Also restore writable memory each iteration (slower, for targets that keep state). */
+  restore_memory: boolean;
+}
+
+/** The CLI default for `--persistent-iterations`, and the service's upper bound. */
+export const DEFAULT_PERSISTENT_ITERATIONS = 1000;
+export const MAX_PERSISTENT_ITERATIONS = 100_000;
+/** Below this stability a persistent loop is probably leaking state between inputs. */
+export const LOW_STABILITY_PCT = 90;
 
 export interface MinimizedInput {
   input: string;
@@ -71,6 +88,9 @@ export interface BinaryFuzzOutcome {
   dictionary_tokens?: number;
   compcov?: boolean;
   stopped?: boolean;
+  /** The persistent loop entry, as resolved (for example "main (target+0x9d8)"). */
+  persistent_entry?: string | null;
+  stability_pct?: number | null;
 }
 
 export interface BinaryProfile {
@@ -84,6 +104,10 @@ export interface BinaryProfile {
   strings: string[];
   dictionary: string[];
   notes: string[];
+  /** Defined function symbols, the choices for a persistent loop entry. */
+  functions?: string[];
+  /** The suggested loop entry (main when the binary has one). */
+  persistent_entry?: string | null;
 }
 
 export interface SeedPreview {
@@ -117,6 +141,7 @@ export interface BinaryProgress {
   saved_crashes: number | null;
   saved_hangs: number | null;
   stopping: boolean;
+  stability_pct?: number | null;
 }
 
 export interface BinarySessionSummary {

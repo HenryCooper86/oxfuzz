@@ -264,6 +264,73 @@ describe("BinaryView", () => {
     expect(mocks.invoke).toHaveBeenCalledWith("binary_fuzz", { options: expect.objectContaining({ compcov: false }) });
   });
 
+  it("runs a persistent session on the suggested entry, for file input only", async () => {
+    const fileProfile: BinaryProfile = {
+      ...profile, suggested_input: "file", functions: ["main", "parse_header"], persistent_entry: "main",
+    };
+    mocks.invoke.mockImplementation(async (name: string) => name === "binary_inspect" ? fileProfile
+      : name === "binary_fuzz" ? { ...outcome, input: "file", persistent_entry: "main (target+0x9d8)", stability_pct: 72.5 } : null);
+    mocks.pickFile.mockResolvedValue("/bin/picinfo");
+    render();
+    await click(button("Browse"));
+    await settle();
+    expect(host.textContent).toContain("Persistent mode");
+    await click(button("Persistent mode"));
+    const entry = host.querySelector("#binary-persistent-entry") as HTMLInputElement;
+    expect(entry.value).toBe("main");
+    expect([...host.querySelectorAll("#binary-functions option")].map((o) => (o as HTMLOptionElement).value))
+      .toEqual(["main", "parse_header"]);
+    const iterations = host.querySelector("#binary-persistent-iterations") as HTMLInputElement;
+    expect(iterations.value).toBe("1000");
+
+    await setValue(iterations, "0");
+    expect(host.textContent).toContain("Enter a whole number from 1 to 100,000.");
+    expect(button("Start session").disabled).toBe(true);
+    await setValue(iterations, "5000");
+    await setValue(entry, "");
+    expect(host.textContent).toContain(enParityBinary["binary.invalidEntry"]);
+    expect(button("Start session").disabled).toBe(true);
+    await setValue(entry, "0x9d8");
+    await click(button("Restore memory each iteration"));
+    await click(button("Start session"));
+    expect(mocks.invoke).toHaveBeenCalledWith("binary_fuzz", { options: expect.objectContaining({
+      input: "file", persistent: { entry: "0x9d8", iterations: 5000, restore_memory: true },
+    }) });
+    expect(host.textContent).toContain("Persistent: main (target+0x9d8)");
+    expect(host.textContent).toContain("72.5%");
+    expect(host.textContent).toContain(enParityBinary["binary.lowStability"]);
+
+    // Other input modes hide the switch and send no persistent loop, even when it was on.
+    await click(host.querySelector('input[value="stdin"]') as HTMLElement);
+    expect(host.textContent).not.toContain("Persistent mode");
+    await click(button("Start session"));
+    const fuzzCalls = mocks.invoke.mock.calls.filter(([name]) => name === "binary_fuzz");
+    expect(fuzzCalls).toHaveLength(2);
+    expect(fuzzCalls[1][1].options).toMatchObject({ input: "stdin" });
+    expect(fuzzCalls[1][1].options.persistent).toBeUndefined();
+  });
+
+  it("shows the loop's stability while a session runs", async () => {
+    mocks.invoke.mockImplementation((name: string) => {
+      if (name === "binary_fuzz") return new Promise<BinaryFuzzOutcome>(() => undefined);
+      if (name === "binary_progress") return Promise.resolve({
+        session: "s-run", binary_name: "server", stage: "fuzzing", started_at: "2026-11-26T00:00:00Z",
+        duration_secs: 600, elapsed_secs: 12, execs_done: 1000, execs_per_sec: 8126, edges_found: 10,
+        corpus_count: 2, saved_crashes: 0, saved_hangs: 0, stopping: false, stability_pct: 100,
+      });
+      return Promise.resolve(null);
+    });
+    mocks.pickFile.mockResolvedValue("/bin/server");
+    render();
+    await click(button("Browse"));
+    await click(button("Start session"));
+    await settle();
+    const panel = host.querySelector('[aria-label="Session progress"]') as HTMLElement;
+    expect(panel.textContent).toContain("Stability");
+    expect(panel.textContent).toContain("100.0%");
+    expect(panel.textContent).not.toContain(enParityBinary["binary.lowStability"]);
+  });
+
   it("stops a running session and marks the result as stopped early", async () => {
     let finish: (value: BinaryFuzzOutcome) => void = () => undefined;
     let stopping = false;

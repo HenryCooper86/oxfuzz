@@ -5,6 +5,7 @@ import { Badge, Button, Input, Switch, Textarea } from "../ui";
 import { useI18n } from "../../i18nContext";
 import {
   BINARY_STAGES,
+  LOW_STABILITY_PCT,
   binaryDictionaryRefine,
   binarySeedDrafts,
   formatCount as count,
@@ -189,7 +190,10 @@ export function ProgressPanel({ progress, onStop }: { progress: BinaryProgress |
     ["binary.stat.corpus", count(progress.corpus_count)],
     ["binary.savedCrashes", count(progress.saved_crashes)],
     ["binary.stat.hangs", count(progress.saved_hangs)],
+    ...(typeof progress.stability_pct === "number"
+      ? [["binary.stat.stability", `${progress.stability_pct.toFixed(1)}%`] as [string, string]] : []),
   ] : [];
+  const unstable = typeof progress?.stability_pct === "number" && progress.stability_pct < LOW_STABILITY_PCT;
   return (
     <section role="status" aria-live="polite" className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md) var(--space-lg)" }} aria-label={t("binary.progress")}>
       <div className="flex items-center justify-between gap-3 flex-wrap">
@@ -223,6 +227,9 @@ export function ProgressPanel({ progress, onStop }: { progress: BinaryProgress |
           ))}
         </div>
         : <p className="text-xs text-text-muted">{t("binary.waitingForStats")}</p>}
+      {unstable && (
+        <p className="flex items-center gap-1.5 text-xs text-warning"><TriangleAlert size={14} />{t("binary.lowStability")}</p>
+      )}
     </section>
   );
 }

@@ -445,6 +445,118 @@ pub struct BinaryFuzzRequest {
     /// Split multi-byte comparisons in the emulator (`AFL_COMPCOV_LEVEL=2`)
     /// so AFL++ can solve magic values byte by byte. Fuzz run only.
     pub compcov: bool,
+    /// Loop on one function instead of starting a process per input. File
+    /// input only; fuzz run only.
+    pub persistent: Option<BinaryPersistent>,
+}
+
+/// Persistent QEMU mode: the emulator loops on `entry` for `iterations`
+/// inputs per process, restoring registers (and memory, when asked).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BinaryPersistent {
+    /// A defined function name, or a module offset such as `0x9d8`.
+    pub entry: String,
+    /// Inputs per process, at most [`MAX_PERSISTENT_ITERATIONS`].
+    pub iterations: u32,
+    /// Also restore writable memory each iteration: slower, no state leaks.
+    pub restore_memory: bool,
+}
+
+/// Most persistent iterations per process.
+pub const MAX_PERSISTENT_ITERATIONS: u32 = 100_000;
+/// Where `afl-qemu-trace` loads a position-independent executable.
+const QEMU_PIE_BASE_AARCH64: u64 = 0x55_0000_0000;
+const QEMU_PIE_BASE_X86_64: u64 = 0x40_0000_0000;
+
+/// A persistent entry resolved to the emulator's address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedPersistent {
+    address: u64,
+    /// The entry as the report states it, e.g. `main (target+0x9d8)`.
+    label: String,
+    iterations: u32,
+    restore_memory: bool,
+}
+
+/// Refuse persistent settings the session cannot honor.
+fn check_persistent(
+    input: BinaryInput,
+    persistent: &BinaryPersistent,
+) -> Result<(), ClassifiedError> {
+    if input != BinaryInput::File {
+        return Err(invalid(
+            "persistent mode needs file input: standard input cannot be rewound between \
+             iterations, and the socket modes already loop through their shim",
+        ));
+    }
+    if persistent.iterations == 0 || persistent.iterations > MAX_PERSISTENT_ITERATIONS {
+        return Err(invalid(format!(
+            "persistent iterations must be between 1 and {MAX_PERSISTENT_ITERATIONS}"
+        )));
+    }
+    Ok(())
+}
+
+/// The link-time address of a persistent entry (a function name or a module
+/// offset), with the label the report uses.
+fn entry_address(
+    functions: &[(String, u64)],
+    load_base: u64,
+    entry: &str,
+) -> Result<(u64, String), ClassifiedError> {
+    let entry = entry.trim();
+    if let Some(hex) = entry.strip_prefix("0x") {
+        let offset = u64::from_str_radix(hex, 16)
+            .map_err(|_| invalid(format!("{entry} is not a hex module offset")))?;
+        return Ok((
+            load_base.saturating_add(offset),
+            format!("target+0x{offset:x}"),
+        ));
+    }
+    if let Some((_, address)) = functions.iter().find(|(name, _)| name == entry) {
+        let offset = address.saturating_sub(load_base);
+        return Ok((*address, format!("{entry} (target+0x{offset:x})")));
+    }
+    let known: Vec<&str> = functions
+        .iter()
+        .take(8)
+        .map(|(name, _)| name.as_str())
+        .collect();
+    Err(invalid(format!(
+        "the binary has no function {entry}; name a defined function ({}) or a module offset like 0x9d8",
+        if known.is_empty() { "none are in its symbol tables".to_owned() } else { known.join(", ") }
+    )))
+}
+
+/// The address the emulator runs a link-time address at.
+fn persistent_address(pie: bool, machine: ElfMachine, load_base: u64, address: u64) -> u64 {
+    if !pie {
+        return address;
+    }
+    let base = match machine {
+        ElfMachine::Aarch64 => QEMU_PIE_BASE_AARCH64,
+        ElfMachine::X86_64 => QEMU_PIE_BASE_X86_64,
+    };
+    base.saturating_add(address.saturating_sub(load_base))
+}
+
+fn resolve_persistent(
+    image: &[u8],
+    machine: ElfMachine,
+    input: BinaryInput,
+    persistent: &BinaryPersistent,
+) -> Result<ResolvedPersistent, ClassifiedError> {
+    check_persistent(input, persistent)?;
+    let functions = super::binary_profile::function_symbols(image)?;
+    let load_base = super::binary_profile::load_base(image)?;
+    let (address, label) = entry_address(&functions, load_base, &persistent.entry)?;
+    let pie = super::binary_profile::is_position_independent(image)?;
+    Ok(ResolvedPersistent {
+        address: persistent_address(pie, machine, load_base, address),
+        label,
+        iterations: persistent.iterations,
+        restore_memory: persistent.restore_memory,
+    })
 }
 
 /// A finding's input after minimization, replayed and found to be the same
@@ -539,6 +651,13 @@ pub struct BinaryFuzzOutcome {
     /// Whether the operator stopped the fuzz run before its duration ended.
     #[serde(default)]
     pub stopped: bool,
+    /// The persistent-mode entry, e.g. `main (target+0x9d8)`, when used.
+    #[serde(default)]
+    pub persistent_entry: Option<String>,
+    /// AFL++'s bitmap stability, in percent; below about 90 a persistent
+    /// entry leaks state between iterations.
+    #[serde(default)]
+    pub stability_pct: Option<f64>,
 }
 
 /// Where a running session is.
@@ -767,10 +886,26 @@ fn session_env(
     libraries: bool,
     input: BinaryInput,
     compcov: bool,
+    persistent: Option<&ResolvedPersistent>,
 ) -> Result<HashMap<String, String>, ClassifiedError> {
     let mut env = emulated_env(libraries, input, false)?;
     if compcov {
         env.insert("AFL_COMPCOV_LEVEL".to_owned(), COMPCOV_LEVEL.to_owned());
+    }
+    if let Some(persistent) = persistent {
+        env.insert(
+            "AFL_QEMU_PERSISTENT_ADDR".to_owned(),
+            format!("0x{:x}", persistent.address),
+        );
+        // Registers, and with them argc and argv, are restored each loop.
+        env.insert("AFL_QEMU_PERSISTENT_GPR".to_owned(), "1".to_owned());
+        env.insert(
+            "AFL_QEMU_PERSISTENT_CNT".to_owned(),
+            persistent.iterations.to_string(),
+        );
+        if persistent.restore_memory {
+            env.insert("AFL_QEMU_PERSISTENT_MEM".to_owned(), "1".to_owned());
+        }
     }
     Ok(env)
 }
@@ -1159,6 +1294,7 @@ struct AdmittedBinary {
     machine: ElfMachine,
     sha256: String,
     command: Vec<String>,
+    persistent: Option<ResolvedPersistent>,
 }
 
 fn admit(request: &BinaryFuzzRequest) -> Result<AdmittedBinary, ClassifiedError> {
@@ -1174,6 +1310,11 @@ fn admit(request: &BinaryFuzzRequest) -> Result<AdmittedBinary, ClassifiedError>
     }
     let image = read_bounded(&request.binary, MAX_BINARY_BYTES, "binary")?;
     let machine = elf_machine(&image)?;
+    let persistent = request
+        .persistent
+        .as_ref()
+        .map(|persistent| resolve_persistent(&image, machine, request.input, persistent))
+        .transpose()?;
     let sha256 = sha256_hex(&image);
     let command = fuzz_command(
         request.input,
@@ -1186,6 +1327,7 @@ fn admit(request: &BinaryFuzzRequest) -> Result<AdmittedBinary, ClassifiedError>
         machine,
         sha256,
         command,
+        persistent,
     })
 }
 
@@ -1227,7 +1369,12 @@ async fn run_session(
             root,
             &limits(
                 request.duration_secs + SHUTDOWN_GRACE_SECS,
-                session_env(libraries, request.input, request.compcov)?,
+                session_env(
+                    libraries,
+                    request.input,
+                    request.compcov,
+                    admitted.persistent.as_ref(),
+                )?,
             ),
             &session_sandbox(root, None),
             cancel,
@@ -1298,6 +1445,11 @@ async fn run_session(
         dictionary_tokens: request.dictionary.len(),
         compcov: request.compcov,
         stopped,
+        persistent_entry: admitted
+            .persistent
+            .as_ref()
+            .map(|persistent| persistent.label.clone()),
+        stability_pct: stats.stability_pct,
     };
     let report = serde_json::to_vec_pretty(&outcome)
         .map_err(|error| ClassifiedError::Internal(format!("encode report: {error}")))?;
@@ -1422,14 +1574,103 @@ mod tests {
     }
 
     #[test]
+    fn a_persistent_entry_resolves_to_the_emulators_address() {
+        let functions = vec![("main".to_owned(), 0x9d8), ("parse".to_owned(), 0xb00)];
+        // PIE on AArch64: the emulator's base plus the offset from the load base.
+        assert_eq!(
+            persistent_address(true, ElfMachine::Aarch64, 0, 0x9d8),
+            0x55_0000_09d8
+        );
+        assert_eq!(
+            persistent_address(true, ElfMachine::X86_64, 0, 0x1149),
+            0x40_0000_1149
+        );
+        // A fixed-address executable runs at its link address.
+        assert_eq!(
+            persistent_address(false, ElfMachine::X86_64, 0x40_0000, 0x40_1149),
+            0x40_1149
+        );
+        assert_eq!(
+            entry_address(&functions, 0, "main").unwrap(),
+            (0x9d8, "main (target+0x9d8)".to_owned())
+        );
+        assert_eq!(
+            entry_address(&functions, 0x40_0000, "0x1149").unwrap(),
+            (0x40_1149, "target+0x1149".to_owned())
+        );
+        let unknown = entry_address(&functions, 0, "decode")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            unknown.contains("decode") && unknown.contains("main"),
+            "{unknown}"
+        );
+        assert!(entry_address(&functions, 0, "0xzz").is_err());
+    }
+
+    #[test]
+    fn persistent_mode_is_for_file_input_and_bounded_iterations() {
+        let persistent = |iterations| BinaryPersistent {
+            entry: "main".to_owned(),
+            iterations,
+            restore_memory: false,
+        };
+        assert!(check_persistent(BinaryInput::File, &persistent(1000)).is_ok());
+        for input in [
+            BinaryInput::Stdin,
+            BinaryInput::Socket,
+            BinaryInput::SocketMessages,
+        ] {
+            assert!(
+                check_persistent(input, &persistent(1000)).is_err(),
+                "{input:?}"
+            );
+        }
+        assert!(check_persistent(BinaryInput::File, &persistent(0)).is_err());
+        assert!(check_persistent(
+            BinaryInput::File,
+            &persistent(MAX_PERSISTENT_ITERATIONS + 1)
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn the_persistent_loop_is_set_for_the_fuzz_run_only() {
+        let resolved = ResolvedPersistent {
+            address: 0x55_0000_09d8,
+            label: "main (target+0x9d8)".to_owned(),
+            iterations: 1000,
+            restore_memory: false,
+        };
+        let env = session_env(false, BinaryInput::File, false, Some(&resolved)).unwrap();
+        assert_eq!(env["AFL_QEMU_PERSISTENT_ADDR"], "0x55000009d8");
+        assert_eq!(env["AFL_QEMU_PERSISTENT_GPR"], "1");
+        assert_eq!(env["AFL_QEMU_PERSISTENT_CNT"], "1000");
+        assert!(!env.contains_key("AFL_QEMU_PERSISTENT_MEM"));
+        assert!(!env.contains_key("AFL_QEMU_PERSISTENT_EXITS"));
+        let restoring = ResolvedPersistent {
+            restore_memory: true,
+            ..resolved
+        };
+        let env = session_env(false, BinaryInput::File, false, Some(&restoring)).unwrap();
+        assert_eq!(env["AFL_QEMU_PERSISTENT_MEM"], "1");
+        assert!(!replay_env(false, BinaryInput::File)
+            .unwrap()
+            .contains_key("AFL_QEMU_PERSISTENT_ADDR"));
+        assert!(!minimize_env(false, BinaryInput::File)
+            .unwrap()
+            .contains_key("AFL_QEMU_PERSISTENT_ADDR"));
+    }
+
+    #[test]
     fn compcov_is_set_for_the_fuzz_run_only() {
-        let fuzz = session_env(false, BinaryInput::File, true).unwrap();
+        let fuzz = session_env(false, BinaryInput::File, true, None).unwrap();
         assert_eq!(fuzz.get("AFL_COMPCOV_LEVEL").map(String::as_str), Some("2"));
         // The emulator reads it, not the emulated process.
         assert!(!fuzz
             .get("QEMU_SET_ENV")
             .is_some_and(|value| value.contains("COMPCOV")));
-        assert!(!session_env(false, BinaryInput::File, false)
+        assert!(!session_env(false, BinaryInput::File, false, None)
             .unwrap()
             .contains_key("AFL_COMPCOV_LEVEL"));
         assert!(!replay_env(false, BinaryInput::File)
@@ -1495,6 +1736,7 @@ mod tests {
             dictionary: vec!["PIC1".to_owned()],
             continue_from: None,
             compcov: false,
+            persistent: None,
         };
         let extras = StagedExtras {
             dictionary: Some("token_0001=\"PIC1\"\n".to_owned()),
@@ -1609,6 +1851,7 @@ mod tests {
             dictionary: Vec::new(),
             continue_from: None,
             compcov: false,
+            persistent: None,
         };
         assert!(stage_session(
             root.path(),
@@ -1646,13 +1889,13 @@ mod tests {
             DEFAULT_SEED
         );
         assert_eq!(
-            session_env(true, BinaryInput::File, false)
+            session_env(true, BinaryInput::File, false, None)
                 .unwrap()
                 .get("QEMU_SET_ENV")
                 .map(String::as_str),
             Some("LD_LIBRARY_PATH=/work/libs")
         );
-        assert!(!session_env(false, BinaryInput::Stdin, false)
+        assert!(!session_env(false, BinaryInput::Stdin, false, None)
             .unwrap()
             .contains_key("QEMU_SET_ENV"));
         assert!(!bare.path().join("desock").exists());
@@ -1670,14 +1913,14 @@ mod tests {
         );
 
         // The emulator passes the preload to the emulated process only.
-        let env = session_env(false, BinaryInput::Socket, false).unwrap();
+        let env = session_env(false, BinaryInput::Socket, false, None).unwrap();
         assert_eq!(
             env.get("QEMU_SET_ENV").map(String::as_str),
             Some("LD_PRELOAD=/work/desock/oxfuzz_desock.so")
         );
         assert!(!env.contains_key("LD_PRELOAD") && !env.contains_key("AFL_PRELOAD"));
         assert_eq!(
-            session_env(true, BinaryInput::Socket, false)
+            session_env(true, BinaryInput::Socket, false, None)
                 .unwrap()
                 .get("QEMU_SET_ENV")
                 .map(String::as_str),
@@ -1697,6 +1940,7 @@ mod tests {
             dictionary: Vec::new(),
             continue_from: None,
             compcov: false,
+            persistent: None,
         };
         stage_session(root.path(), b"\x7fELF", &request, &StagedExtras::default()).unwrap();
         let shim = std::fs::read_to_string(root.path().join("desock/oxfuzz_desock.c")).unwrap();
@@ -1752,7 +1996,7 @@ mod tests {
     #[test]
     fn a_replay_preloads_the_crash_reporter_and_the_fuzz_run_does_not() {
         // Fuzzing pays for no reporter; only replays load it.
-        assert!(!session_env(false, BinaryInput::File, false)
+        assert!(!session_env(false, BinaryInput::File, false, None)
             .unwrap()
             .contains_key("QEMU_SET_ENV"));
         assert_eq!(
@@ -1802,6 +2046,7 @@ mod tests {
             dictionary: Vec::new(),
             continue_from: None,
             compcov: false,
+            persistent: None,
         };
         stage_session(root.path(), b"\x7fELF", &request, &StagedExtras::default()).unwrap();
         let shim =
@@ -1944,6 +2189,8 @@ mod tests {
             dictionary_tokens: 0,
             compcov: false,
             stopped: false,
+            persistent_entry: None,
+            stability_pct: None,
         };
         let json = serde_json::to_string(&outcome).unwrap();
         let read: BinaryFuzzOutcome = serde_json::from_str(&json).unwrap();
@@ -1983,7 +2230,7 @@ mod tests {
         // Only a message session asks the shim to split the input, in the
         // fuzz run, the replays and the minimizer alike.
         assert_eq!(
-            session_env(false, BinaryInput::SocketMessages, false)
+            session_env(false, BinaryInput::SocketMessages, false, None)
                 .unwrap()
                 .get("QEMU_SET_ENV")
                 .map(String::as_str),
@@ -2004,7 +2251,7 @@ mod tests {
             .unwrap()
             .get("QEMU_SET_ENV")
             .is_some_and(|env| env.ends_with("OXFUZZ_DESOCK_MESSAGES=1")));
-        assert!(!session_env(false, BinaryInput::Socket, false)
+        assert!(!session_env(false, BinaryInput::Socket, false, None)
             .unwrap()
             .get("QEMU_SET_ENV")
             .is_some_and(|env| env.contains("MESSAGES")));
@@ -2033,6 +2280,7 @@ mod tests {
             dictionary: Vec::new(),
             continue_from: None,
             compcov: false,
+            persistent: None,
         };
         stage_session(root.path(), b"\x7fELF", &request, &StagedExtras::default()).unwrap();
         assert!(root.path().join("desock/oxfuzz_desock.c").is_file());
@@ -2317,6 +2565,7 @@ mod tests {
                 dictionary: Vec::new(),
                 continue_from: None,
                 compcov: false,
+                persistent: None,
             };
             let session = Uuid::new_v4();
             let session_root = root.path().join(format!("session-{session}"));
@@ -2455,6 +2704,7 @@ mod tests {
             dictionary: tokens.clone(),
             continue_from: None,
             compcov: false,
+            persistent: None,
         };
         let first_root = root.path().join("first");
         std::fs::create_dir_all(&first_root).unwrap();
@@ -2569,6 +2819,7 @@ mod tests {
             dictionary: Vec::new(),
             continue_from: None,
             compcov: true,
+            persistent: None,
         };
         let session_root = root.path().join("session");
         std::fs::create_dir_all(&session_root).unwrap();
@@ -2612,6 +2863,99 @@ mod tests {
             serde_json::from_slice(&std::fs::read(session_root.join(REPORT_NAME)).unwrap())
                 .unwrap();
         assert!(report.stopped);
+    }
+
+    /// Persistent mode loops on `main` inside one emulated process: the same
+    /// file-reading target runs faster than with a process per input, stays
+    /// stable, and records the resolved entry. Crashes found in the loop are
+    /// still confirmed by a fresh-process replay.
+    #[tokio::test]
+    #[ignore = "requires a local Docker daemon and the pinned sandbox image"]
+    async fn live_persistent_session_loops_on_main_faster_and_stays_stable() {
+        assert!(hf_runtime::docker_daemon_ready());
+        let root = tempfile::tempdir().unwrap();
+        let runtime = hf_runtime::docker::DockerRuntime::new(
+            hf_runtime::RuntimeConfig::default(),
+            root.path(),
+        );
+        let build = root.path().join("build");
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::write(build.join("magic.c"), PLANTED_INTEGER_MAGIC_C).unwrap();
+        let compiled = runtime
+            .run_command_opts(
+                &["clang", "-O1", "/work/magic.c", "-o", "/work/magic"].map(str::to_owned),
+                &build,
+                &limits(120, HashMap::new()),
+                &SandboxOptions::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(compiled.exit_code, 0, "{}", compiled.stderr);
+        let mut outcomes = Vec::new();
+        for persistent in [
+            None,
+            Some(BinaryPersistent {
+                entry: "main".to_owned(),
+                iterations: 1000,
+                restore_memory: false,
+            }),
+        ] {
+            let request = BinaryFuzzRequest {
+                project: root.path().join("project"),
+                binary: build.join("magic"),
+                input: BinaryInput::File,
+                seeds: None,
+                libraries: None,
+                duration_secs: 25,
+                timeout_ms: 1000,
+                dictionary: Vec::new(),
+                continue_from: None,
+                compcov: true,
+                persistent,
+            };
+            let session_root = root.path().join(format!("session-{}", outcomes.len()));
+            std::fs::create_dir_all(&session_root).unwrap();
+            let outcome = run_session(
+                &runtime,
+                &session_root,
+                Uuid::new_v4(),
+                &request,
+                admit(&request).unwrap(),
+                &StagedExtras::default(),
+                &|_| {},
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            println!(
+                "persistent {:?}: {:?} execs/s, stability {:?}, findings {}",
+                outcome.persistent_entry,
+                outcome.execs_per_sec,
+                outcome.stability_pct,
+                outcome.findings.len()
+            );
+            assert!(
+                outcome.findings.iter().all(|finding| finding.confirmed),
+                "every finding replays in a fresh process: {:?}",
+                outcome.findings
+            );
+            outcomes.push(outcome);
+        }
+        let (plain, looped) = (&outcomes[0], &outcomes[1]);
+        assert_eq!(plain.persistent_entry, None);
+        let entry = looped.persistent_entry.as_deref().unwrap();
+        assert!(entry.starts_with("main (target+0x"), "{entry}");
+        assert!(
+            looped.stability_pct.unwrap() >= 90.0,
+            "{:?}",
+            looped.stability_pct
+        );
+        assert!(
+            looped.execs_per_sec.unwrap() > 1.5 * plain.execs_per_sec.unwrap(),
+            "persistent {:?} vs plain {:?}",
+            looped.execs_per_sec,
+            plain.execs_per_sec
+        );
     }
 
     const PLANTED_SERVER_C: &str = "#include <netinet/in.h>\n#include <poll.h>\n#include <string.h>\n#include <sys/socket.h>\n#include <unistd.h>\n\nint main(void) {\n  int one = 1;\n  int s = socket(AF_INET, SOCK_STREAM, 0);\n  struct sockaddr_in a;\n  memset(&a, 0, sizeof a);\n  a.sin_family = AF_INET;\n  a.sin_port = htons(80);\n  setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);\n  if (bind(s, (struct sockaddr *)&a, sizeof a) != 0) return 2;\n  if (listen(s, 8) != 0) return 3;\n  for (;;) {\n    struct pollfd p = {s, POLLIN, 0};\n    if (poll(&p, 1, -1) <= 0) return 4;\n    int c = accept(s, 0, 0);\n    if (c < 0) return 5;\n    setsockopt(c, IPPROTO_TCP, 1, &one, sizeof one);\n    unsigned char b[64];\n    ssize_t n = recv(c, b, sizeof b, 0);\n    if (n > 3 && b[0] == 'F' && b[1] == 'U' && b[2] == 'Z' && b[3] == 'Z') {\n      volatile int *q = 0;\n      *q = 1;\n    }\n    send(c, \"ok\\n\", 3, 0);\n    close(c);\n  }\n}\n";
@@ -2663,6 +3007,7 @@ mod tests {
             dictionary: Vec::new(),
             continue_from: None,
             compcov: false,
+            persistent: None,
         };
         let session = Uuid::new_v4();
         let session_root = root.path().join("session");
@@ -2712,7 +3057,7 @@ mod tests {
                 &session_root,
                 &limits(
                     REPLAY_SECS,
-                    session_env(false, BinaryInput::Socket, false).unwrap(),
+                    session_env(false, BinaryInput::Socket, false, None).unwrap(),
                 ),
                 &session_sandbox(&session_root, Some(b"hello".to_vec())),
             )
@@ -2840,6 +3185,7 @@ mod tests {
                 dictionary: Vec::new(),
                 continue_from: None,
                 compcov: false,
+                persistent: None,
             };
             let session_root = root.path().join(format!("session-{name}"));
             std::fs::create_dir_all(&session_root).unwrap();

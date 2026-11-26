@@ -11,6 +11,7 @@ import {
   binaryFindingExplanation,
   binaryIssueExport,
   formatCount as count,
+  LOW_STABILITY_PCT,
   reportPath,
   type BinaryExplanation,
   type BinaryFinding,
@@ -232,6 +233,7 @@ export function BinaryOutcome({ project, outcome }: { project: string; outcome: 
           {t("binary.result")}
           {outcome.stopped && <Badge variant="warning">{t("binary.stoppedEarly")}</Badge>}
           {outcome.compcov && <Badge variant="accent">{t("binary.compcovUsed")}</Badge>}
+          {outcome.persistent_entry && <Badge variant="accent">{t("binary.persistentUsed", { entry: outcome.persistent_entry })}</Badge>}
         </h2>
         <p className="text-xs text-text-muted font-mono">
           {outcome.binary_name} · {outcome.machine} · {outcome.input} · {formatDuration(outcome.duration_secs)} · {t("binary.session")} {outcome.session}
@@ -245,7 +247,11 @@ export function BinaryOutcome({ project, outcome }: { project: string; outcome: 
         <Stat label={t("binary.stat.hangs")} value={count(outcome.saved_hangs)} />
         <Stat label={t("binary.stat.distinct")} value={String(outcome.distinct_findings)} />
         <Stat label={t("binary.stat.omitted")} value={String(outcome.findings_omitted)} />
+        {typeof outcome.stability_pct === "number" && <Stat label={t("binary.stat.stability")} value={`${outcome.stability_pct.toFixed(1)}%`} />}
       </div>
+      {typeof outcome.stability_pct === "number" && outcome.stability_pct < LOW_STABILITY_PCT && (
+        <p className="text-xs text-warning">{t("binary.lowStability")}</p>
+      )}
       {outcome.findings_omitted > 0 && <p className="text-xs text-text-muted">{t("binary.omittedNote", { count: outcome.findings_omitted })}</p>}
       <div className="flex items-center gap-2 text-sm min-w-0">
         <span className="text-text-muted shrink-0">{t("binary.workspace")}</span>
