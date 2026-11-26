@@ -143,6 +143,8 @@ export interface BinaryExplanation {
   finding_sha256: string;
   text: string;
   created_at: string;
+  /** The disassembly around the crash that was sent with the request. */
+  disassembly?: string | null;
 }
 
 export function binaryFuzz(options: BinaryFuzzOptions): Promise<BinaryFuzzOutcome> {

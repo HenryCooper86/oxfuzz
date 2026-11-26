@@ -26,6 +26,8 @@ pub use operation_registry::OperationCancelOutcome;
 #[cfg(feature = "binary-only-fuzzing")]
 mod binary_assist;
 #[cfg(feature = "binary-only-fuzzing")]
+mod binary_disasm;
+#[cfg(feature = "binary-only-fuzzing")]
 mod binary_issue;
 #[cfg(feature = "binary-only-fuzzing")]
 mod binary_only;

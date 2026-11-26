@@ -844,7 +844,7 @@ fn emulated_env(
     Ok(env)
 }
 
-fn limits(duration_secs: u64, env: HashMap<String, String>) -> ResourceLimits {
+pub(super) fn limits(duration_secs: u64, env: HashMap<String, String>) -> ResourceLimits {
     ResourceLimits {
         max_mem_mb: SESSION_MEMORY_MB,
         max_cpus: 1,

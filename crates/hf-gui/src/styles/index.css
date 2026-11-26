@@ -550,6 +550,19 @@ input[type="radio"] {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+.hf-disassembly {
+  margin: 6px 0 0;
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--radius-md);
+  background: var(--surface-code);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre;
+  overflow-x: auto;
+  max-height: 360px;
+}
 .hf-alert-warning {
   margin: 0;
   padding: var(--space-sm) var(--space-md);

@@ -273,6 +273,22 @@ input, and answers with a likely bug class, what the evidence supports,
 severity guidance and next steps. It is shown as model output and never
 changes the finding. One explanation is kept per session and finding.
 
+The prompt also carries the disassembly around the crash: for the faulting
+frame and the first caller frame in the target (module offsets from the
+replay report), GNU `objdump` from the image disassembles a window of the
+session's own copy of the binary (`target`), from 0x60 bytes before to 0x20
+bytes after the offset, with the faulting instruction marked `=>` and a
+caller's return address (the instruction after its call) marked `->`. The
+binary is untrusted, so objdump runs in the sandbox with the session
+directory read-only and no network, never on the host. The offset is turned
+into an address with the lowest `PT_LOAD` address (0 for a PIE, the link
+base for a fixed-address executable), read on the host from the ELF headers.
+The text is bounded (40 lines a window), written once to
+`disassembly/<sha16>.txt` in the session directory, and shown with the
+explanation, so the operator sees what the model saw. A finding without
+frames in the target (a static binary, no replay report) is explained
+without it.
+
 Every prompt above is retained in `binary_llm_drafts` before it is sent
 (Engineering Protocol 2.13); text taken from the binary is fenced in the
 prompt as untrusted data. Without a store or a provider nothing is sent.

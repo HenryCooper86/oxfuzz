@@ -273,6 +273,28 @@ pub fn dynamic_imports(image: &[u8]) -> Result<Vec<String>, ClassifiedError> {
     Ok(names.into_iter().take(MAX_IMPORTS).collect())
 }
 
+const PT_LOAD: u32 = 1;
+
+/// The address the image's file offset 0 is loaded at: the lowest
+/// `p_vaddr - p_offset` over its `PT_LOAD` segments. 0 for a position-
+/// independent executable, the link base for a fixed-address one. A module
+/// offset from a crash report plus this is the address objdump shows.
+///
+/// # Errors
+/// Returns [`ClassifiedError::Validation`] when the header table points
+/// outside the image.
+pub fn load_base(image: &[u8]) -> Result<u64, ClassifiedError> {
+    let Some((headers, step)) = program_headers(image)? else {
+        return Ok(0);
+    };
+    Ok(headers
+        .chunks_exact(step)
+        .filter(|header| u32_at(header, 0) == Some(PT_LOAD))
+        .filter_map(|header| Some(u64_at(header, 0x10)?.saturating_sub(u64_at(header, 0x08)?)))
+        .min()
+        .unwrap_or(0))
+}
+
 /// Whether the image loads shared libraries.
 ///
 /// # Errors
@@ -695,6 +717,33 @@ mod tests {
 
     fn names(list: &[&str]) -> Vec<String> {
         list.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn the_load_base_is_the_lowest_loaded_address_less_its_offset() {
+        let with_loads = |loads: &[(u64, u64)]| {
+            let mut image = elf(false, &[], b"");
+            let phoff = image.len() as u64;
+            for (offset, vaddr) in loads {
+                let mut ph = vec![0u8; 56];
+                ph[0..4].copy_from_slice(&1u32.to_le_bytes());
+                ph[0x08..0x10].copy_from_slice(&offset.to_le_bytes());
+                ph[0x10..0x18].copy_from_slice(&vaddr.to_le_bytes());
+                image.extend_from_slice(&ph);
+            }
+            image[0x20..0x28].copy_from_slice(&phoff.to_le_bytes());
+            image[0x38..0x3a].copy_from_slice(&u16::try_from(loads.len()).unwrap().to_le_bytes());
+            image
+        };
+        assert_eq!(
+            load_base(&with_loads(&[(0, 0), (0x10db8, 0x20db8)])).unwrap(),
+            0
+        );
+        assert_eq!(
+            load_base(&with_loads(&[(0x1000, 0x40_1000), (0, 0x40_0000)])).unwrap(),
+            0x40_0000
+        );
+        assert_eq!(load_base(&elf(false, &[], b"")).unwrap(), 0);
     }
 
     #[test]

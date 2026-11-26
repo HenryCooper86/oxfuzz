@@ -142,6 +142,12 @@ function Explanation({ project, session, finding }: { project: string; session: 
             <Badge variant="accent">{t("binary.modelOutput")}</Badge>
           </div>
           <p className="hf-ai-note-text">{note.text}</p>
+          {note.disassembly && (
+            <details className="text-xs">
+              <summary className="cursor-pointer text-text-secondary">{t("binary.disassemblySent")}</summary>
+              <pre className="hf-disassembly" aria-label={t("binary.disassemblySent")}>{note.disassembly}</pre>
+            </details>
+          )}
           <p className="text-xs text-text-muted">{t("binary.explanationNote")}</p>
         </section>
       )}

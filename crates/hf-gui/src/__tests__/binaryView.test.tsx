@@ -309,7 +309,10 @@ describe("BinaryView", () => {
       if (name === "binary_sessions") return [summary];
       if (name === "binary_session") return outcome;
       if (name === "binary_finding_explanation") return { session: outcome.session, finding_sha256: SHA, text: "Likely bug class: stored note", created_at: "2026-11-26T00:00:00Z" };
-      if (name === "binary_finding_explain") return { session: outcome.session, finding_sha256: SHA, text: "Likely bug class: out-of-bounds write", created_at: "2026-11-26T00:01:00Z" };
+      if (name === "binary_finding_explain") return {
+        session: outcome.session, finding_sha256: SHA, text: "Likely bug class: out-of-bounds write", created_at: "2026-11-26T00:01:00Z",
+        disassembly: "faulting frame at target+0xcbc:\n=>      cbc: ldrb w2, [x22, x0]\n",
+      };
       return null;
     });
     render();
@@ -322,6 +325,8 @@ describe("BinaryView", () => {
     await click(button("Explain again"));
     expect(mocks.invoke).toHaveBeenCalledWith("binary_finding_explain", { project: "/proj", session: outcome.session, finding: SHA });
     expect(host.textContent).toContain("out-of-bounds write");
+    expect(host.textContent).toContain("Disassembly sent with the request");
+    expect(host.querySelector('[aria-label="Disassembly sent with the request"]')?.textContent).toContain("=>      cbc: ldrb w2, [x22, x0]");
   });
 
   it("reports a failed session", async () => {
