@@ -8,6 +8,7 @@ export default defineConfig({
       surface: {
         primary: "var(--surface-primary)",
         secondary: "var(--surface-secondary)",
+        raised: "var(--surface-raised)",
         tertiary: "var(--surface-tertiary)",
         hover: "var(--surface-hover)",
         code: "var(--surface-code)",
@@ -23,19 +24,30 @@ export default defineConfig({
         hover: "var(--accent-hover)",
         subtle: "var(--accent-subtle)",
         glow: "var(--accent-glow)",
+        border: "var(--accent-border)",
         contrast: "var(--accent-contrast)",
       },
-      success: "var(--success)",
+      success: {
+        DEFAULT: "var(--success)",
+        subtle: "var(--success-subtle)",
+      },
       error: {
         DEFAULT: "var(--error)",
         subtle: "var(--error-subtle)",
       },
-      warning: "var(--warning)",
+      warning: {
+        DEFAULT: "var(--warning)",
+        subtle: "var(--warning-subtle)",
+      },
       info: {
         DEFAULT: "var(--info)",
         subtle: "var(--info-subtle)",
       },
-      border: "var(--border)",
+      border: {
+        DEFAULT: "var(--border)",
+        strong: "var(--border-strong)",
+        focus: "var(--border-focus)",
+      },
     },
     borderRadius: {
       sm: "var(--radius-sm)",
@@ -49,10 +61,11 @@ export default defineConfig({
     },
   },
   shortcuts: {
-    // Content cards are flat-with-a-hairline-border for a calm, dense layout; a
-    // heavy drop shadow on every card (incl. list rows) was visually noisy.
-    // Floating surfaces (modal, toast, tooltip, menus) set their own elevation.
+    // Content cards sit one step above the canvas on the raised surface with a
+    // hairline border and only a contact shadow -- elevation by tone, not by a
+    // heavy drop shadow on every card (incl. list rows), which was noisy.
+    // Floating surfaces (modal, toast, tooltip, menus) use --shadow-md/lg.
     "surface-card":
-      "bg-surface-primary border border-solid border-border rounded-lg shadow-sm",
+      "bg-surface-raised border border-solid border-border rounded-lg shadow-sm",
   },
 });

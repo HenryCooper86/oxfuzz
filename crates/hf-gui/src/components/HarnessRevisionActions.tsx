@@ -55,6 +55,6 @@ export function HarnessRevisionActions({ project, target, engine, lang, ai, repa
     </div>
     {revision.trim().length > 0 && !revisionValid && <p className="text-text-muted">{t("parityHarness.adoptInvalid")}</p>}
     {message && <p role="status">{message}</p>}
-    {error && <p role="alert" style={{ color: "var(--danger)" }}>{error}</p>}
+    {error && <p role="alert" style={{ color: "var(--error)" }}>{error}</p>}
   </section>;
 }

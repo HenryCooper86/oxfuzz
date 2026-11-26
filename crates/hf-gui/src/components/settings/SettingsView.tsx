@@ -386,10 +386,12 @@ export function SettingsView({ onBack, onRunWizard }: { onBack?: () => void; onR
         <div style={{ padding: "6px 8px 0" }}>
           <button
             onClick={() => void goBack()}
-            className="flex items-center gap-2 w-full text-left rounded-md bg-transparent border border-transparent text-text-secondary hover:bg-accent-subtle hover:text-text-primary transition-all duration-150 outline-none"
-            style={{ padding: "7px 10px", fontSize: "13px", fontWeight: 500, cursor: "pointer" }}
+            type="button"
+            className="hf-nav-row outline-none"
           >
-            <ArrowLeft size={16} />
+            <span className="hf-nav-icon">
+              <ArrowLeft size={16} />
+            </span>
             <span>{t("settings.back")}</span>
           </button>
         </div>
@@ -399,15 +401,12 @@ export function SettingsView({ onBack, onRunWizard }: { onBack?: () => void; onR
             return (
               <button
                 key={id}
+                type="button"
                 onClick={() => void selectSection(id)}
-                className={`flex items-center gap-2 w-full text-left rounded-md transition-all duration-150 outline-none ${
-                  isActive
-                    ? "bg-surface-active text-text-primary border border-border"
-                    : "bg-transparent text-text-secondary border border-transparent hover:bg-accent-subtle hover:text-text-primary"
-                }`}
-                style={{ padding: "7px 10px", fontSize: "13px", fontWeight: 500, marginBottom: "2px" }}
+                aria-current={isActive ? "page" : undefined}
+                className="hf-nav-row outline-none"
               >
-                <span style={{ color: isActive ? "var(--accent)" : "inherit", display: "flex" }}>
+                <span className="hf-nav-icon">
                   <Icon size={16} />
                 </span>
                 <span>{t(`settings.tab.${id}`)}</span>
@@ -426,11 +425,9 @@ export function SettingsView({ onBack, onRunWizard }: { onBack?: () => void; onR
           <span
             style={{
               fontFamily: "var(--font-display)",
-              fontSize: "17px",
-              fontWeight: 400,
-              fontStyle: "italic",
-              letterSpacing: "0.01em",
-              opacity: 0.9,
+              fontSize: "14px",
+              fontWeight: 500,
+              color: "var(--text-secondary)",
             }}
           >
             {t(`settings.tab.${section.id}`)}

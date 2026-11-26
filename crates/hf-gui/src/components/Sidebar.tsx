@@ -4,6 +4,7 @@ import { useTarget } from "../providers/target";
 import { useI18n } from "../i18nContext";
 import { useDefectDojo } from "../lib";
 import { APP_VERSION } from "../lib/appVersion";
+import { IconButton } from "./ui/IconButton";
 import { Bot, BookOpen, Bug, Boxes, CarFront, Cpu, Crosshair, Database, FileCode, FileText, FolderOpen, History, LayoutDashboard, LifeBuoy, MessageSquare, Play, Plus, Puzzle, ScrollText, Settings, ShieldCheck, Workflow, X, Zap, GitCompare } from "lucide-react";
 
 interface SidebarProps {
@@ -47,11 +48,42 @@ function basename(path: string): string {
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
     <div
-      className="text-xs font-semibold uppercase mb-1"
-      style={{ color: "var(--text-muted)", letterSpacing: "0.08em", padding: "7px 10px 2px" }}
+      className="font-semibold uppercase"
+      style={{ color: "var(--text-muted)", fontSize: "10.5px", letterSpacing: "0.09em", padding: "14px 10px 5px" }}
     >
       {children}
     </div>
+  );
+}
+
+/** Shared row: every sidebar entry uses the `.hf-nav-row` look (styles/index.css). */
+function NavRow({
+  icon,
+  label,
+  active,
+  onClick,
+  title,
+  current = "page",
+}: {
+  icon: React.ReactNode;
+  label: React.ReactNode;
+  active: boolean;
+  onClick: () => void;
+  title?: string;
+  /** `page` for views; `true` for the selected item in a set (a target). */
+  current?: "page" | "true";
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      aria-current={active ? current : undefined}
+      className="hf-nav-row outline-none"
+    >
+      <span className="hf-nav-icon">{icon}</span>
+      <span className="truncate">{label}</span>
+    </button>
   );
 }
 
@@ -66,62 +98,30 @@ function NavButton({
 }) {
   const { view, icon: Icon } = item;
   const { t } = useI18n();
-  return (
-    <button
-      onClick={() => onNavigate(view)}
-      aria-current={active ? "page" : undefined}
-      className={`flex items-center gap-2 w-full text-left rounded-md transition-all duration-150 outline-none ${
-        active
-          ? "bg-surface-active text-text-primary border border-border"
-          : "bg-transparent text-text-secondary border border-transparent hover:bg-accent-subtle hover:text-text-primary"
-      }`}
-      style={{
-        padding: "7px 10px",
-        fontSize: "13px",
-        fontWeight: 500,
-        marginBottom: "2px",
-      }}
-    >
-      <span style={{ color: active ? "var(--accent)" : "inherit", display: "flex" }}>
-        <Icon size={18} />
-      </span>
-      <span>{t(`nav.${view}`)}</span>
-    </button>
-  );
+  return <NavRow icon={<Icon size={16} />} label={t(`nav.${view}`)} active={active} onClick={() => onNavigate(view)} />;
 }
 
 /** Library row that opens the embedded in-app DefectDojo view. */
 function DefectDojoButton({ active, onOpen }: { active: boolean; onOpen: () => void }) {
   return (
-    <button
+    <NavRow
+      icon={<ShieldCheck size={16} />}
+      label="DefectDojo"
+      active={active}
       onClick={onOpen}
-      aria-current={active ? "page" : undefined}
       title="Open DefectDojo in the app"
-      className={`flex items-center gap-2 w-full text-left rounded-md transition-all duration-150 outline-none ${
-        active
-          ? "bg-surface-active text-text-primary border border-border"
-          : "bg-transparent text-text-secondary border border-transparent hover:bg-accent-subtle hover:text-text-primary"
-      }`}
-      style={{ padding: "7px 10px", fontSize: "13px", fontWeight: 500, marginBottom: "2px" }}
-    >
-      <span style={{ color: active ? "var(--accent)" : "inherit", display: "flex" }}>
-        <ShieldCheck size={18} />
-      </span>
-      <span>DefectDojo</span>
-    </button>
+    />
   );
 }
 
-/** Prominent row that opens a folder picker to begin a new fuzzing target. */
+/** Row that opens a folder picker to begin a new fuzzing target. */
 function NewTargetButton({ onNewTarget }: { onNewTarget: () => void }) {
   const { t } = useI18n();
   return (
-    <button
-      onClick={onNewTarget}
-      className="flex items-center gap-2 w-full text-left rounded-md transition-all duration-150 outline-none bg-transparent border border-transparent text-text-primary hover:bg-accent-subtle"
-      style={{ padding: "7px 10px", fontSize: "13px", fontWeight: 600, marginBottom: "2px" }}
-    >
-      <Plus size={18} style={{ color: "var(--accent)" }} />
+    <button type="button" onClick={onNewTarget} className="hf-nav-row outline-none" style={{ color: "var(--text-primary)" }}>
+      <span className="hf-nav-icon" style={{ color: "var(--accent)" }}>
+        <Plus size={16} />
+      </span>
       <span>{t("sidebar.newTarget")}</span>
     </button>
   );
@@ -145,33 +145,26 @@ function TargetRow({
   const name = basename(path);
   const label = active && activeTarget ? `${name} / ${activeTarget}` : name;
   return (
-    <div className="flex items-center" style={{ marginBottom: "2px" }}>
-      <button
-        onClick={() => onSelect(path)}
-        title={path}
-        className={`flex items-center gap-2 flex-1 min-w-0 text-left rounded-md transition-all duration-150 outline-none ${
-          active
-            ? "bg-surface-active text-text-primary border border-border"
-            : "bg-transparent text-text-secondary border border-transparent hover:bg-accent-subtle hover:text-text-primary"
-        }`}
-        style={{ padding: "7px 10px", fontSize: "13px", fontWeight: 500 }}
-      >
-        <span style={{ color: active ? "var(--accent)" : "inherit", display: "flex", flexShrink: 0 }}>
-          <Crosshair size={16} />
-        </span>
-        <span className="truncate">{label}</span>
-      </button>
-      <button
+    <div className="group flex items-center gap-0.5">
+      <div className="flex-1 min-w-0">
+        <NavRow
+          icon={<Crosshair size={15} />}
+          label={label}
+          active={active}
+          current="true"
+          onClick={() => onSelect(path)}
+          title={path}
+        />
+      </div>
+      <IconButton
+        size={24}
+        className="op-0 group-hover:op-100 focus-visible:op-100"
         onClick={() => onRemove(path)}
-        className="flex items-center justify-center rounded-md transition-colors duration-150 bg-transparent border-none"
-        style={{ width: "26px", height: "26px", color: "var(--text-muted)", cursor: "pointer", flexShrink: 0 }}
         title={t("sidebar.removeTarget")}
         aria-label={t("sidebar.removeTarget")}
-        onMouseEnter={(e) => (e.currentTarget.style.background = "var(--surface-hover)")}
-        onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
       >
         <X size={13} />
-      </button>
+      </IconButton>
     </div>
   );
 }
@@ -265,7 +258,7 @@ export function Sidebar({ activeView, onNavigate, onNewTarget, onSelectTarget }:
         />
         <div className="text-text-muted text-center flex flex-col items-center gap-0.5" style={{ padding: "6px 10px 0", fontSize: "11px" }}>
           <span>
-            Press <kbd style={{ padding: "0 3px", border: "1px solid var(--border)", borderRadius: 3 }}>⌘K</kbd> to search
+            Press <kbd style={{ padding: "0 4px", border: "1px solid var(--border-strong)", borderRadius: 4, fontFamily: "var(--font-sans)", fontSize: "10px" }}>⌘K</kbd> to search
           </span>
           <span>oxfuzz v{APP_VERSION}</span>
         </div>

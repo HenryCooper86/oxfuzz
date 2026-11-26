@@ -40,9 +40,10 @@ export function SettingsGroup({ title, description, children }: SettingsGroupPro
       </div>
       <div
         style={{
-          background: "var(--surface-secondary)",
+          background: "var(--surface-raised)",
           border: "1px solid var(--border)",
-          borderRadius: "var(--radius-md)",
+          borderRadius: "var(--radius-lg)",
+          boxShadow: "var(--shadow-sm)",
           overflow: "hidden",
         }}
       >

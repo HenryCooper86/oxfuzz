@@ -750,7 +750,7 @@ function CandidateCard({
           {covLoading && <Loader2 size={11} className="animate-spin text-text-muted" />}
           {covered && covered.size > 0 && (
             <span className="text-xs text-text-muted flex items-center gap-2">
-              <span style={{ color: "var(--success, #16a34a)" }}>● {t("discover.covered")}</span>
+              <span style={{ color: "var(--success)" }}>● {t("discover.covered")}</span>
               <span style={{ color: "var(--text-muted)" }}>○ {t("discover.notCovered")}</span>
             </span>
           )}
@@ -798,7 +798,7 @@ function CallTreeNode({
   const isCovered = covered?.has(name) ?? false;
   const nameColor = hasCoverage
     ? isCovered
-      ? "var(--success, #16a34a)"
+      ? "var(--success)"
       : "var(--text-muted)"
     : hasChildren
       ? "var(--text-primary)"

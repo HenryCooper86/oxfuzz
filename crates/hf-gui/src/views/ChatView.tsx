@@ -623,7 +623,7 @@ export function ChatView() {
             />
             <h2
               className="mb-1"
-              style={{ fontFamily: "var(--font-display)", fontStyle: "italic", fontSize: "22px", fontWeight: 500 }}
+              style={{ fontFamily: "var(--font-display)", fontSize: "22px", fontWeight: 600, letterSpacing: "-0.01em" }}
             >
               {t("welcome.title")}
             </h2>
@@ -757,15 +757,7 @@ export function ChatView() {
 
       {/* Composer */}
       <div style={{ padding: "var(--space-sm) var(--space-md) var(--space-md)" }}>
-        <div
-          className="flex flex-col"
-          style={{
-            background: "var(--surface-secondary)",
-            border: "1px solid var(--border)",
-            borderRadius: "16px",
-            padding: "10px 12px 8px",
-          }}
-        >
+        <div className="hf-composer flex flex-col">
           {activeProject && (
             <div className="flex items-center gap-1.5 mb-2 self-start">
               <span
@@ -809,7 +801,7 @@ export function ChatView() {
             onKeyDown={onKeyDown}
             placeholder={mode === "plan" ? t("composer.placeholderPlan") : t("composer.placeholder")}
             rows={3}
-            className="w-full text-sm bg-transparent border-none outline-none text-text-primary resize-none"
+            className="hf-bare-focus w-full text-sm bg-transparent border-none outline-none text-text-primary resize-none"
             style={{
               fontFamily: "var(--font-sans)",
               lineHeight: 1.5,
@@ -1067,7 +1059,7 @@ function WelcomeProjectSelector({
             style={{
               background: "var(--surface-primary)",
               border: "1px solid var(--border)",
-              boxShadow: "0 8px 24px rgba(0,0,0,0.3)",
+              boxShadow: "var(--shadow-md)",
               zIndex: 50,
             }}
           >
@@ -1218,7 +1210,7 @@ function AgentDropdown({
               left: 0,
               background: "var(--surface-primary)",
               border: "1px solid var(--border)",
-              boxShadow: "0 8px 24px rgba(0,0,0,0.3)",
+              boxShadow: "var(--shadow-md)",
               zIndex: 50,
             }}
           >
@@ -1342,7 +1334,7 @@ function Dropdown({
               left: 0,
               background: "var(--surface-primary)",
               border: "1px solid var(--border)",
-              boxShadow: "0 8px 24px rgba(0,0,0,0.3)",
+              boxShadow: "var(--shadow-md)",
               zIndex: 50,
             }}
           >

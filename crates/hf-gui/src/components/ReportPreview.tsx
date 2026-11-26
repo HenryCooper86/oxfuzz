@@ -59,7 +59,7 @@ export function ReportPreview({
   return (
     <div
       className="fixed inset-0 z-9999 flex items-center justify-center"
-      style={{ background: "rgba(0,0,0,0.55)", backdropFilter: "blur(3px)", WebkitBackdropFilter: "blur(3px)" }}
+      style={{ background: "var(--overlay)", backdropFilter: "blur(3px)", WebkitBackdropFilter: "blur(3px)" }}
       onClick={onClose}
     >
       <div
@@ -109,7 +109,7 @@ export function ReportPreview({
                     role="listbox"
                     onKeyDown={onMenuKey}
                     className="absolute right-0 mt-1 min-w-[170px] rounded-lg overflow-hidden"
-                    style={{ background: "var(--surface-primary)", border: "1px solid var(--border)", boxShadow: "0 8px 24px rgba(0,0,0,0.3)", zIndex: 50 }}
+                    style={{ background: "var(--surface-primary)", border: "1px solid var(--border)", boxShadow: "var(--shadow-md)", zIndex: 50 }}
                   >
                     {formats.map((f) => (
                       <button

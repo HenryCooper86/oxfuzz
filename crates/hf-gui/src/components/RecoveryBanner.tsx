@@ -58,12 +58,12 @@ function DesktopRecoveryBanner({ onReview }: { onReview?: (run: InterruptedRun) 
   return (
     <div
       className="rounded-md"
-      style={{ background: "rgba(217,119,6,0.10)", border: "1px solid rgba(217,119,6,0.4)", padding: "var(--space-sm) var(--space-md)", margin: "var(--space-md) var(--space-lg) 0" }}
+      style={{ background: "var(--warning-subtle)", border: "1px solid color-mix(in srgb, var(--warning) 40%, transparent)", padding: "var(--space-sm) var(--space-md)", margin: "var(--space-md) var(--space-lg) 0" }}
     >
       {error && <div role="alert" className="text-xs mb-2">{t(`recovery.${error.action}Failed`, { error: error.message })} <Button disabled={busy} onClick={() => { pending.current = true; setBusy(true); setRevision(value => value + 1); }}>{t("common.retry")}</Button></div>}
       {runs.length > 0 && <div className="flex flex-wrap items-center gap-2 mb-1">
-        <AlertTriangle size={14} style={{ color: "#d97706" }} />
-        <span className="text-xs font-semibold" style={{ color: "#d97706" }}>
+        <AlertTriangle size={14} style={{ color: "var(--warning)" }} />
+        <span className="text-xs font-semibold" style={{ color: "var(--warning)" }}>
           {runs.length === 1 ? t("recovery.recoveredOne") : t("recovery.recoveredMany", { n: runs.length })}
         </span>
         <span className="text-xs text-text-muted">{t("recovery.detail")}</span>

@@ -196,7 +196,7 @@ export function IntegrationsTab({ value, onChange }: { value: DefectDojoDraft; o
             role="status"
             style={{
               fontSize: "12px",
-              color: result.ok ? "var(--success, #10b981)" : "var(--danger, #ef4444)",
+              color: result.ok ? "var(--success)" : "var(--error)",
             }}
           >
             {result.msg}

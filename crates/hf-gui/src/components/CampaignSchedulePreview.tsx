@@ -36,7 +36,7 @@ export default function CampaignSchedulePreview({ preview }: { preview: Schedule
         {preview.next_fires.length > 0 ? <span className="text-text-muted"> · {display.timezone}</span> : null}
       </div>
       {preview.state !== "unavailable" ? <p className="m-0 text-text-muted">{budget || t("automation.preview.unbounded")}</p> : null}
-      {preview.timezone_fallback || display.fallback ? <p className="m-0" style={{ color: "var(--warning, #d9a441)" }}>{t("automation.preview.timezoneFallback")}</p> : null}
+      {preview.timezone_fallback || display.fallback ? <p className="m-0" style={{ color: "var(--warning)" }}>{t("automation.preview.timezoneFallback")}</p> : null}
       {preview.next_fires.length > 0 ? (
         <details>
           <summary className="cursor-pointer text-text-muted">{t("automation.preview.details")}</summary>

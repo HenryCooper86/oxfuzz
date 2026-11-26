@@ -36,7 +36,7 @@ function fmtDuration(secs: number | null): string {
 const STATUS_COLOR: Record<string, string> = {
   Done: "var(--success)",
   Running: "var(--accent)",
-  Pending: "var(--warning, #d9a441)",
+  Pending: "var(--warning)",
   Cancelled: "var(--text-muted)",
   Failed: "var(--error)",
 };
@@ -536,7 +536,7 @@ function ScopedRunsView({ onNavigate, focusedId, onClearFocus, onReviewFindings 
       {diff !== null && (
         <div
           className="fixed inset-0 z-9999 flex items-center justify-center"
-          style={{ background: "rgba(0,0,0,0.5)", backdropFilter: "blur(2px)" }}
+          style={{ background: "var(--overlay)", backdropFilter: "blur(2px)" }}
           onClick={() => setDiff(null)}
         >
           <div
@@ -588,7 +588,7 @@ function ScopedRunsView({ onNavigate, focusedId, onClearFocus, onReviewFindings 
 
 function MorningHealth({ summary, loading, error, t, onSelect }: { onSelect: (id: string) => void; summary: MorningHealthSummary | null; loading: boolean; error: string | null; t: (key: string) => string }) {
   if (loading) return <p className="text-sm text-text-muted" role="status">{t("runs.healthLoading")}</p>;
-  if (error) return <p className="text-sm" role="alert" style={{ color: "var(--warning, #d9a441)" }}>{t("runs.healthUnavailable")}</p>;
+  if (error) return <p className="text-sm" role="alert" style={{ color: "var(--warning)" }}>{t("runs.healthUnavailable")}</p>;
   if (!summary) return <p className="text-sm text-text-muted">{t("runs.healthUnknown")}</p>;
   const groups: Array<[string, string[]]> = [["runs.healthFailed", summary.failed], ["runs.healthStalled", summary.stalled], ["runs.healthInterrupted", summary.interrupted], ["runs.healthUnprocessed", summary.unprocessed]];
   return <section className="surface-card flex flex-col gap-2" style={{ padding: "var(--space-md)" }} aria-label={t("runs.healthTitle")}>

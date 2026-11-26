@@ -26,7 +26,7 @@ type Status = { ok: boolean; message: string } | null;
 function StatusLine({ status }: { status: Status }) {
   if (!status) return null;
   return (
-    <span role={status.ok ? "status" : "alert"} className="text-xs" style={{ color: status.ok ? "var(--success, #10b981)" : "var(--danger, #ef4444)" }}>
+    <span role={status.ok ? "status" : "alert"} className="text-xs" style={{ color: status.ok ? "var(--success)" : "var(--error)" }}>
       {status.message}
     </span>
   );
@@ -118,7 +118,7 @@ export function NotificationsTab() {
   }
 
   if (loadError) {
-    return <div role="alert" className="text-sm" style={{ color: "var(--danger, #ef4444)" }}>{loadError}</div>;
+    return <div role="alert" className="text-sm" style={{ color: "var(--error)" }}>{loadError}</div>;
   }
   if (!draft) return <div className="text-xs text-text-muted">{t("common.loading")}</div>;
 

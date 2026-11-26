@@ -121,6 +121,6 @@ function ManagedMutatorForm({ project, target, engine, lang, harnessId, disabled
       {grammarSource !== null && <pre aria-label={t("parityHarness.grammarSource")} className="text-xs p-2 mt-2 overflow-auto max-h-60" style={{ whiteSpace: "pre-wrap", background: "var(--surface-code)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", fontFamily: "var(--font-mono)" }}>{grammarSource}</pre>}
     </details>}
     {imported && <p role="status" className="text-xs">{t("mutator.next")}</p>}
-    {error && <p role="alert" className="text-xs" style={{ color: "var(--danger)" }}>{error}</p>}
+    {error && <p role="alert" className="text-xs" style={{ color: "var(--error)" }}>{error}</p>}
   </section>;
 }

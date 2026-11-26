@@ -76,7 +76,7 @@ export function IssueDraft({ draft, project }: { draft: IssueExport; project: st
           )}
         </div>
         {!draft.issue_url && (
-          <div role="note" className="flex items-start gap-2 text-xs rounded-md" style={{ padding: "var(--space-sm)", background: "rgba(217,119,6,0.12)", color: "#d97706", border: "1px solid rgba(217,119,6,0.35)" }}>
+          <div role="note" className="flex items-start gap-2 text-xs rounded-md" style={{ padding: "var(--space-sm)", background: "var(--warning-subtle)", color: "var(--warning)", border: "1px solid color-mix(in srgb, var(--warning) 40%, transparent)" }}>
             <AlertTriangle size={14} />
             <span>{t("dashboard.noIssueTracker")}</span>
           </div>

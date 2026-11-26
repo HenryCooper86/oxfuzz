@@ -40,10 +40,10 @@ export function SandboxBanner() {
   return (
     <div
       className="surface-card flex items-start gap-3"
-      style={{ padding: "var(--space-md)", borderLeft: "3px solid var(--warning, #d9a441)" }}
+      style={{ padding: "var(--space-md)", borderLeft: "3px solid var(--warning)" }}
       role="status"
     >
-      <AlertTriangle size={18} style={{ color: "var(--warning, #d9a441)", flexShrink: 0, marginTop: 1 }} />
+      <AlertTriangle size={18} style={{ color: "var(--warning)", flexShrink: 0, marginTop: 1 }} />
       <div className="min-w-0">
         <p className="text-sm font-medium text-text-primary">{title}</p>
         <p className="text-xs text-text-secondary mt-1" style={{ lineHeight: 1.5 }}>

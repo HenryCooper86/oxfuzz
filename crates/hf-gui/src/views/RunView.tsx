@@ -380,7 +380,7 @@ export function RunView({
       {/* No target for this project yet (e.g. opened Run straight from Projects):
           the run button is disabled, so point the user at where to get one. */}
       {!isSyz && !target && project && !running && (
-        <div className="surface-card text-sm" style={{ padding: "var(--space-md)", borderLeft: "3px solid var(--warning, #d9a441)" }}>
+        <div className="surface-card text-sm" style={{ padding: "var(--space-md)", borderLeft: "3px solid var(--warning)" }}>
           {t("run.noTargetSelected")}
           {onNavigate ? (
             <>
@@ -401,7 +401,7 @@ export function RunView({
       )}
 
       {!isSyz && target && project && !running && (!harnessBuilt || !harnessApproved) && (
-        <div className="surface-card text-sm" style={{ padding: "var(--space-md)", borderLeft: "3px solid var(--warning, #d9a441)" }}>
+        <div className="surface-card text-sm" style={{ padding: "var(--space-md)", borderLeft: "3px solid var(--warning)" }}>
           {!harnessBuilt
             ? t("run.harnessMissing")
             : t("run.harnessNotApproved")}
@@ -539,7 +539,7 @@ export function RunView({
           <span className="text-sm font-semibold">{t("run.healthHistory")}</span>
           {healthState?.loading && <p role="status" className="text-xs">{t("run.healthLoading")}</p>}
           {healthState?.error && <p role="alert" className="text-xs">{t("run.healthUnavailable")}: {t(healthState.error)}</p>}
-          {healthEvents.map((event) => <div key={event.id} className="text-xs" style={{ color: event.severity === "error" ? "var(--error)" : "var(--warning, #d9a441)" }}>{event.condition}: {event.detail}</div>)}
+          {healthEvents.map((event) => <div key={event.id} className="text-xs" style={{ color: event.severity === "error" ? "var(--error)" : "var(--warning)" }}>{event.condition}: {event.detail}</div>)}
           {loadOlderHealthEvents && healthState?.hasOlder && <Button disabled={healthState.loading} variant="ghost" size="sm" onClick={() => void loadOlderHealthEvents()}>{t("run.loadOlderHealth")}</Button>}
         </section>
       )}

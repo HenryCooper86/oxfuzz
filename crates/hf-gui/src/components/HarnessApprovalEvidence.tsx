@@ -59,8 +59,8 @@ export function HarnessApprovalEvidence({ item }: { item: HarnessReviewItem }) {
                 data-testid="harness-evidence-bypassed-review"
                 style={{
                   background: "var(--surface-active)",
-                  border: "1px solid var(--warning, #e5a000)",
-                  color: "var(--warning, #e5a000)",
+                  border: "1px solid var(--warning)",
+                  color: "var(--warning)",
                 }}
               >
                 {localized(t, "harness.evidence.reviewBypassed", "LLM review bypassed")}:{" "}
@@ -86,8 +86,8 @@ export function HarnessApprovalEvidence({ item }: { item: HarnessReviewItem }) {
               data-testid="harness-evidence-no-review"
               style={{
                 background: "var(--surface-active)",
-                border: "1px solid var(--warning, #e5a000)",
-                color: "var(--warning, #e5a000)",
+                border: "1px solid var(--warning)",
+                color: "var(--warning)",
               }}
             >
               {localized(
@@ -140,7 +140,7 @@ export function HarnessApprovalEvidence({ item }: { item: HarnessReviewItem }) {
             {localized(t, "harness.evidence.lint", "Lint findings")}
           </span>
           {blockingLint.length > 0 ? (
-            <ShieldX size={14} style={{ color: "var(--danger, #e5484d)" }} />
+            <ShieldX size={14} style={{ color: "var(--error)" }} />
           ) : (
             <FileWarning size={14} className="text-text-muted" />
           )}
@@ -157,8 +157,8 @@ export function HarnessApprovalEvidence({ item }: { item: HarnessReviewItem }) {
                   style={{
                     color:
                       finding.severity === "error"
-                        ? "var(--danger, #e5484d)"
-                        : "var(--warning, #e5a000)",
+                        ? "var(--error)"
+                        : "var(--warning)",
                     fontFamily: "var(--font-mono)",
                   }}
                 >

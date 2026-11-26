@@ -40,7 +40,7 @@ export function Select({
         aria-labelledby={ariaLabelledBy}
         aria-label={ariaLabel}
         title={selectedLabel ?? placeholder}
-        className={`inline-flex h-9 min-w-0 max-w-full items-center justify-between gap-2 px-2 py-1.5 text-12px border border-solid border-[var(--border)] rounded-[var(--radius-md)] bg-[var(--surface-primary)] text-text-primary transition-colors duration-150 outline-none focus:border-[var(--border-focus)] cursor-pointer data-[disabled]:cursor-not-allowed data-[disabled]:opacity-50 ${mono ? "font-[var(--font-mono)]" : "font-sans"} ${className ?? ""}`}
+        className={`inline-flex h-9 min-w-0 max-w-full items-center justify-between gap-2 px-2 py-1.5 text-12px border border-solid border-[var(--border-strong)] rounded-[var(--radius-md)] bg-[var(--surface-primary)] text-text-primary transition-[border-color,box-shadow] duration-150 outline-none hover:border-[var(--border-focus)] focus:border-[var(--accent)] focus:shadow-[0_0_0_3px_var(--accent-glow)] cursor-pointer data-[disabled]:cursor-not-allowed data-[disabled]:opacity-50 ${mono ? "font-[var(--font-mono)]" : "font-sans"} ${className ?? ""}`}
       >
         <span className="min-w-0 flex-1 truncate text-left">
           <RadixSelect.Value placeholder={placeholder} />
@@ -53,15 +53,15 @@ export function Select({
         <RadixSelect.Content
           position="popper"
           sideOffset={4}
-          className={`overflow-hidden border border-solid border-[var(--border)] rounded-[var(--radius-md)] bg-[var(--surface-primary)] text-text-primary z-50 ${mono ? "font-[var(--font-mono)]" : "font-sans"}`}
-          style={{ boxShadow: "0 8px 24px rgba(0,0,0,0.25)", maxHeight: "300px", maxWidth: "var(--radix-select-content-available-width)" }}
+          className={`overflow-hidden border border-solid border-[var(--border-strong)] rounded-[var(--radius-md)] bg-[var(--surface-raised)] text-text-primary z-50 ${mono ? "font-[var(--font-mono)]" : "font-sans"}`}
+          style={{ boxShadow: "var(--shadow-md)", animation: "fadeIn 0.12s ease", maxHeight: "300px", maxWidth: "var(--radix-select-content-available-width)" }}
         >
           <RadixSelect.Viewport className="p-1" style={{ maxHeight: "300px" }}>
             {options.map((o) => (
               <RadixSelect.Item
                 key={o.value}
                 value={o.value}
-                className="relative flex min-w-0 items-center whitespace-normal [overflow-wrap:anywhere] pl-7 pr-2 py-1.5 text-12px rounded-[var(--radius-sm)] cursor-pointer outline-none select-none data-[highlighted]:bg-[var(--surface-hover)]"
+                className="relative flex min-w-0 items-center whitespace-normal [overflow-wrap:anywhere] pl-7 pr-2 py-1.5 text-12px rounded-[var(--radius-sm)] cursor-pointer outline-none select-none data-[highlighted]:bg-[var(--surface-active)] data-[state=checked]:font-500"
               >
                 <RadixSelect.ItemIndicator className="absolute left-2 inline-flex items-center text-[var(--accent)]">
                   <Check size={13} />

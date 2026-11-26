@@ -12,7 +12,7 @@ export function DiffView({ oldText, newText }: { oldText: string; newText: strin
         <div
           key={i}
           style={{
-            background: d.type === "add" ? "rgba(111,207,151,0.12)" : d.type === "del" ? "rgba(229,72,77,0.12)" : "transparent",
+            background: d.type === "add" ? "var(--success-subtle)" : d.type === "del" ? "var(--error-subtle)" : "transparent",
             color: d.type === "add" ? "var(--success)" : d.type === "del" ? "var(--error)" : "var(--text-secondary)",
             whiteSpace: "pre-wrap",
           }}

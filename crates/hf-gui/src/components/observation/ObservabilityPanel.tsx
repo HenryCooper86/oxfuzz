@@ -89,7 +89,7 @@ function ProviderCard({ p, onThawed }: { p: ProviderSnapshot; onThawed: () => vo
           </Button>
         )}
       </div>
-      {thawError && <div role="alert" className="obs-no-items" style={{ color: "var(--danger, #ef4444)" }}>{thawError}</div>}
+      {thawError && <div role="alert" className="obs-no-items" style={{ color: "var(--error)" }}>{thawError}</div>}
 
       {p.tags.length > 0 && (
         <div className="obs-tags">

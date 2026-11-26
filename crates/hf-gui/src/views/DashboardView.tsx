@@ -1408,8 +1408,8 @@ function StatusBadge({ value, tone }: { value: string; tone?: "ok" | "warn" }) {
     <span
       className="text-xs px-2 py-0.5 rounded-sm"
       style={{
-        background: ok ? "rgba(34,197,94,0.12)" : warn ? "rgba(217,119,6,0.12)" : "var(--surface-active)",
-        color: ok ? "var(--success)" : warn ? "#d97706" : "var(--text-secondary)",
+        background: ok ? "var(--success-subtle)" : warn ? "var(--warning-subtle)" : "var(--surface-active)",
+        color: ok ? "var(--success)" : warn ? "var(--warning)" : "var(--text-secondary)",
         whiteSpace: "nowrap",
       }}
     >
@@ -1423,8 +1423,8 @@ function InlineNotice({ tone, text }: { tone: "ok" | "warn" | "error"; text: str
     tone === "error"
       ? { background: "var(--error-subtle)", color: "var(--error)", border: "1px solid var(--error)" }
       : tone === "warn"
-        ? { background: "rgba(217,119,6,0.12)", color: "#d97706", border: "1px solid rgba(217,119,6,0.35)" }
-        : { background: "rgba(34,197,94,0.12)", color: "var(--success)", border: "1px solid rgba(34,197,94,0.35)" };
+        ? { background: "var(--warning-subtle)", color: "var(--warning)", border: "1px solid color-mix(in srgb, var(--warning) 40%, transparent)" }
+        : { background: "var(--success-subtle)", color: "var(--success)", border: "1px solid color-mix(in srgb, var(--success) 40%, transparent)" };
   return (
     <div className="flex items-start gap-2 text-xs rounded-md" style={{ padding: "var(--space-sm)", ...style }}>
       <AlertTriangle size={14} />

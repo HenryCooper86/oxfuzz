@@ -97,7 +97,7 @@ function IconBtn({ onClick, icon, danger, title }: { onClick: () => void; icon: 
 }
 function ErrorBanner({ message }: { message: string }) {
   return (
-    <div role="alert" className="text-xs rounded-md px-3 py-2" style={{ background: "var(--error-subtle, rgba(220,60,60,0.12))", color: "var(--error)", border: "1px solid var(--error)" }}>
+    <div role="alert" className="text-xs rounded-md px-3 py-2" style={{ background: "var(--error-subtle)", color: "var(--error)", border: "1px solid var(--error)" }}>
       {message}
     </div>
   );
@@ -1016,12 +1016,12 @@ function ProjectKnowledgeSearch({ project }: { project: string }) {
       )}
       {current && <KnowledgeIndexDetails status={current} />}
       {current?.legacy_documents_preserved && (
-        <p className="text-xs" style={{ color: "var(--warning, #d9a441)" }}>
+        <p className="text-xs" style={{ color: "var(--warning)" }}>
           {t("knowledge.legacyDocumentsPreserved")}
         </p>
       )}
       {!project && (
-        <p className="text-xs" style={{ color: "var(--warning, #d9a441)" }}>
+        <p className="text-xs" style={{ color: "var(--warning)" }}>
           {t("knowledge.selectProjectFirst")}
         </p>
       )}
@@ -1029,7 +1029,7 @@ function ProjectKnowledgeSearch({ project }: { project: string }) {
         <div
           role="alert"
           className="text-xs rounded-md"
-          style={{ padding: "var(--space-sm)", background: "var(--surface-code)", color: "var(--danger, #e5484d)", border: "1px solid var(--danger, #e5484d)" }}
+          style={{ padding: "var(--space-sm)", background: "var(--surface-code)", color: "var(--error)", border: "1px solid var(--error)" }}
         >
           {error}
         </div>
@@ -1245,8 +1245,8 @@ interface SchedulableTarget {
 }
 
 const EXEC_STATUS_COLOR: Record<string, string> = {
-  completed: "var(--accent)",
-  running: "#d97706",
+  completed: "var(--success)",
+  running: "var(--accent)",
   failed: "var(--error)",
   skipped: "var(--text-muted)",
   pending: "var(--text-muted)",

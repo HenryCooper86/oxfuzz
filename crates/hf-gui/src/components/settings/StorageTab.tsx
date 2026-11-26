@@ -100,13 +100,13 @@ function DesktopStorageTab() {
           className="settings-item flex items-start gap-3"
           style={{
             padding: "var(--space-md)",
-            borderLeft: "3px solid var(--warning, #d9a441)",
+            borderLeft: "3px solid var(--warning)",
             background: "var(--surface-secondary)",
           }}
         >
           <AlertTriangle
             size={18}
-            style={{ color: "var(--warning, #d9a441)", flexShrink: 0, marginTop: 1 }}
+            style={{ color: "var(--warning)", flexShrink: 0, marginTop: 1 }}
           />
           <div className="flex flex-1 flex-col gap-1 min-w-0">
             <span className="text-sm font-semibold text-text-primary">{t("common.warning")}</span>

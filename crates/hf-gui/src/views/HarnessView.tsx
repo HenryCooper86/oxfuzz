@@ -601,7 +601,7 @@ export function HarnessView({
       {discoverError && (
         <div
           className="surface-card text-xs"
-          style={{ padding: "var(--space-sm) var(--space-md)", color: "var(--danger, #e5484d)", borderColor: "var(--danger, #e5484d)" }}
+          style={{ padding: "var(--space-sm) var(--space-md)", color: "var(--error)", borderColor: "var(--error)" }}
         >
           {t("harness.discoveryFailed", { error: discoverError })}
         </div>
@@ -799,7 +799,7 @@ export function HarnessView({
                         <div
                           key={i}
                           style={{
-                            background: d.type === "add" ? "rgba(111,207,151,0.12)" : d.type === "del" ? "rgba(229,72,77,0.12)" : "transparent",
+                            background: d.type === "add" ? "var(--success-subtle)" : d.type === "del" ? "var(--error-subtle)" : "transparent",
                             color: d.type === "add" ? "var(--success)" : d.type === "del" ? "var(--error)" : "var(--text-secondary)",
                             whiteSpace: "pre-wrap",
                           }}
@@ -1070,7 +1070,7 @@ function Step({
           className="flex items-center justify-center rounded-full shrink-0"
           style={{
             width: "28px", height: "28px",
-            background: status === "done" ? "rgba(111,207,151,0.1)" : "var(--surface-active)",
+            background: status === "done" ? "var(--success-subtle)" : "var(--surface-active)",
             border: `1px solid ${colors[status]}`,
             color: colors[status],
             fontSize: "12px", fontWeight: 600,

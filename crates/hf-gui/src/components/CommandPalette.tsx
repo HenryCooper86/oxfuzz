@@ -80,7 +80,7 @@ export function CommandPalette({ onNavigate }: { onNavigate: (view: ViewType) =>
       <Dialog.Portal>
         <Dialog.Overlay
           className="fixed inset-0 z-9999"
-          style={{ background: "rgba(0,0,0,0.4)", backdropFilter: "blur(2px)" }}
+          style={{ background: "var(--overlay)", backdropFilter: "blur(2px)" }}
         />
         <Dialog.Content
           aria-describedby={undefined}
@@ -113,7 +113,7 @@ export function CommandPalette({ onNavigate }: { onNavigate: (view: ViewType) =>
               setActive(0);
             }}
             placeholder={t("palette.placeholder")}
-            className="flex-1 bg-transparent outline-none text-sm text-text-primary"
+            className="hf-bare-focus flex-1 bg-transparent outline-none text-sm text-text-primary"
             style={{ border: "none" }}
           />
           <kbd className="text-xs text-text-muted">{t("palette.esc")}</kbd>

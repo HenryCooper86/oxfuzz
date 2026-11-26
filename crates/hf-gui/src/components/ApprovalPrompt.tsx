@@ -125,7 +125,7 @@ export function ApprovalPrompt() {
   return (
     <div
       className="fixed inset-0 z-9999 flex items-center justify-center"
-      style={{ background: "rgba(0,0,0,0.5)", backdropFilter: "blur(2px)" }}
+      style={{ background: "var(--overlay)", backdropFilter: "blur(2px)" }}
     >
       <div
         role="alertdialog"

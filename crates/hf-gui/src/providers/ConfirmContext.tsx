@@ -48,7 +48,7 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
       {opts && (
         <div
           className="fixed inset-0 z-9999 flex items-center justify-center"
-          style={{ background: "rgba(0,0,0,0.5)", backdropFilter: "blur(2px)" }}
+          style={{ background: "var(--overlay)", backdropFilter: "blur(2px)" }}
           onClick={() => settle(false)}
           onKeyDown={(e) => {
             if (confirmationKeyboardAction(e.key) === "cancel") settle(false);
