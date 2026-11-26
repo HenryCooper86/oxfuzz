@@ -222,7 +222,11 @@ export function BinaryOutcome({ project, outcome }: { project: string; outcome: 
   return (
     <section className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md) var(--space-lg)" }} aria-label={t("binary.result")}>
       <div className="flex flex-col gap-1">
-        <h2 className="text-sm font-semibold text-text-primary">{t("binary.result")}</h2>
+        <h2 className="text-sm font-semibold text-text-primary flex items-center gap-2 flex-wrap">
+          {t("binary.result")}
+          {outcome.stopped && <Badge variant="warning">{t("binary.stoppedEarly")}</Badge>}
+          {outcome.compcov && <Badge variant="accent">{t("binary.compcovUsed")}</Badge>}
+        </h2>
         <p className="text-xs text-text-muted font-mono">
           {outcome.binary_name} · {outcome.machine} · {outcome.input} · {formatDuration(outcome.duration_secs)} · {t("binary.session")} {outcome.session}
         </p>

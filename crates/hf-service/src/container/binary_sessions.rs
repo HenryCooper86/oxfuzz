@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use chrono::{DateTime, Utc};
 use hf_core::error::ClassifiedError;
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::binary_issue::read_session_report;
@@ -41,6 +42,10 @@ pub(crate) struct ActiveBinarySession {
     started_at: DateTime<Utc>,
     duration_secs: u64,
     stage: BinaryStage,
+    /// Fired to stop the fuzz run; the session then reports what it found.
+    cancel: CancellationToken,
+    /// Whether a stop was requested.
+    stopping: bool,
 }
 
 /// The sessions running in this process, by session id.
@@ -69,6 +74,22 @@ pub(super) fn set_stage(registry: &BinarySessionRegistry, session: Uuid, stage: 
     }
 }
 
+/// Ask the session `session` of the project whose slug is `project` to stop.
+/// Returns whether such a session was running.
+pub(super) fn stop_session(registry: &BinarySessionRegistry, project: &str, session: Uuid) -> bool {
+    let Ok(mut sessions) = registry.lock() else {
+        return false;
+    };
+    match sessions.get_mut(&session) {
+        Some(active) if active.project == project => {
+            active.stopping = true;
+            active.cancel.cancel();
+            true
+        }
+        _ => false,
+    }
+}
+
 /// A running session as the desktop polls it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BinaryProgress {
@@ -84,6 +105,8 @@ pub struct BinaryProgress {
     pub corpus_count: Option<u64>,
     pub saved_crashes: Option<u64>,
     pub saved_hangs: Option<u64>,
+    /// Whether a stop was requested; the fuzz run is ending.
+    pub stopping: bool,
 }
 
 /// One earlier session, as the history lists it.
@@ -136,6 +159,7 @@ fn progress_of(id: Uuid, active: &ActiveBinarySession, now: DateTime<Utc>) -> Bi
         corpus_count: stats.as_ref().and_then(|stats| stats.corpus_count),
         saved_crashes: stats.as_ref().and_then(|stats| stats.saved_crashes),
         saved_hangs: stats.as_ref().and_then(|stats| stats.saved_hangs),
+        stopping: active.stopping,
     }
 }
 
@@ -254,7 +278,8 @@ impl ServiceContainer {
         Arc::clone(&self.binary_sessions)
     }
 
-    /// Register a starting session; it is removed when the guard drops.
+    /// Register a starting session; it is removed when the guard drops. The
+    /// token fires when the operator stops the session.
     pub(super) fn track_binary_session(
         &self,
         session: Uuid,
@@ -262,7 +287,8 @@ impl ServiceContainer {
         binary_name: String,
         root: &Path,
         duration_secs: u64,
-    ) -> ActiveSessionGuard {
+    ) -> (ActiveSessionGuard, CancellationToken) {
+        let cancel = CancellationToken::new();
         if let Ok(mut sessions) = self.binary_sessions.lock() {
             sessions.insert(
                 session,
@@ -273,13 +299,26 @@ impl ServiceContainer {
                     started_at: Utc::now(),
                     duration_secs,
                     stage: BinaryStage::Preparing,
+                    cancel: cancel.clone(),
+                    stopping: false,
                 },
             );
         }
-        ActiveSessionGuard {
-            registry: self.binary_session_registry(),
-            session,
-        }
+        (
+            ActiveSessionGuard {
+                registry: self.binary_session_registry(),
+                session,
+            },
+            cancel,
+        )
+    }
+
+    /// Stop the running session `session` of `project`: its fuzz run ends,
+    /// and the session still replays, groups and reports what it found.
+    /// Returns whether such a session was running.
+    #[must_use]
+    pub fn binary_stop(&self, project: &Path, session: Uuid) -> bool {
+        stop_session(&self.binary_sessions, &project_slug(project), session)
     }
 
     /// The progress of the binary-only session running for `project` in this
@@ -369,6 +408,8 @@ mod tests {
             finished_at: DateTime::from_timestamp(finished, 0),
             continued_from: None,
             dictionary_tokens: 0,
+            compcov: false,
+            stopped: false,
         }
     }
 
@@ -509,6 +550,8 @@ mod tests {
             started_at: started,
             duration_secs: 60,
             stage: BinaryStage::Fuzzing,
+            cancel: CancellationToken::new(),
+            stopping: false,
         };
         let id = Uuid::new_v4();
         let now = DateTime::from_timestamp(1_030, 0).unwrap();
@@ -546,6 +589,8 @@ mod tests {
                 started_at: Utc::now(),
                 duration_secs: 60,
                 stage: BinaryStage::Preparing,
+                cancel: CancellationToken::new(),
+                stopping: false,
             },
         );
         set_stage(&registry, id, BinaryStage::Replaying);
@@ -555,6 +600,39 @@ mod tests {
             session: id,
         });
         assert!(registry.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn stopping_fires_the_sessions_token_and_shows_in_progress() {
+        let registry: BinarySessionRegistry = Arc::default();
+        let id = Uuid::new_v4();
+        let cancel = CancellationToken::new();
+        registry.lock().unwrap().insert(
+            id,
+            ActiveBinarySession {
+                project: "demo".to_owned(),
+                binary_name: "picinfo".to_owned(),
+                root: PathBuf::from("/nowhere"),
+                started_at: Utc::now(),
+                duration_secs: 60,
+                stage: BinaryStage::Fuzzing,
+                cancel: cancel.clone(),
+                stopping: false,
+            },
+        );
+        assert!(
+            !stop_session(&registry, "other", id),
+            "another project's session"
+        );
+        assert!(
+            !stop_session(&registry, "demo", Uuid::new_v4()),
+            "an unknown session"
+        );
+        assert!(!cancel.is_cancelled());
+        assert!(stop_session(&registry, "demo", id));
+        assert!(cancel.is_cancelled());
+        let sessions = registry.lock().unwrap();
+        assert!(progress_of(id, &sessions[&id], Utc::now()).stopping);
     }
 
     #[test]

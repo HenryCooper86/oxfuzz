@@ -1,6 +1,6 @@
 import "../../i18n.parityBinary";
 import { useState } from "react";
-import { History, Play, RotateCcw, Sparkles, TriangleAlert } from "lucide-react";
+import { History, Play, RotateCcw, Sparkles, Square, TriangleAlert } from "lucide-react";
 import { Badge, Button, Input, Switch, Textarea } from "../ui";
 import { useI18n } from "../../i18nContext";
 import {
@@ -175,8 +175,10 @@ export function SeedDraftPanel({ project, binary, input, usedDirectory, onUse }:
 }
 
 /** Live session progress: stage, elapsed time and AFL++'s counters. */
-export function ProgressPanel({ progress }: { progress: BinaryProgress | null }) {
+export function ProgressPanel({ progress, onStop }: { progress: BinaryProgress | null; onStop: (session: string) => Promise<void> }) {
   const { t } = useI18n();
+  const [stopError, setStopError] = useState<string | null>(null);
+  const stopping = progress?.stopping === true;
   const stageIndex = progress ? BINARY_STAGES.indexOf(progress.stage) : 0;
   const share = progress && progress.duration_secs > 0
     ? Math.min(100, (progress.elapsed_secs / progress.duration_secs) * 100) : 0;
@@ -192,12 +194,22 @@ export function ProgressPanel({ progress }: { progress: BinaryProgress | null })
     <section role="status" aria-live="polite" className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md) var(--space-lg)" }} aria-label={t("binary.progress")}>
       <div className="flex items-center justify-between gap-3 flex-wrap">
         <h2 className="text-sm font-semibold text-text-primary">{t("binary.progress")}</h2>
-        {progress && (
-          <span className="text-xs text-text-secondary tabular-nums">
-            {t("binary.elapsed", { elapsed: formatDuration(Math.min(progress.elapsed_secs, progress.duration_secs)), duration: formatDuration(progress.duration_secs) })}
-          </span>
-        )}
+        <div className="flex items-center gap-3">
+          {progress && (
+            <span className="text-xs text-text-secondary tabular-nums">
+              {t("binary.elapsed", { elapsed: formatDuration(Math.min(progress.elapsed_secs, progress.duration_secs)), duration: formatDuration(progress.duration_secs) })}
+            </span>
+          )}
+          <Button
+            variant="outline" size="sm" disabled={!progress || stopping || progress.stage !== "fuzzing"}
+            loading={stopping}
+            onClick={() => { if (progress) onStop(progress.session).catch((e) => setStopError(`${t("binary.stopFailed")}: ${String(e)}`)); }}
+          >
+            {!stopping && <Square size={12} />}{t(stopping ? "binary.stopping" : "binary.stop")}
+          </Button>
+        </div>
       </div>
+      {stopError && <p role="alert" className="text-xs text-error">{stopError}</p>}
       <ol className="hf-stages">
         {BINARY_STAGES.map((stage, index) => (
           <li key={stage} data-state={index < stageIndex ? "done" : index === stageIndex ? "current" : "next"}>{t(`binary.stage.${stage}`)}</li>

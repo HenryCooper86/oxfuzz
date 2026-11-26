@@ -30,6 +30,7 @@ use hf_core::runtime::{
 use hf_core::target::Sanitizer;
 use hf_guardrails::Action;
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::harness::sha256_hex;
@@ -441,6 +442,9 @@ pub struct BinaryFuzzRequest {
     /// An earlier session of the same binary in this project whose queue
     /// seeds this session's corpus, so its coverage carries over.
     pub continue_from: Option<Uuid>,
+    /// Split multi-byte comparisons in the emulator (`AFL_COMPCOV_LEVEL=2`)
+    /// so AFL++ can solve magic values byte by byte. Fuzz run only.
+    pub compcov: bool,
 }
 
 /// A finding's input after minimization, replayed and found to be the same
@@ -529,6 +533,12 @@ pub struct BinaryFuzzOutcome {
     /// Tokens in the operator's dictionary; zero when none was used.
     #[serde(default)]
     pub dictionary_tokens: usize,
+    /// Whether the emulator split comparisons (`CompCov`) during the fuzz run.
+    #[serde(default)]
+    pub compcov: bool,
+    /// Whether the operator stopped the fuzz run before its duration ended.
+    #[serde(default)]
+    pub stopped: bool,
 }
 
 /// Where a running session is.
@@ -747,12 +757,22 @@ fn session_sandbox(root: &Path, stdin: Option<Vec<u8>>) -> SandboxOptions {
     }
 }
 
-/// The environment of the fuzz run.
+/// The level `afl-qemu-trace` splits comparisons at: 2 is every comparison
+/// against an immediate or a register, not only read-only memory.
+const COMPCOV_LEVEL: &str = "2";
+
+/// The environment of the fuzz run. `CompCov` is read by the emulator itself,
+/// so it is a plain variable and not part of `QEMU_SET_ENV`.
 fn session_env(
     libraries: bool,
     input: BinaryInput,
+    compcov: bool,
 ) -> Result<HashMap<String, String>, ClassifiedError> {
-    emulated_env(libraries, input, false)
+    let mut env = emulated_env(libraries, input, false)?;
+    if compcov {
+        env.insert("AFL_COMPCOV_LEVEL".to_owned(), COMPCOV_LEVEL.to_owned());
+    }
+    Ok(env)
 }
 
 /// The environment of a replay: the fuzz run's, plus the crash reporter in
@@ -1178,6 +1198,7 @@ async fn run_session(
     admitted: AdmittedBinary,
     extras: &StagedExtras,
     stage: &StageReporter<'_>,
+    cancel: &CancellationToken,
 ) -> Result<BinaryFuzzOutcome, ClassifiedError> {
     let started_at = Utc::now();
     stage(BinaryStage::Preparing);
@@ -1198,21 +1219,31 @@ async fn run_session(
     }
 
     stage(BinaryStage::Fuzzing);
+    // The streaming call is the runtime's cancellable one; the fuzzer's
+    // output lines are not needed while it runs (progress reads its stats).
     let result = runtime
-        .run_command_opts(
+        .run_command_streaming_opts(
             &admitted.command,
             root,
             &limits(
                 request.duration_secs + SHUTDOWN_GRACE_SECS,
-                session_env(libraries, request.input)?,
+                session_env(libraries, request.input, request.compcov)?,
             ),
             &session_sandbox(root, None),
+            cancel,
+            &|_| {},
         )
         .await?;
+    let stopped = result.termination == CommandTermination::Cancelled;
     let stats = std::fs::read(root.join(OUTPUT_DIR).join("default").join("fuzzer_stats"))
         .ok()
         .and_then(|contents| hf_engine::afl::parse_fuzzer_stats(&contents).ok());
     let Some(stats) = stats else {
+        if stopped {
+            return Err(invalid(
+                "the session was stopped before AFL++ started fuzzing; nothing was found",
+            ));
+        }
         // AFL++ never reached its fuzzing loop: the target could not be
         // started under the emulator, or every seed failed the dry run.
         let output = format!("{}\n{}", result.stdout, result.stderr);
@@ -1265,6 +1296,8 @@ async fn run_session(
         finished_at: Some(Utc::now()),
         continued_from: request.continue_from,
         dictionary_tokens: request.dictionary.len(),
+        compcov: request.compcov,
+        stopped,
     };
     let report = serde_json::to_vec_pretty(&outcome)
         .map_err(|error| ClassifiedError::Internal(format!("encode report: {error}")))?;
@@ -1318,7 +1351,7 @@ impl ServiceContainer {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let _active = self.track_binary_session(
+        let (_active, cancel) = self.track_binary_session(
             session,
             &request.project,
             binary_name,
@@ -1340,6 +1373,7 @@ impl ServiceContainer {
                 carried,
             },
             &stage,
+            &cancel,
         )
         .await
     }
@@ -1385,6 +1419,25 @@ mod tests {
         );
         assert_eq!(ElfMachine::from_uname("x86_64"), Some(ElfMachine::X86_64));
         assert_eq!(ElfMachine::from_uname("riscv64"), None);
+    }
+
+    #[test]
+    fn compcov_is_set_for_the_fuzz_run_only() {
+        let fuzz = session_env(false, BinaryInput::File, true).unwrap();
+        assert_eq!(fuzz.get("AFL_COMPCOV_LEVEL").map(String::as_str), Some("2"));
+        // The emulator reads it, not the emulated process.
+        assert!(!fuzz
+            .get("QEMU_SET_ENV")
+            .is_some_and(|value| value.contains("COMPCOV")));
+        assert!(!session_env(false, BinaryInput::File, false)
+            .unwrap()
+            .contains_key("AFL_COMPCOV_LEVEL"));
+        assert!(!replay_env(false, BinaryInput::File)
+            .unwrap()
+            .contains_key("AFL_COMPCOV_LEVEL"));
+        assert!(!minimize_env(false, BinaryInput::File)
+            .unwrap()
+            .contains_key("AFL_COMPCOV_LEVEL"));
     }
 
     #[test]
@@ -1441,6 +1494,7 @@ mod tests {
             timeout_ms: 1000,
             dictionary: vec!["PIC1".to_owned()],
             continue_from: None,
+            compcov: false,
         };
         let extras = StagedExtras {
             dictionary: Some("token_0001=\"PIC1\"\n".to_owned()),
@@ -1554,6 +1608,7 @@ mod tests {
             timeout_ms: 1000,
             dictionary: Vec::new(),
             continue_from: None,
+            compcov: false,
         };
         assert!(stage_session(
             root.path(),
@@ -1591,13 +1646,13 @@ mod tests {
             DEFAULT_SEED
         );
         assert_eq!(
-            session_env(true, BinaryInput::File)
+            session_env(true, BinaryInput::File, false)
                 .unwrap()
                 .get("QEMU_SET_ENV")
                 .map(String::as_str),
             Some("LD_LIBRARY_PATH=/work/libs")
         );
-        assert!(!session_env(false, BinaryInput::Stdin)
+        assert!(!session_env(false, BinaryInput::Stdin, false)
             .unwrap()
             .contains_key("QEMU_SET_ENV"));
         assert!(!bare.path().join("desock").exists());
@@ -1615,14 +1670,14 @@ mod tests {
         );
 
         // The emulator passes the preload to the emulated process only.
-        let env = session_env(false, BinaryInput::Socket).unwrap();
+        let env = session_env(false, BinaryInput::Socket, false).unwrap();
         assert_eq!(
             env.get("QEMU_SET_ENV").map(String::as_str),
             Some("LD_PRELOAD=/work/desock/oxfuzz_desock.so")
         );
         assert!(!env.contains_key("LD_PRELOAD") && !env.contains_key("AFL_PRELOAD"));
         assert_eq!(
-            session_env(true, BinaryInput::Socket)
+            session_env(true, BinaryInput::Socket, false)
                 .unwrap()
                 .get("QEMU_SET_ENV")
                 .map(String::as_str),
@@ -1641,6 +1696,7 @@ mod tests {
             timeout_ms: 1000,
             dictionary: Vec::new(),
             continue_from: None,
+            compcov: false,
         };
         stage_session(root.path(), b"\x7fELF", &request, &StagedExtras::default()).unwrap();
         let shim = std::fs::read_to_string(root.path().join("desock/oxfuzz_desock.c")).unwrap();
@@ -1696,7 +1752,7 @@ mod tests {
     #[test]
     fn a_replay_preloads_the_crash_reporter_and_the_fuzz_run_does_not() {
         // Fuzzing pays for no reporter; only replays load it.
-        assert!(!session_env(false, BinaryInput::File)
+        assert!(!session_env(false, BinaryInput::File, false)
             .unwrap()
             .contains_key("QEMU_SET_ENV"));
         assert_eq!(
@@ -1745,6 +1801,7 @@ mod tests {
             timeout_ms: 1000,
             dictionary: Vec::new(),
             continue_from: None,
+            compcov: false,
         };
         stage_session(root.path(), b"\x7fELF", &request, &StagedExtras::default()).unwrap();
         let shim =
@@ -1885,6 +1942,8 @@ mod tests {
             finished_at: None,
             continued_from: None,
             dictionary_tokens: 0,
+            compcov: false,
+            stopped: false,
         };
         let json = serde_json::to_string(&outcome).unwrap();
         let read: BinaryFuzzOutcome = serde_json::from_str(&json).unwrap();
@@ -1924,7 +1983,7 @@ mod tests {
         // Only a message session asks the shim to split the input, in the
         // fuzz run, the replays and the minimizer alike.
         assert_eq!(
-            session_env(false, BinaryInput::SocketMessages)
+            session_env(false, BinaryInput::SocketMessages, false)
                 .unwrap()
                 .get("QEMU_SET_ENV")
                 .map(String::as_str),
@@ -1945,7 +2004,7 @@ mod tests {
             .unwrap()
             .get("QEMU_SET_ENV")
             .is_some_and(|env| env.ends_with("OXFUZZ_DESOCK_MESSAGES=1")));
-        assert!(!session_env(false, BinaryInput::Socket)
+        assert!(!session_env(false, BinaryInput::Socket, false)
             .unwrap()
             .get("QEMU_SET_ENV")
             .is_some_and(|env| env.contains("MESSAGES")));
@@ -1973,6 +2032,7 @@ mod tests {
             timeout_ms: 1000,
             dictionary: Vec::new(),
             continue_from: None,
+            compcov: false,
         };
         stage_session(root.path(), b"\x7fELF", &request, &StagedExtras::default()).unwrap();
         assert!(root.path().join("desock/oxfuzz_desock.c").is_file());
@@ -2256,6 +2316,7 @@ mod tests {
                 timeout_ms: 1000,
                 dictionary: Vec::new(),
                 continue_from: None,
+                compcov: false,
             };
             let session = Uuid::new_v4();
             let session_root = root.path().join(format!("session-{session}"));
@@ -2268,6 +2329,7 @@ mod tests {
                 admit(&request).unwrap(),
                 &StagedExtras::default(),
                 &|_| {},
+                &CancellationToken::new(),
             )
             .await
             .unwrap();
@@ -2392,6 +2454,7 @@ mod tests {
             timeout_ms: 1000,
             dictionary: tokens.clone(),
             continue_from: None,
+            compcov: false,
         };
         let first_root = root.path().join("first");
         std::fs::create_dir_all(&first_root).unwrap();
@@ -2406,6 +2469,7 @@ mod tests {
                 carried: Vec::new(),
             },
             &|_| {},
+            &CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -2446,6 +2510,7 @@ mod tests {
                 carried: carried.clone(),
             },
             &|_| {},
+            &CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -2464,6 +2529,89 @@ mod tests {
         assert!(staged > 0 && staged <= carried.len());
         assert_eq!(second.continued_from, Some(first.session));
         assert!(second.execs_done.unwrap_or(0) > 0);
+    }
+
+    const PLANTED_INTEGER_MAGIC_C: &str = "#include <stdint.h>\n#include <stdio.h>\n#include <string.h>\n\nint main(int argc, char **argv) {\n  unsigned char b[64] = {0};\n  FILE *f = fopen(argv[1], \"rb\");\n  if (!f) return 1;\n  size_t n = fread(b, 1, sizeof b, f);\n  fclose(f);\n  uint32_t v;\n  memcpy(&v, b, 4);\n  if (n >= 4 && v == 0x4f58465aU) {\n    volatile int *q = 0;\n    *q = 1;\n  }\n  return 0;\n}\n";
+
+    /// `CompCov` reaches a crash behind a 32-bit magic value, and stopping a
+    /// five-minute session after thirty seconds ends the fuzz run early while
+    /// the session still replays and reports what it found.
+    #[tokio::test]
+    #[ignore = "requires a local Docker daemon and the pinned sandbox image"]
+    async fn live_compcov_finds_a_magic_value_and_a_stopped_session_keeps_its_results() {
+        assert!(hf_runtime::docker_daemon_ready());
+        let root = tempfile::tempdir().unwrap();
+        let runtime = hf_runtime::docker::DockerRuntime::new(
+            hf_runtime::RuntimeConfig::default(),
+            root.path(),
+        );
+        let build = root.path().join("build");
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::write(build.join("magic.c"), PLANTED_INTEGER_MAGIC_C).unwrap();
+        let compiled = runtime
+            .run_command_opts(
+                &["clang", "-O1", "/work/magic.c", "-o", "/work/magic"].map(str::to_owned),
+                &build,
+                &limits(120, HashMap::new()),
+                &SandboxOptions::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(compiled.exit_code, 0, "{}", compiled.stderr);
+        let request = BinaryFuzzRequest {
+            project: root.path().join("project"),
+            binary: build.join("magic"),
+            input: BinaryInput::File,
+            seeds: None,
+            libraries: None,
+            duration_secs: 300,
+            timeout_ms: 1000,
+            dictionary: Vec::new(),
+            continue_from: None,
+            compcov: true,
+        };
+        let session_root = root.path().join("session");
+        std::fs::create_dir_all(&session_root).unwrap();
+        let cancel = CancellationToken::new();
+        let stopper = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            stopper.cancel();
+        });
+        let started = std::time::Instant::now();
+        let outcome = run_session(
+            &runtime,
+            &session_root,
+            Uuid::new_v4(),
+            &request,
+            admit(&request).unwrap(),
+            &StagedExtras::default(),
+            &|_| {},
+            &cancel,
+        )
+        .await
+        .unwrap();
+        println!(
+            "stopped {} after {:?}: execs {:?}, findings {}",
+            outcome.stopped,
+            started.elapsed(),
+            outcome.execs_done,
+            outcome.findings.len()
+        );
+        assert!(outcome.stopped && outcome.compcov);
+        assert!(
+            started.elapsed() < Duration::from_secs(150),
+            "the stop ended the run"
+        );
+        assert!(
+            outcome.findings.iter().any(|finding| finding.confirmed),
+            "CompCov reached the magic value: {:?}",
+            outcome.findings
+        );
+        let report: BinaryFuzzOutcome =
+            serde_json::from_slice(&std::fs::read(session_root.join(REPORT_NAME)).unwrap())
+                .unwrap();
+        assert!(report.stopped);
     }
 
     const PLANTED_SERVER_C: &str = "#include <netinet/in.h>\n#include <poll.h>\n#include <string.h>\n#include <sys/socket.h>\n#include <unistd.h>\n\nint main(void) {\n  int one = 1;\n  int s = socket(AF_INET, SOCK_STREAM, 0);\n  struct sockaddr_in a;\n  memset(&a, 0, sizeof a);\n  a.sin_family = AF_INET;\n  a.sin_port = htons(80);\n  setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);\n  if (bind(s, (struct sockaddr *)&a, sizeof a) != 0) return 2;\n  if (listen(s, 8) != 0) return 3;\n  for (;;) {\n    struct pollfd p = {s, POLLIN, 0};\n    if (poll(&p, 1, -1) <= 0) return 4;\n    int c = accept(s, 0, 0);\n    if (c < 0) return 5;\n    setsockopt(c, IPPROTO_TCP, 1, &one, sizeof one);\n    unsigned char b[64];\n    ssize_t n = recv(c, b, sizeof b, 0);\n    if (n > 3 && b[0] == 'F' && b[1] == 'U' && b[2] == 'Z' && b[3] == 'Z') {\n      volatile int *q = 0;\n      *q = 1;\n    }\n    send(c, \"ok\\n\", 3, 0);\n    close(c);\n  }\n}\n";
@@ -2514,6 +2662,7 @@ mod tests {
             timeout_ms: 1000,
             dictionary: Vec::new(),
             continue_from: None,
+            compcov: false,
         };
         let session = Uuid::new_v4();
         let session_root = root.path().join("session");
@@ -2526,6 +2675,7 @@ mod tests {
             admit(&request).unwrap(),
             &StagedExtras::default(),
             &|_| {},
+            &CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -2562,7 +2712,7 @@ mod tests {
                 &session_root,
                 &limits(
                     REPLAY_SECS,
-                    session_env(false, BinaryInput::Socket).unwrap(),
+                    session_env(false, BinaryInput::Socket, false).unwrap(),
                 ),
                 &session_sandbox(&session_root, Some(b"hello".to_vec())),
             )
@@ -2689,6 +2839,7 @@ mod tests {
                 timeout_ms: 1000,
                 dictionary: Vec::new(),
                 continue_from: None,
+                compcov: false,
             };
             let session_root = root.path().join(format!("session-{name}"));
             std::fs::create_dir_all(&session_root).unwrap();
@@ -2700,6 +2851,7 @@ mod tests {
                 admit(&request).unwrap(),
                 &StagedExtras::default(),
                 &|_| {},
+                &CancellationToken::new(),
             )
             .await
             .unwrap();

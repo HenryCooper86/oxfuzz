@@ -955,6 +955,9 @@ pub(crate) struct BinaryArgs {
     /// Seed the corpus from an earlier session of the same binary (its id).
     #[arg(long)]
     pub(crate) continue_from: Option<uuid::Uuid>,
+    /// Split multi-byte comparisons in the emulator (`AFL_COMPCOV_LEVEL=2`).
+    #[arg(long)]
+    pub(crate) compcov: bool,
     /// Print the result as JSON.
     #[arg(long)]
     pub(crate) json: bool,

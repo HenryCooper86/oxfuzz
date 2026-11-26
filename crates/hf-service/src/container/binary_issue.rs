@@ -331,6 +331,8 @@ mod tests {
             finished_at: None,
             continued_from: None,
             dictionary_tokens: 0,
+            compcov: false,
+            stopped: false,
         }
     }
 

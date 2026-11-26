@@ -178,6 +178,10 @@ fn requests(project: &str) -> Vec<(&'static str, Value)> {
                     "input": "stdin", "tokens": ["PIC1"] }),
         ),
         ("binary_progress", json!({ "project": project })),
+        (
+            "binary_stop",
+            json!({ "project": project, "session": "00000000-0000-0000-0000-000000000000" }),
+        ),
         ("binary_sessions", json!({ "project": project })),
         (
             "binary_session",
@@ -272,6 +276,8 @@ fn parity_handler() -> impl Fn(tauri::ipc::Invoke<tauri::test::MockRuntime>) -> 
         crate::parity_binary::binary_dictionary_refine,
         #[cfg(feature = "binary-only-fuzzing")]
         crate::parity_binary::binary_progress,
+        #[cfg(feature = "binary-only-fuzzing")]
+        crate::parity_binary::binary_stop,
         #[cfg(feature = "binary-only-fuzzing")]
         crate::parity_binary::binary_sessions,
         #[cfg(feature = "binary-only-fuzzing")]

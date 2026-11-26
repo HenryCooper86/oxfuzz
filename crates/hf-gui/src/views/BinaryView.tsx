@@ -10,7 +10,7 @@ import {
   SeedDraftPanel,
   SessionHistory,
 } from "../components/binary/BinaryAssist";
-import { Badge, Button, EmptyState, Input, ViewHeader } from "../components/ui";
+import { Badge, Button, EmptyState, Input, Switch, ViewHeader } from "../components/ui";
 import { DurationInput } from "../components/ui/DurationInput";
 import { useI18n } from "../i18nContext";
 import { pickFile, pickFolder } from "../lib";
@@ -23,6 +23,7 @@ import {
   binaryProgress,
   binarySession,
   binarySessions,
+  binaryStop,
   sessionBinary,
   type BinaryFuzzOutcome,
   type BinaryInputMode,
@@ -82,6 +83,7 @@ export function BinaryView() {
   const [tokens, setTokens] = useState<string[]>([]);
   const [useDictionary, setUseDictionary] = useState(false);
   const [continueFrom, setContinueFrom] = useState<BinarySessionSummary | null>(null);
+  const [compcov, setCompcov] = useState(true);
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState<BinaryProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -161,6 +163,7 @@ export function BinaryView() {
         timeoutMs: timeout,
         dictionary: useDictionary ? tokens : [],
         continueFrom: continueFrom?.session,
+        compcov,
       }));
       setContinueFrom(null);
       loadHistory();
@@ -269,6 +272,10 @@ export function BinaryView() {
               {!validTimeout && <p role="alert" className="text-xs text-error">{t("binary.invalidTimeout")}</p>}
             </div>
           </div>
+          <div className="flex flex-col gap-1">
+            <Switch checked={compcov} onChange={setCompcov} label={t("binary.compcov")} />
+            <p className="text-xs text-text-muted">{t("binary.compcovHint")}</p>
+          </div>
         </FormSection>
         <div className="hf-form-footer flex items-center justify-between gap-3 flex-wrap">
           {project ? <span /> : (
@@ -284,7 +291,15 @@ export function BinaryView() {
         </div>
       </section>
 
-      {running && <ProgressPanel progress={progress} />}
+      {running && (
+        <ProgressPanel
+          progress={progress}
+          onStop={async (session) => {
+            await binaryStop(project, session);
+            setProgress((current) => (current ? { ...current, stopping: true } : current));
+          }}
+        />
+      )}
       {error && (
         <div role="alert" className="hf-alert-error text-sm">
           <div className="font-semibold">{t("binary.failed")}</div>

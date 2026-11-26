@@ -475,6 +475,7 @@ pub(crate) async fn cmd_binary(args: crate::args::BinaryArgs) -> anyhow::Result<
             timeout_ms: args.timeout_ms,
             dictionary,
             continue_from: args.continue_from,
+            compcov: args.compcov,
         })
         .await?;
     if args.json {

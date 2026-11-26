@@ -23,6 +23,8 @@ export interface BinaryFuzzOptions {
   dictionary?: string[];
   /** An earlier session of the same binary whose queue seeds this one. */
   continueFrom?: string;
+  /** Split multi-byte comparisons in the emulator (AFL_COMPCOV_LEVEL=2). */
+  compcov?: boolean;
 }
 
 export interface MinimizedInput {
@@ -67,6 +69,8 @@ export interface BinaryFuzzOutcome {
   finished_at?: string | null;
   continued_from?: string | null;
   dictionary_tokens?: number;
+  compcov?: boolean;
+  stopped?: boolean;
 }
 
 export interface BinaryProfile {
@@ -112,6 +116,7 @@ export interface BinaryProgress {
   corpus_count: number | null;
   saved_crashes: number | null;
   saved_hangs: number | null;
+  stopping: boolean;
 }
 
 export interface BinarySessionSummary {
@@ -162,6 +167,10 @@ export function binaryDictionaryRefine(
 
 export function binaryProgress(project: string): Promise<BinaryProgress | null> {
   return getTransport().invoke<BinaryProgress | null>("binary_progress", { project });
+}
+
+export function binaryStop(project: string, session: string): Promise<boolean> {
+  return getTransport().invoke<boolean>("binary_stop", { project, session });
 }
 
 export function binarySessions(project: string): Promise<BinarySessionSummary[]> {

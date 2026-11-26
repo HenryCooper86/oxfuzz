@@ -448,6 +448,8 @@ macro_rules! webview_commands {
             #[cfg(feature = "binary-only-fuzzing")]
             parity_binary::binary_progress,
             #[cfg(feature = "binary-only-fuzzing")]
+            parity_binary::binary_stop,
+            #[cfg(feature = "binary-only-fuzzing")]
             parity_binary::binary_sessions,
             #[cfg(feature = "binary-only-fuzzing")]
             parity_binary::binary_session,

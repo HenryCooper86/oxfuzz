@@ -277,6 +277,22 @@ Every prompt above is retained in `binary_llm_drafts` before it is sent
 (Engineering Protocol 2.13); text taken from the binary is fenced in the
 prompt as untrusted data. Without a store or a provider nothing is sent.
 
+### Comparison splitting (CompCov)
+
+With `compcov` set, the fuzz run (and only the fuzz run) gets
+`AFL_COMPCOV_LEVEL=2`: the emulator splits multi-byte comparisons against
+immediates and registers into byte steps, so AFL++ sees progress toward a
+magic value instead of a single all-or-nothing branch. It is read by
+`afl-qemu-trace` itself, not by the emulated process, so it works for static
+binaries too. Measured on 2026-11-26 in the 0.2.4 image (AFL++ 4.09c,
+linux/arm64), 30 seconds per run on a target that faults only when its first
+four bytes equal a 32-bit constant: without CompCov no crash, with it the
+crash was found, at about 2% lower speed. It does not split `memcmp` or
+`strcmp` calls (the image has no `libcompcov`); a 14-byte `memcmp` token was
+not found with or without it in the same time, which is what the dictionary
+is for. The desktop form turns it on by default; `oxfuzz binary --compcov`
+opts in. The report records whether it was used.
+
 ## Sessions and triage (2026-11-26)
 
 - **History.** `binary_sessions` lists the project's sessions from their
@@ -286,6 +302,13 @@ prompt as untrusted data. Without a store or a provider nothing is sent.
 - **Progress.** While a session runs, the service keeps its stage (staging,
   fuzzing, replaying, minimizing) and reads `fuzzer_stats` on request, so the
   desktop polls executions, speed, edges, corpus, saved crashes and hangs.
+- **Stop.** A running session can be stopped. Stopping ends the fuzz run
+  through the runtime's cancellation (the sandbox is torn down, AFL++'s
+  output stays); the session then replays, groups and minimizes what it
+  found and writes its report marked `stopped`, so stopping keeps the
+  results. A stop before AFL++ reached its fuzzing loop ends the session
+  with an error and no report. Progress shows `stopping` until the fuzz run
+  has ended.
 - **Continue.** A session may start from an earlier session of the same
   binary (same digest): that session's queue seeds the new corpus, bounded
   like operator seeds.

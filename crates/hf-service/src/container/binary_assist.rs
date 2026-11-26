@@ -693,6 +693,8 @@ mod tests {
             finished_at: None,
             continued_from: None,
             dictionary_tokens: 0,
+            compcov: false,
+            stopped: false,
         };
         let prompt = explain_prompt(&outcome, &finding, 3, b"PIC1\x00\xff");
         assert!(prompt.contains("SEGV (11)"), "{prompt}");

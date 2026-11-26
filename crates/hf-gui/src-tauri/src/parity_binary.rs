@@ -26,6 +26,9 @@ pub struct BinaryFuzzOptions {
     /// An earlier session of the same binary to continue from.
     #[serde(default)]
     continue_from: Option<uuid::Uuid>,
+    /// Split multi-byte comparisons in the emulator; absent from older forms.
+    #[serde(default)]
+    compcov: bool,
 }
 
 /// Fuzz an uninstrumented Linux binary in the sandbox and return the
@@ -46,6 +49,7 @@ pub async fn binary_fuzz(
             timeout_ms: options.timeout_ms,
             dictionary: options.dictionary,
             continue_from: options.continue_from,
+            compcov: options.compcov,
         })
         .await
         .map_err(|error| error.to_string())
@@ -134,6 +138,17 @@ pub fn binary_progress(
     project: PathBuf,
 ) -> Option<hf_service::BinaryProgress> {
     state.container.binary_progress(&project)
+}
+
+/// Stop the running session `session` of `project`; it still reports what
+/// it found. Returns whether such a session was running.
+#[tauri::command]
+pub fn binary_stop(
+    state: tauri::State<'_, AppState>,
+    project: PathBuf,
+    session: uuid::Uuid,
+) -> bool {
+    state.container.binary_stop(&project, session)
 }
 
 /// The project's earlier sessions, newest first.

@@ -129,6 +129,7 @@ describe("BinaryView", () => {
     expect(mocks.invoke).toHaveBeenCalledWith("binary_fuzz", { options: {
       project: "/proj", binary: "/bin/server", input: "socket", seeds: "/seeds",
       libraries: "/libs", durationSecs: 60, timeoutMs: 250, dictionary: [], continueFrom: undefined,
+      compcov: true,
     } });
     expect(host.textContent).toContain("12,345");
     expect(host.textContent).toContain("aaaaaaaa");
@@ -235,7 +236,7 @@ describe("BinaryView", () => {
       if (name === "binary_progress") return Promise.resolve({
         session: "s", binary_name: "server", stage: "fuzzing", started_at: "2026-11-26T00:00:00Z",
         duration_secs: 60, elapsed_secs: 30, execs_done: 4200, execs_per_sec: 140, edges_found: 31,
-        corpus_count: 7, saved_crashes: 2, saved_hangs: 0,
+        corpus_count: 7, saved_crashes: 2, saved_hangs: 0, stopping: false,
       });
       return Promise.resolve(null);
     });
@@ -250,6 +251,43 @@ describe("BinaryView", () => {
     expect(panel.querySelector('[data-state="done"]')?.textContent).toBe("Preparing");
     await act(async () => finish(outcome));
     expect(host.querySelector('[aria-label="Session progress"]')).toBeNull();
+  });
+
+  it("splits comparisons by default and lets the operator turn it off", async () => {
+    mocks.invoke.mockImplementation(async (name: string) => name === "binary_fuzz" ? outcome : null);
+    mocks.pickFile.mockResolvedValue("/bin/server");
+    render();
+    await click(button("Browse"));
+    expect(host.textContent).toContain("Split comparisons (CompCov)");
+    await click(button("Split comparisons (CompCov)"));
+    await click(button("Start session"));
+    expect(mocks.invoke).toHaveBeenCalledWith("binary_fuzz", { options: expect.objectContaining({ compcov: false }) });
+  });
+
+  it("stops a running session and marks the result as stopped early", async () => {
+    let finish: (value: BinaryFuzzOutcome) => void = () => undefined;
+    let stopping = false;
+    mocks.invoke.mockImplementation((name: string, args: Record<string, unknown>) => {
+      if (name === "binary_fuzz") return new Promise<BinaryFuzzOutcome>((resolve) => { finish = resolve; });
+      if (name === "binary_stop") { stopping = true; return Promise.resolve(args.session === "s-run"); }
+      if (name === "binary_progress") return Promise.resolve({
+        session: "s-run", binary_name: "server", stage: "fuzzing", started_at: "2026-11-26T00:00:00Z",
+        duration_secs: 600, elapsed_secs: 12, execs_done: 1000, execs_per_sec: 90, edges_found: 10,
+        corpus_count: 2, saved_crashes: 0, saved_hangs: 0, stopping,
+      });
+      return Promise.resolve(null);
+    });
+    mocks.pickFile.mockResolvedValue("/bin/server");
+    render();
+    await click(button("Browse"));
+    await click(button("Start session"));
+    await settle();
+    await click(button("Stop"));
+    expect(mocks.invoke).toHaveBeenCalledWith("binary_stop", { project: "/proj", session: "s-run" });
+    expect(host.textContent).toContain("Stopping...");
+    await act(async () => finish({ ...outcome, stopped: true, compcov: true }));
+    expect(host.textContent).toContain("Stopped early");
+    expect(host.textContent).toContain("CompCov");
   });
 
   it("continues an earlier session of the same binary", async () => {
