@@ -1,0 +1,40 @@
+{
+ "schema_version": 3,
+ "claim": "sandbox_isolation",
+ "candidate_commit": "acc6e9380eae29d704689816b5c7a98f3bc1ce08",
+ "tag": "v0.9.12",
+ "platform": "macOS arm64 / Linux arm64 Docker",
+ "sandbox_image": {
+  "reference": "oxfuzz/fuzz-sandbox:0.2.4",
+  "id": "sha256:1c292dbbd5bb16f5489444942542c9c7a5969da7d4f0cf3fce284c38ce39c431",
+  "architecture": "linux/arm64",
+  "distribution": "The image published to GitHub Container Registry for 0.9.11, pulled with scripts/pull-sandbox.sh on 2026-11-25 (ghcr.io/henrycooper86/oxfuzz-fuzz-sandbox@sha256:44b0b5f951634e368e5ed8acb25da84b3ab8a12913ac6fddddf6c23d3620677d) and tagged with the local name. 0.9.12 uses the same image as 0.9.11."
+ },
+ "command": "cargo test --locked -p hf-runtime --test live_isolation -- --ignored --test-threads=1 --nocapture",
+ "exit_code": 0,
+ "observed_on": "2026-11-26",
+ "started_utc": "2026-11-26T08:02:53Z",
+ "ended_utc": "2026-11-26T08:03:01Z",
+ "scenarios_passed": [
+  "Network unavailable, input read-only, explicitly mounted output writable, 256 MiB and 1 CPU cgroup limits verified",
+  "Explicit numeric UID/GID can read private input and creates correctly owned output",
+  "Timeout awaits owned-container cleanup",
+  "Running container registered with owned workspace label",
+  "Runtime ownership records inaccessible inside the sandbox",
+  "Fresh runtime cleans up container left by terminated helper client"
+ ],
+ "helper": "Seventh test is the recovery child-process helper, not an independent scenario.",
+ "device_policy": "Unchanged since 0.9.11: the runtime accepts exactly /dev/kvm as a passthrough device, only when the host has it as a character device, and refuses any other device before Docker runs. Covered by unit and integration tests in CI; this macOS host has no /dev/kvm, so no device was passed here.",
+ "semgrep": {
+  "provenance": "The 0.2.4 image build runs an offline Semgrep scan with a read-only source mount and checks its report on the host. That check is part of building the image; it was not repeated for this record, and the image is unchanged since 0.9.11."
+ },
+ "limitations": [
+  "Host is macOS arm64; this is not a Linux host qualification. Windows is not supported.",
+  "Docker failure recovery scenarios cover only disposable owned containers.",
+  "All seven tests reported ok (six scenarios and the recovery helper).",
+  "Only the linux/arm64 image was used here; the linux/amd64 image was built and verified by the GitHub workflow, not run through these scenarios.",
+  "The Docker socket was named with DOCKER_HOST (OrbStack's socket), because this host has no /var/run/docker.sock and the runs redirect HOME. A first attempt without it failed every isolation test before any container started; that attempt is kept with the evidence and is not counted."
+ ],
+ "observed_commit": "acc6e9380eae29d704689816b5c7a98f3bc1ce08",
+ "candidate_delta": "None known. The run was made in a separate worktree checked out at the tag commit, with no other changes in it; the engine qualification in the same worktree recorded an empty working-tree patch at 08:03Z. No digest was taken for this run itself."
+}

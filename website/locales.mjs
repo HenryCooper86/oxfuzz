@@ -132,7 +132,7 @@ export const locales = {
       "Go with native fuzzing, Python with Atheris, Java with Jazzer and JavaScript with Jazzer.js. Each is discovered, built and run in the same sandbox.",
     new_6_title: "Programs without source",
     new_6_text:
-      '<code>oxfuzz binary</code> fuzzes a compiled Linux program in AFL++ QEMU mode, fed a file, standard input, a TCP or UDP server, or a sequence of messages; checked on Linux arm64 so far. New in 0.9.12: <code>--compcov</code> splits multi-byte comparisons so the fuzzer can reach magic values, and <code>--persistent</code> loops on one function inside one process, 5.8 times faster at 100% stability in our test. In the desktop app the model drafts seeds and explains each crash from its disassembly; <a href="#videos">the binary video</a> shows a whole session.',
+      '<code>oxfuzz binary</code> fuzzes a compiled Linux program in AFL++ QEMU mode, fed a file, standard input, a TCP or UDP server, or a sequence of messages; checked on Linux arm64 so far. New in 0.9.12: <code>--compcov</code> splits multi-byte comparisons so the fuzzer can reach magic values, and <code>--persistent</code> loops on one function inside one process: 2 to 5.8 times faster at 100% stability in our two test runs. In the desktop app the model drafts seeds and explains each crash from its disassembly; <a href="#videos">the binary video</a> shows a whole session.',
     bin_fact_1: "Run",
     bin_fact_1_value: "30 seconds, AFL++ QEMU mode",
     bin_fact_2: "Executions",
@@ -382,7 +382,7 @@ export const locales = {
       "Go（原生模糊测试）、Python（Atheris）、Java（Jazzer）和 JavaScript（Jazzer.js）。它们都在同一个沙箱里完成目标发现、构建和运行。",
     new_6_title: "没有源码的程序",
     new_6_text:
-      '<code>oxfuzz binary</code> 以 AFL++ QEMU 模式对已编译的 Linux 程序做模糊测试，输入可以是文件、标准输入、TCP 或 UDP 服务，也可以是一串消息；目前只在 Linux arm64 上验证过。0.9.12 新功能：<code>--compcov</code> 拆分多字节比较，使模糊器能命中魔数；<code>--persistent</code> 在一个进程内循环执行同一个函数，在我们的测试中快 5.8 倍，稳定性为 100%。在桌面应用中，模型会起草种子，并根据反汇编解释每个崩溃；<a href="#videos">二进制演示视频</a>展示了完整的会话。',
+      '<code>oxfuzz binary</code> 以 AFL++ QEMU 模式对已编译的 Linux 程序做模糊测试，输入可以是文件、标准输入、TCP 或 UDP 服务，也可以是一串消息；目前只在 Linux arm64 上验证过。0.9.12 新功能：<code>--compcov</code> 拆分多字节比较，使模糊器能命中魔数；<code>--persistent</code> 在一个进程内循环执行同一个函数：在我们的两次测试中快 2 到 5.8 倍，稳定性为 100%。在桌面应用中，模型会起草种子，并根据反汇编解释每个崩溃；<a href="#videos">二进制演示视频</a>展示了完整的会话。',
     bin_fact_1: "运行",
     bin_fact_1_value: "30 秒，AFL++ QEMU 模式",
     bin_fact_2: "执行次数",

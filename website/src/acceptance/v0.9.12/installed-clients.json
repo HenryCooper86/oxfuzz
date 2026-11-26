@@ -1,0 +1,42 @@
+{
+ "schema_version": 3,
+ "claim": "installed_clients",
+ "candidate_commit": "acc6e9380eae29d704689816b5c7a98f3bc1ce08",
+ "tag": "v0.9.12",
+ "local_build_commit": "acc6e9380eae29d704689816b5c7a98f3bc1ce08",
+ "production_delta": "None known. The local build was made with scripts/build-app.sh in a separate worktree checked out at the tag commit, which had no changes before or after the build; the engine qualification in that worktree recorded an empty working-tree patch. No digest was taken for the build itself. The final release installer was built by the release workflow from the tag.",
+ "platform": "macOS arm64",
+ "version_observed": "0.9.12",
+ "local_executable_sha256": "a57162fc278a361886349c7fedb3b92d8fb771079e95d41d985b6979c6f82b70",
+ "observed_on": "2026-11-26",
+ "observed": {
+  "local_build": "codesign --verify --deep --strict passed and the DMG passed hdiutil verify.",
+  "not_observed": [
+   "Any page of the installed app's interface (see final_release_installer.window)",
+   "A launch against the existing per-user data, and any migration of earlier data",
+   "First-run setup wizard",
+   "A binary-only session, a campaign, bisection or concolic enrichment completing from the desktop app",
+   "Go, Python, Java and JavaScript runs started from the desktop app",
+   "Linux desktop installations",
+   "Physical-bench automotive operations",
+   "syzkaller campaigns from the desktop app"
+  ]
+ },
+ "final_release_installer": {
+  "workflow_run": 45785704983,
+  "candidate_commit": "acc6e9380eae29d704689816b5c7a98f3bc1ce08",
+  "file": "oxfuzz_0.9.12_aarch64.dmg",
+  "sha256": "e36c4dea5b336c44658f8756998f8c38ee3a60fb6886b6c1189b3d48e32ab059",
+  "executable_sha256": "200d4d867b0f0b3985de5bfe9f9584b95a5575c926c04b24a3ae06654b5c557c",
+  "observed_on": "2026-11-26",
+  "checks": [
+   "Downloaded asset SHA-256 matches GitHub metadata, as do the other four installers and the two .app.tar.gz archives",
+   "DMG verification and read-only mount succeeded; the Intel DMG also passed verification",
+   "Copied app passes codesign --verify --deep --strict (ad-hoc signature); bundle version 0.9.12; arm64 executable",
+   "Started from the copy against empty scratch data seven times: it stayed up each time and opened one 1200x800 window; the three runs that checked the database had applied all 56 migrations; six runs ended on a termination request and exited, and one ended when the shell that started it exited",
+   "Not installed to /Applications and not started against the existing per-user data",
+   "No project was opened and no harness, run, campaign or binary-only session was started from it"
+  ],
+  "window": "The window's contents were not read. The maintainer was using the Mac, so the app could not be brought to the front; the accessibility interface exposed only the window controls, and a capture of the window showed it unpainted. The same capture of a build of the same features from commit 6fdb3aad, whose interface was walked in front on the same day while recording the binary-only demo, gave a byte-identical unpainted image, so the capture shows the background launch, not a rendering failure; it does not show that the installer's pages render."
+ }
+}

@@ -1,0 +1,71 @@
+{
+ "schema_version": 3,
+ "claim": "userspace_engines",
+ "candidate_commit": "acc6e9380eae29d704689816b5c7a98f3bc1ce08",
+ "tag": "v0.9.12",
+ "qualification_commit": "acc6e9380eae29d704689816b5c7a98f3bc1ce08",
+ "qualification_patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+ "candidate_delta": "None. The qualification ran in a separate worktree checked out at the tag commit and recorded that commit and an empty working-tree patch (the digest above is that of an empty patch).",
+ "source_sha256": "a21529ba223ec0a03b349e9f78b879eed69dc60d8d130dbac1b97fb7bf05a591",
+ "status": "passed",
+ "started_at": "2026-11-26T08:03:01.748522+00:00",
+ "ended_at": "2026-11-26T08:05:16.082028+00:00",
+ "platform": "macOS-27.2.1-arm64-arm-64bit",
+ "sandbox_image": {
+  "reference": "oxfuzz/fuzz-sandbox:0.2.4",
+  "id": "sha256:1c292dbbd5bb16f5489444942542c9c7a5969da7d4f0cf3fce284c38ce39c431",
+  "architecture": "linux/arm64",
+  "distribution": "The image published to GitHub Container Registry for 0.9.11, pulled with scripts/pull-sandbox.sh on 2026-11-25 (ghcr.io/henrycooper86/oxfuzz-fuzz-sandbox@sha256:44b0b5f951634e368e5ed8acb25da84b3ab8a12913ac6fddddf6c23d3620677d) and tagged with the local name. 0.9.12 uses the same image as 0.9.11."
+ },
+ "cycles": 1,
+ "cpu_cores": 1,
+ "memory_mib": 2048,
+ "smoke_and_replay_duration_secs": 10,
+ "review": "Provider review passed before execution for all three engines, using a local Ollama model (qwen3:8b), as for 0.9.11. Explicit human approval was supplied for this exact source pair on 2026-11-26; the pair is unchanged since 0.9.10.",
+ "cleanup": "verified_by_fixture",
+ "engines": {
+  "libfuzzer": {
+   "smoke_passed": true,
+   "smoke_duration_secs": 10,
+   "smoke_execs_per_sec": 1048576.0,
+   "smoke_crashes": 0,
+   "stop_ms": 553,
+   "campaign_run_id": "2e0782dd-4173-4fe5-8289-c66a2ca0d031",
+   "replay_run_id": "d23c7179-aef6-437a-b7d1-09c926e0cd6c",
+   "binary_sha256": "4bf4a4056cdb4b02400bd74b21261ce2f00b543fd47c1231d3ed8116858d63a2"
+  },
+  "afl++": {
+   "smoke_passed": true,
+   "smoke_duration_secs": 10,
+   "smoke_execs_per_sec": 243841.12,
+   "smoke_crashes": 0,
+   "stop_ms": 1725,
+   "campaign_run_id": "bd5365e4-11aa-492a-9cbf-008b1f427693",
+   "replay_run_id": "0373df2f-e0a4-4df1-a61f-910750e7fd97",
+   "binary_sha256": "87bc80a92dc98d0a254692a4e3f796a8f483e425564ffd01cde09584cc6ffb04"
+  },
+  "honggfuzz": {
+   "smoke_passed": true,
+   "smoke_duration_secs": 10,
+   "smoke_execs_per_sec": 202032.0,
+   "smoke_crashes": 0,
+   "stop_ms": 305,
+   "campaign_run_id": "f712bf14-d810-438d-891e-56d951fed04f",
+   "replay_run_id": "7f25b34d-1d5a-48d6-a7dc-7aed3610ef52",
+   "binary_sha256": "d815b8d237eaf4c3699cda2c00a9ff431990e030ec0206ba429c60e81f35cc74"
+  }
+ },
+ "related_records": {
+  "binary_only_engines": "https://oxfuzz.bionicloud.net/acceptance/v0.9.12/binary-only-engines.json",
+  "language_engines": "https://oxfuzz.bionicloud.net/acceptance/v0.9.8/language-and-binary-engines.json"
+ },
+ "limitations": [
+  "One short cycle per engine does not establish long-duration stability or a statistical latency percentile.",
+  "No crashes occurred; crash reproduction and symbolization are not claimed by this cycle.",
+  "Executed on macOS arm64 with a Linux arm64 Docker sandbox; not a Linux desktop installation test. Windows is not supported.",
+  "The pre-execution review used a small local model rather than the provider configured for the desktop app.",
+  "This cycle covers C sources on libFuzzer, AFL++ and honggfuzz. The binary-only engine has its own 0.9.12 record; the Go, Python, Java and JavaScript engines were not rerun, and their last live results are the 0.9.8 related record, made on a different commit.",
+  "The qualification drives the service operations from a test, not from the desktop app.",
+  "The Docker socket was named with DOCKER_HOST (OrbStack's socket), because this host has no /var/run/docker.sock and the runs redirect HOME. A first attempt without it failed every isolation test before any container started; that attempt is kept with the evidence and is not counted."
+ ]
+}

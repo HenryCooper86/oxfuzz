@@ -1,0 +1,69 @@
+{
+ "schema_version": 3,
+ "claim": "binary_only_engines",
+ "release_gate": "Not one of the claims the release workflow checks. Published so that the binary-only features 0.9.12 adds have a reviewable result.",
+ "candidate_commit": "acc6e9380eae29d704689816b5c7a98f3bc1ce08",
+ "tag": "v0.9.12",
+ "observed_commit": "acc6e9380eae29d704689816b5c7a98f3bc1ce08",
+ "candidate_delta": "None known. The run was made in a separate worktree checked out at the tag commit, with no other changes in it; the engine qualification in the same worktree recorded an empty working-tree patch at 08:03Z. No digest was taken for this run itself.",
+ "platform": "macOS 27.2.1 arm64 / Linux arm64 Docker",
+ "sandbox_image": {
+  "reference": "oxfuzz/fuzz-sandbox:0.2.4",
+  "id": "sha256:1c292dbbd5bb16f5489444942542c9c7a5969da7d4f0cf3fce284c38ce39c431",
+  "architecture": "linux/arm64",
+  "distribution": "The image published to GitHub Container Registry for 0.9.11, pulled with scripts/pull-sandbox.sh on 2026-11-25 (ghcr.io/henrycooper86/oxfuzz-fuzz-sandbox@sha256:44b0b5f951634e368e5ed8acb25da84b3ab8a12913ac6fddddf6c23d3620677d) and tagged with the local name. 0.9.12 uses the same image as 0.9.11."
+ },
+ "command": "cargo test --locked -p hf-service --lib -- --ignored --test-threads=1 --nocapture binary_only::live_tests binary_disasm::tests::live_",
+ "started_utc": "2026-11-26T08:05:16Z",
+ "ended_utc": "2026-11-26T08:12:06Z",
+ "exit_code": 101,
+ "tests_passed": 5,
+ "tests_failed": 2,
+ "provider_and_approval": "None. Every target is a C program with a planted defect, compiled without instrumentation in the sandbox by the test; no model was asked for anything and no approval was requested. The tests call the service operations directly, not the command line or the desktop app.",
+ "results": [
+  {
+   "test": "live_qemu_session_finds_and_confirms_a_planted_crash",
+   "result": "passed",
+   "observed": "File input: 103,614 executions at 2,590 per second; stdin input: 229,235 at 5,728 per second. In both, the planted SEGV was found, confirmed by replay, grouped by signature, and minimized to the 4-byte input FUZZ."
+  },
+  {
+   "test": "live_dictionary_reaches_afl_and_a_session_continues_from_its_queue",
+   "result": "passed",
+   "observed": "The memcmp token was reached through the dictionary (111,474 executions, one finding); the continued session carried 2 inputs from the first session's queue."
+  },
+  {
+   "test": "live_compcov_finds_a_magic_value_and_a_stopped_session_keeps_its_results",
+   "result": "passed",
+   "observed": "With CompCov, a crash behind a 32-bit constant was found and confirmed; the five-minute session was stopped after 30 seconds (ended at 30.7 s) and still replayed and reported its finding."
+  },
+  {
+   "test": "live_persistent_session_loops_on_main_faster_and_stays_stable",
+   "result": "passed",
+   "observed": "25 seconds each on the same file reader: 3,763 executions per second without persistent mode (no crash found), 7,530 with main as the loop entry (resolved to target+0x818) at 100% stability, with the crash found and confirmed by a fresh-process replay."
+  },
+  {
+   "test": "live_socket_session_fuzzes_a_server_through_its_first_connection",
+   "result": "passed",
+   "observed": "11,117 executions at 278 per second, no hangs; the planted crash in the TCP server was found, confirmed and minimized to 4 bytes."
+  },
+  {
+   "test": "live_socket_sessions_reach_datagram_servers_and_stateful_exchanges",
+   "result": "failed in 2 of 3 runs",
+   "observed": "In every run the planted crash was found, confirmed and grouped into one distinct finding for the UDP server, the stateful UDP exchange and the stateful TCP exchange. The failing assertion is the last one for the stateful TCP exchange: the smallest kept input should be the opening message and the 5-byte faulting message, and in two runs it kept extra separators or an empty message (9 and 13 bytes after the opening). It passed in the third run (08:12-08:22Z). Minimization is unchanged since 0.9.11; this is how small afl-tmin gets a stateful message sequence, not a missed crash."
+  },
+  {
+   "test": "live_objdump_disassembles_a_findings_crash_site_in_the_sandbox",
+   "result": "passed on rerun",
+   "observed": "In the first run it failed before starting: it needs OXFUZZ_LIVE_PROJECT naming a project with a recorded session, and none was set. Rerun on the same commit against the demo project's recorded picinfo session: GNU objdump in the sandbox disassembled the faulting frame, marking ldrb w2, [x22, x0] at target+0xcbc with => and the caller's return address with ->, and the cached text was read back unchanged."
+  }
+ ],
+ "not_covered": [
+  "The model assists (seed drafts, dictionary refinement, crash explanation): their live test needs a provider and was not run for this record. They were used against DeepSeek while recording the binary-only demo video on 2026-11-26 from an earlier commit of the same features.",
+  "A session through `oxfuzz binary` or the desktop app; filing against a live tracker.",
+  "x86-64 targets: the linux/amd64 image under emulation does not run binary-only sessions, and no native Linux x86_64 host was used. The x86-64 persistent-mode load base is AFL++'s documented value."
+ ],
+ "limitations": [
+  "One run of each test except the reruns described above; rates are from 25- to 60-second runs on this machine and are not benchmarks.",
+  "The Docker socket was named with DOCKER_HOST (OrbStack's socket), because this host has no /var/run/docker.sock and the runs redirect HOME. A first attempt without it failed every isolation test before any container started; that attempt is kept with the evidence and is not counted."
+ ]
+}
