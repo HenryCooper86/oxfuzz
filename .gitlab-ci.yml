@@ -113,7 +113,9 @@ supply-chain:
     # time, so the installed binary is invisible without this.
     - export PATH="$CARGO_HOME/bin:$PATH"
   script:
-    - command -v cargo-deny || cargo install cargo-deny --locked
+    # cargo-deny 0.22 needs rustc 1.95; this image is 1.94. Without the pin a
+    # run with an empty cache (every tag pipeline) fails to install it.
+    - command -v cargo-deny || cargo install cargo-deny --version "~0.21" --locked
     - scripts/tests/gates.sh deny
 
 coverage:
