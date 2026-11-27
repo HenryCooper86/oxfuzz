@@ -273,8 +273,11 @@ async fn live_dictionary_reaches_afl_and_a_session_continues_from_its_queue() {
 const PLANTED_INTEGER_MAGIC_C: &str = "#include <stdint.h>\n#include <stdio.h>\n#include <string.h>\n\nint main(int argc, char **argv) {\n  unsigned char b[64] = {0};\n  FILE *f = fopen(argv[1], \"rb\");\n  if (!f) return 1;\n  size_t n = fread(b, 1, sizeof b, f);\n  fclose(f);\n  uint32_t v;\n  memcpy(&v, b, 4);\n  if (n >= 4 && v == 0x4f58465aU) {\n    volatile int *q = 0;\n    *q = 1;\n  }\n  return 0;\n}\n";
 
 /// `CompCov` reaches a crash behind a 32-bit magic value, and stopping a
-/// five-minute session after thirty seconds ends the fuzz run early while
-/// the session still replays and reports what it found.
+/// five-minute session after ninety seconds ends the fuzz run early while
+/// the session still replays and reports what it found. Reaching the value
+/// is a matter of chance: in the 0.9.13 qualification it took 56,000 to
+/// 108,000 executions (15 to 30 seconds here) when found, and a 30-second
+/// stop missed it in 2 of 6 runs, so the stop leaves about three times that.
 #[tokio::test]
 #[ignore = "requires a local Docker daemon and the pinned sandbox image"]
 async fn live_compcov_finds_a_magic_value_and_a_stopped_session_keeps_its_results() {
@@ -313,7 +316,7 @@ async fn live_compcov_finds_a_magic_value_and_a_stopped_session_keeps_its_result
     let cancel = CancellationToken::new();
     let stopper = cancel.clone();
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(30)).await;
+        tokio::time::sleep(Duration::from_secs(90)).await;
         stopper.cancel();
     });
     let started = std::time::Instant::now();
@@ -338,7 +341,7 @@ async fn live_compcov_finds_a_magic_value_and_a_stopped_session_keeps_its_result
     );
     assert!(outcome.stopped && outcome.compcov);
     assert!(
-        started.elapsed() < Duration::from_secs(150),
+        started.elapsed() < Duration::from_secs(180),
         "the stop ended the run"
     );
     assert!(
