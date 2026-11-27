@@ -1,0 +1,73 @@
+{
+ "schema_version": 3,
+ "claim": "binary_only_engines",
+ "release_gate": "Not one of the claims the release workflow checks. Published so that the binary-only features have a reviewable result.",
+ "candidate_commit": "6ae44d8d05c5560c612335a65fc9ad473e929bf0",
+ "tag": "v0.9.13",
+ "observed_commit": "6ae44d8d05c5560c612335a65fc9ad473e929bf0",
+ "candidate_delta": "None known. The run was made in a separate worktree checked out at the tag commit, with no other changes in it; the engine qualification in the same worktree recorded an empty working-tree patch at 08:03Z. No digest was taken for this run itself.",
+ "platform": "macOS 27.2.1 arm64 / Linux arm64 Docker",
+ "sandbox_image": {
+  "reference": "oxfuzz/fuzz-sandbox:0.2.4",
+  "id": "sha256:1c292dbbd5bb16f5489444942542c9c7a5969da7d4f0cf3fce284c38ce39c431",
+  "architecture": "linux/arm64",
+  "distribution": "The image published to GitHub Container Registry for 0.9.11, pulled with scripts/pull-sandbox.sh on 2026-11-25 (ghcr.io/henrycooper86/oxfuzz-fuzz-sandbox@sha256:44b0b5f951634e368e5ed8acb25da84b3ab8a12913ac6fddddf6c23d3620677d) and tagged with the local name. 0.9.12 and 0.9.13 use the same image as 0.9.11."
+ },
+ "command": "cargo test --locked -p hf-service --lib -- --ignored --test-threads=1 --nocapture binary_only::live_tests binary_disasm::tests::live_ (then the reruns below, and binary_assist::tests::live_ with a provider configured)",
+ "started_utc": "2026-11-27T01:56:29Z",
+ "ended_utc": "2026-11-27T02:09:17Z",
+ "exit_code": 101,
+ "tests_passed": 7,
+ "tests_failed": 1,
+ "provider_and_approval": "The session tests compile C programs with planted defects without instrumentation in the sandbox; no model is asked and no approval requested. The model-assist test used the desktop app's configured provider (DeepSeek, deepseek-flash) through a copy of its configuration, deleted after the run. The tests call the service operations directly. The objdump and model-assist tests read the picinfo session that the 0.9.12 desktop installer recorded on 2026-11-27 (a one-minute persistent-mode session with one confirmed finding).",
+ "results": [
+  {
+   "test": "live_qemu_session_finds_and_confirms_a_planted_crash",
+   "result": "passed",
+   "observed": "File input: 150,171 executions at 3,753 per second; stdin input: 237,481 at 5,935 per second. In both, the planted SEGV was found, confirmed by replay, grouped by signature, and minimized to the 4-byte input FUZZ."
+  },
+  {
+   "test": "live_dictionary_reaches_afl_and_a_session_continues_from_its_queue",
+   "result": "passed",
+   "observed": "The memcmp token was reached through the dictionary (117,082 executions, one finding); the continued session carried 2 inputs from the first session's queue."
+  },
+  {
+   "test": "live_compcov_finds_a_magic_value_and_a_stopped_session_keeps_its_results",
+   "result": "failed in the first run, passed in 4 of 5 reruns",
+   "observed": "In every run the five-minute session was stopped after 30 seconds and ended within 38 seconds, keeping and reporting its results. Reaching the 32-bit constant within those 30 seconds is a matter of chance: the first run stopped at 109,296 executions without it, and of five reruns four found and confirmed the crash (56,268 to 84,974 executions) and one did not (74,502). The CompCov code is unchanged since 0.9.12, whose run found it at 107,805 executions. The test's 30-second budget is too tight to pass every time; this is not a failure of the stop or of CompCov being applied."
+  },
+  {
+   "test": "live_persistent_session_loops_on_main_faster_and_stays_stable",
+   "result": "passed",
+   "observed": "25 seconds each on the same file reader: 3,875 executions per second without persistent mode, 8,233 with main as the loop entry (resolved to target+0x818), both at 100% stability, with the crash found and confirmed by a fresh-process replay."
+  },
+  {
+   "test": "live_socket_session_fuzzes_a_server_through_its_first_connection",
+   "result": "passed",
+   "observed": "12,178 executions at 304 per second, no hangs; the planted crash in the TCP server was found, confirmed and minimized to 4 bytes."
+  },
+  {
+   "test": "live_socket_sessions_reach_datagram_servers_and_stateful_exchanges",
+   "result": "passed in 3 of 3 runs",
+   "observed": "In each run the planted crash was found, confirmed and grouped into one distinct finding for the UDP server, the stateful UDP exchange and the stateful TCP exchange, and the stateful TCP input was minimized to the opening message and the 5-byte faulting message. This assertion failed in 2 of 3 runs for 0.9.12; 0.9.13 removes empty messages and whole unneeded messages after afl-tmin."
+  },
+  {
+   "test": "live_objdump_disassembles_a_findings_crash_site_in_the_sandbox",
+   "result": "passed",
+   "observed": "GNU objdump in the sandbox disassembled the faulting frame of the picinfo finding, marking ldrb w2, [x22, x0] at target+0xcbc with => and the caller's return address with ->, and the cached text was read back unchanged."
+  },
+  {
+   "test": "live_binary_assists_round_trip_through_the_provider",
+   "result": "passed",
+   "observed": "Seed drafting returned six seeds in the PIC1 format; dictionary refinement reduced the candidate tokens to [\"PIC1\"]; the crash explanation named a null-pointer dereference from an input-dependent zero pointer, citing ldrb w2, [x22, x0] and x22 set to 0 at c88, with the disassembly attached, and was read back from the store. Model output is not checked for correctness beyond these facts."
+  }
+ ],
+ "not_covered": [
+  "A session through `oxfuzz binary`; filing against a live tracker. The desktop app's binary flow is covered by the installed-client record.",
+  "x86-64 targets: the linux/amd64 image under emulation does not run binary-only sessions, and no native Linux x86_64 host was used. The x86-64 persistent-mode load base is AFL++'s documented value."
+ ],
+ "limitations": [
+  "Rates are from 25- to 60-second runs on this machine and are not benchmarks.",
+  "The Docker socket was named with DOCKER_HOST (OrbStack's socket), because this host has no /var/run/docker.sock and the runs redirect HOME. A first attempt without it failed every isolation test before any container started; that attempt is kept with the evidence and is not counted."
+ ]
+}

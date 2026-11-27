@@ -1,0 +1,41 @@
+{
+ "schema_version": 3,
+ "claim": "installed_clients",
+ "candidate_commit": "6ae44d8d05c5560c612335a65fc9ad473e929bf0",
+ "tag": "v0.9.13",
+ "local_build_commit": "6ae44d8d05c5560c612335a65fc9ad473e929bf0",
+ "production_delta": "None known. The local build was made with scripts/build-app.sh in a separate worktree checked out at the tag commit, which had no changes before or after the build; the engine qualification in that worktree recorded an empty working-tree patch. No digest was taken for the build itself. The final release installer was built by the release workflow from the tag.",
+ "platform": "macOS arm64",
+ "version_observed": "0.9.13",
+ "local_executable_sha256": "e2873c24c20cd6562518c737730d590b2491e17d5de1dfbc3fc46205f55a31d8",
+ "observed_on": "2026-11-27",
+ "observed": {
+  "local_build": "codesign --verify --deep --strict passed and the DMG passed hdiutil verify.",
+  "not_observed": [
+   "A launch against the existing per-user data, and any migration of earlier data",
+   "First-run setup wizard",
+   "A campaign, bisection or concolic enrichment completing from the desktop app",
+   "Draft issue and File issue for a binary finding",
+   "Go, Python, Java and JavaScript runs started from the desktop app",
+   "Linux desktop installations",
+   "Physical-bench automotive operations",
+   "syzkaller campaigns from the desktop app"
+  ]
+ },
+ "final_release_installer": {
+  "workflow_run": 45928142473,
+  "candidate_commit": "6ae44d8d05c5560c612335a65fc9ad473e929bf0",
+  "file": "oxfuzz_0.9.13_aarch64.dmg",
+  "sha256": "cf44ea4863a1dc139667da67db89bef85390cf8efd56422f8eba187bd2e6dd84",
+  "executable_sha256": "cc1d63f2ac9861bf53af29ae4b1e7571894d17818e550133fe094d6085b3abfe",
+  "observed_on": "2026-11-27",
+  "checks": [
+   "Downloaded asset SHA-256 matches GitHub metadata, as do the other four installers and the two .app.tar.gz archives",
+   "DMG verification and read-only mount succeeded; the Intel DMG also passed verification",
+   "Copied app passes codesign --verify --deep --strict (ad-hoc signature); bundle version 0.9.13; arm64 executable",
+   "Started from the copy against empty scratch data with a termination request at the end: it stayed up, opened one 1200x800 window and applied all 56 migrations, then exited on the request",
+   "Not installed to /Applications and not started against the existing per-user data"
+  ],
+  "window": "Walked in front on the maintainer's screen with the maintainer's agreement, from the unmodified copy, with HOME, HF_APP_DIR and HF_CONFIG_DIR pointing at a scratch folder and a copy of the desktop app's provider configuration (DeepSeek), deleted afterwards. The window showed oxfuzz v0.9.13 with the full sidebar. A project folder holding the picinfo sample (an aarch64 file reader with a planted fault) was opened through the folder dialog. The Binary view read picinfo without running it (aarch64, dynamically linked, 69.2 KiB, 19 imports) and suggested the file-argument mode with its reason. Draft seeds returned 8 model-proposed seeds, which were then used; Refine with AI reduced the dictionary to PIC1. With CompCov on (the default) and persistent mode on main, pressing Start session ran a one-minute session: 501,794 executions at 8,361 per second, 100% stability, one distinct finding, a SEGV at target+0xcbc confirmed by replay. The crashing input the fuzzer kept was already 8 bytes, which the fault needs, so minimization found nothing smaller and none was kept. The Triage view listed the binary session and its finding with four stack frames, and Explain with AI returned a note naming a null or near-null pointer dereference through x22 at ldrb w2, [x22, x0], with the disassembly sent shown beside it. A first attempt at this walk showed an unpainted window because the scratch HOME folder did not exist; the same copy painted normally once it did, as did a launch with an existing HOME, so the blank window came from the test setup."
+ }
+}

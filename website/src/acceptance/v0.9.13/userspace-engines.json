@@ -1,0 +1,71 @@
+{
+ "schema_version": 3,
+ "claim": "userspace_engines",
+ "candidate_commit": "6ae44d8d05c5560c612335a65fc9ad473e929bf0",
+ "tag": "v0.9.13",
+ "qualification_commit": "6ae44d8d05c5560c612335a65fc9ad473e929bf0",
+ "qualification_patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+ "candidate_delta": "None. The qualification ran in a separate worktree checked out at the tag commit and recorded that commit and an empty working-tree patch (the digest above is that of an empty patch).",
+ "source_sha256": "a21529ba223ec0a03b349e9f78b879eed69dc60d8d130dbac1b97fb7bf05a591",
+ "status": "passed",
+ "started_at": "2026-11-27T01:54:16.094482+00:00",
+ "ended_at": "2026-11-27T01:56:29.934269+00:00",
+ "platform": "macOS-27.2.1-arm64-arm-64bit",
+ "sandbox_image": {
+  "reference": "oxfuzz/fuzz-sandbox:0.2.4",
+  "id": "sha256:1c292dbbd5bb16f5489444942542c9c7a5969da7d4f0cf3fce284c38ce39c431",
+  "architecture": "linux/arm64",
+  "distribution": "The image published to GitHub Container Registry for 0.9.11, pulled with scripts/pull-sandbox.sh on 2026-11-25 (ghcr.io/henrycooper86/oxfuzz-fuzz-sandbox@sha256:44b0b5f951634e368e5ed8acb25da84b3ab8a12913ac6fddddf6c23d3620677d) and tagged with the local name. 0.9.12 and 0.9.13 use the same image as 0.9.11."
+ },
+ "cycles": 1,
+ "cpu_cores": 1,
+ "memory_mib": 2048,
+ "smoke_and_replay_duration_secs": 10,
+ "review": "Provider review passed before execution for all three engines, using a local Ollama model (qwen3:8b), as for 0.9.11 and 0.9.12. Explicit human approval was supplied for this exact source pair on 2026-11-27; the pair is unchanged since 0.9.10.",
+ "cleanup": "verified_by_fixture",
+ "engines": {
+  "libfuzzer": {
+   "smoke_passed": true,
+   "smoke_duration_secs": 10,
+   "smoke_execs_per_sec": 1048576.0,
+   "smoke_crashes": 0,
+   "stop_ms": 516,
+   "campaign_run_id": "2ffac975-4a4c-4166-926a-998b4eb4fff0",
+   "replay_run_id": "fd42e6b9-d85d-43ab-b555-ef68098f1537",
+   "binary_sha256": "4bf4a4056cdb4b02400bd74b21261ce2f00b543fd47c1231d3ed8116858d63a2"
+  },
+  "afl++": {
+   "smoke_passed": true,
+   "smoke_duration_secs": 10,
+   "smoke_execs_per_sec": 264431.06,
+   "smoke_crashes": 0,
+   "stop_ms": 1522,
+   "campaign_run_id": "c5641b4f-2f14-4020-ae27-4db6e7921084",
+   "replay_run_id": "08314f9a-ebf1-4312-8643-d2fbf4a5cdb4",
+   "binary_sha256": "87bc80a92dc98d0a254692a4e3f796a8f483e425564ffd01cde09584cc6ffb04"
+  },
+  "honggfuzz": {
+   "smoke_passed": true,
+   "smoke_duration_secs": 10,
+   "smoke_execs_per_sec": 179899.0,
+   "smoke_crashes": 0,
+   "stop_ms": 317,
+   "campaign_run_id": "5e24b39d-d90b-4967-8caa-4055e52ecfb1",
+   "replay_run_id": "4ef62bae-71f5-4b0a-9da6-f02f2557a082",
+   "binary_sha256": "d815b8d237eaf4c3699cda2c00a9ff431990e030ec0206ba429c60e81f35cc74"
+  }
+ },
+ "related_records": {
+  "binary_only_engines": "https://oxfuzz.bionicloud.net/acceptance/v0.9.13/binary-only-engines.json",
+  "language_engines": "https://oxfuzz.bionicloud.net/acceptance/v0.9.8/language-and-binary-engines.json"
+ },
+ "limitations": [
+  "One short cycle per engine does not establish long-duration stability or a statistical latency percentile.",
+  "No crashes occurred; crash reproduction and symbolization are not claimed by this cycle.",
+  "Executed on macOS arm64 with a Linux arm64 Docker sandbox; not a Linux desktop installation test. Windows is not supported.",
+  "The pre-execution review used a small local model rather than the provider configured for the desktop app.",
+  "This cycle covers C sources on libFuzzer, AFL++ and honggfuzz. The binary-only engine has its own 0.9.13 record; the Go, Python, Java and JavaScript engines were not rerun, and their last live results are the 0.9.8 related record, made on a different commit.",
+  "The qualification drives the service operations from a test, not from the desktop app.",
+  "The Docker socket was named with DOCKER_HOST (OrbStack's socket), because this host has no /var/run/docker.sock and the runs redirect HOME. A first attempt without it failed every isolation test before any container started; that attempt is kept with the evidence and is not counted."
+ ]
+}
