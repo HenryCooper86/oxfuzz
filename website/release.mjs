@@ -1,4 +1,4 @@
-export const version = "0.9.12";
+export const version = "0.9.13";
 export const packages = [
   {
     name: `oxfuzz_${version}_aarch64.dmg`,

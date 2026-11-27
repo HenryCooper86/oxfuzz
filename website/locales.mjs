@@ -114,7 +114,7 @@ export const locales = {
 
     new_title: "New in 0.9.12: help for programs without source",
     new_intro:
-      "Released in November 2026. The first item is new in 0.9.12. Kernel fuzzing with KVM and the sandbox you can pull arrived in 0.9.11, the two crash-review items in 0.9.10, and the four languages and <code>oxfuzz binary</code> itself in 0.9.8. The two recordings are real command-line sessions on small sample programs with a planted bug.",
+      "Released in November 2026. The first item is new in 0.9.12, and 0.9.13 fixes how small it minimizes crashing message sequences. Kernel fuzzing with KVM and the sandbox you can pull arrived in 0.9.11, the two crash-review items in 0.9.10, and the four languages and <code>oxfuzz binary</code> itself in 0.9.8. The two recordings are real command-line sessions on small sample programs with a planted bug.",
     new_1_title: "Kernel fuzzing with KVM",
     new_1_text:
       "On a Linux host with <code>/dev/kvm</code>, kernel campaigns use hardware acceleration, and that one device is all the sandbox gains. In our recorded run the test guest booted in 16 seconds instead of 126, and a 30-minute campaign ran 143,404 programs. Kernel crashes are now counted.",
@@ -186,7 +186,7 @@ export const locales = {
     vid_binary_meta:
       "macOS arm64 host, linux/arm64 sandbox image 0.2.4, oxfuzz built from main after 0.9.11 (commit 6fdb3aad), DeepSeek model. Recorded 2026-11-26.",
     new_status:
-      'These features are in the desktop packages below from v0.9.12. The <code>oxfuzz</code> command-line tool is not in those packages; <a href="https://github.com/HenryCooper86/oxfuzz/blob/main/docs/guides/INSTALL.md" rel="noopener">install it from source</a> at the v0.9.12 tag. The <a href="https://github.com/HenryCooper86/oxfuzz/blob/main/CHANGELOG.md" rel="noopener">changelog</a> lists every change.',
+      'These features are in the desktop packages below from v0.9.12. The <code>oxfuzz</code> command-line tool is not in those packages; <a href="https://github.com/HenryCooper86/oxfuzz/blob/main/docs/guides/INSTALL.md" rel="noopener">install it from source</a> at the v0.9.13 tag. The <a href="https://github.com/HenryCooper86/oxfuzz/blob/main/CHANGELOG.md" rel="noopener">changelog</a> lists every change.',
 
     control_title: "The fuzzer runs untrusted code. You stay in charge of it.",
     control_1_title: "Sandboxed",
@@ -364,7 +364,7 @@ export const locales = {
 
     new_title: "0.9.12 新功能：为没有源码的程序提供辅助",
     new_intro:
-      "2026 年 11 月发布。第一项是 0.9.12 的新功能。KVM 加速的内核模糊测试和可直接拉取的沙箱在 0.9.11 加入，两项崩溃审查功能在 0.9.10 加入，四种语言和 <code>oxfuzz binary</code> 本身在 0.9.8 加入。下面两段录屏是真实的命令行运行过程，对象是带有预埋缺陷的小型示例程序。",
+      "2026 年 11 月发布。第一项是 0.9.12 的新功能，0.9.13 修正了崩溃消息序列的最小化结果。KVM 加速的内核模糊测试和可直接拉取的沙箱在 0.9.11 加入，两项崩溃审查功能在 0.9.10 加入，四种语言和 <code>oxfuzz binary</code> 本身在 0.9.8 加入。下面两段录屏是真实的命令行运行过程，对象是带有预埋缺陷的小型示例程序。",
     new_1_title: "KVM 加速的内核模糊测试",
     new_1_text:
       "在带有 <code>/dev/kvm</code> 的 Linux 主机上，内核测试使用硬件加速，沙箱只额外获得这一个设备。在我们记录的运行中，测试虚拟机 16 秒完成启动（模拟环境下需要 126 秒），30 分钟执行了 143,404 个程序。内核崩溃现在也会被计数。",
@@ -436,7 +436,7 @@ export const locales = {
     vid_binary_meta:
       "macOS arm64 主机，linux/arm64 沙箱镜像 0.2.4，0.9.11 之后基于 main 构建的 oxfuzz（提交 6fdb3aad），DeepSeek 模型。录制于 2026-11-26。",
     new_status:
-      '从 v0.9.12 起，下方的桌面安装包已包含这些功能。<code>oxfuzz</code> 命令行工具不在安装包内，请在 v0.9.12 标签处<a href="https://github.com/HenryCooper86/oxfuzz/blob/main/docs/guides/INSTALL.md" rel="noopener">从源码安装</a>。全部改动见<a href="https://github.com/HenryCooper86/oxfuzz/blob/main/CHANGELOG.md" rel="noopener">更新日志</a>。',
+      '从 v0.9.12 起，下方的桌面安装包已包含这些功能。<code>oxfuzz</code> 命令行工具不在安装包内，请在 v0.9.13 标签处<a href="https://github.com/HenryCooper86/oxfuzz/blob/main/docs/guides/INSTALL.md" rel="noopener">从源码安装</a>。全部改动见<a href="https://github.com/HenryCooper86/oxfuzz/blob/main/CHANGELOG.md" rel="noopener">更新日志</a>。',
 
     control_title: "模糊测试运行的是不可信代码，控制权始终在你手里。",
     control_1_title: "沙箱隔离",

@@ -10,6 +10,8 @@ retain only the current release; older entries remain here as the record.
 
 ## Unreleased
 
+## 0.9.13 - 2026-11-27
+
 ### Fixed
 
 - Minimizing a binary-only finding whose input is a message sequence no
