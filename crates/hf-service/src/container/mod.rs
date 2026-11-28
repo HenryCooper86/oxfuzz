@@ -3190,7 +3190,11 @@ fn python_template_draft(
     if persistent {
         hf_harness::persistent::require_persistent_support(engine, candidate.language)?;
     }
-    let source = hf_harness::python_atheris::template(candidate)?;
+    // The module's own exception classes are its deliberate rejections of an
+    // input; an unreadable module leaves every exception a finding.
+    let module_source = target_source::target_file_text(candidate);
+    let source =
+        hf_harness::python_atheris::template_with_module(candidate, module_source.as_deref())?;
     let build_cmd = hf_harness::build_command_for_source(
         engine,
         candidate.language,

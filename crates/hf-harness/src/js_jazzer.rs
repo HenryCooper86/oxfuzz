@@ -191,6 +191,10 @@ pub struct JsTarget {
     pub export: String,
     /// What each of the function's required parameters takes, in order.
     pub inputs: Vec<JsInputKind>,
+    /// The constructor names of the errors the module rejects an input with
+    /// ([`module_errors`]); the harness lets those pass and reports any other
+    /// throw or rejection. Empty: every error is a finding.
+    pub expected_errors: Vec<String>,
 }
 
 /// One `@param` line of a `JSDoc` block.
@@ -424,6 +428,13 @@ pub fn input_kinds(
             "{symbol} has no required parameter for the fuzz input to go to"
         )));
     }
+    // A function with no `@param` line at all (js-yaml's `load(input,
+    // options)`, like most JavaScript) takes the input as text in its first
+    // parameter; the others are left out, as a JavaScript caller may. The
+    // recorded directive shows the choice to the reviewer.
+    if documented.is_empty() {
+        return Ok(vec![JsInputKind::Text]);
+    }
     if required.len() > MAX_PARAMETERS {
         return Err(invalid(format!(
             "{symbol} has {} required parameters; the JavaScript harness fills at most \
@@ -491,7 +502,87 @@ pub fn target_of(
         file,
         export: symbol.to_owned(),
         inputs: input_kinds(signature, &documented, symbol)?,
+        expected_errors: module_errors(target_source),
     })
+}
+
+/// Most error classes one harness lets pass.
+const MAX_EXPECTED_ERRORS: usize = 8;
+
+/// The errors a module rejects an input with: the constructors it defines or
+/// binds, named with a capital and ending in `Error` or `Exception` (`class
+/// ParseError extends Error`, `function FormatError(...)`, `const
+/// YAMLException = require('./exception')`, `import TokenError from ...`).
+/// A built-in such as `RangeError` stays a finding even when the module
+/// throws it: in JavaScript that marks a bug as often as a rejection, and a
+/// helper such as `function throwError(...)` is not a constructor.
+#[must_use]
+pub fn module_errors(module_source: &str) -> Vec<String> {
+    let builtin = [
+        "Error",
+        "TypeError",
+        "RangeError",
+        "SyntaxError",
+        "ReferenceError",
+        "EvalError",
+        "URIError",
+        "AggregateError",
+    ];
+    let mut found: Vec<String> = Vec::new();
+    let add = |name: &str, found: &mut Vec<String>| {
+        if is_identifier(name)
+            && !found.iter().any(|seen| seen == name)
+            && found.len() < MAX_EXPECTED_ERRORS
+        {
+            found.push(name.to_owned());
+        }
+    };
+    let leading_name = |text: &str| -> String {
+        text.trim_start()
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '$')
+            .collect()
+    };
+    for line in module_source.lines() {
+        let line = line.trim_start();
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let name = if let Some(rest) = line.strip_prefix("class ") {
+            leading_name(rest)
+        } else if let Some(rest) = line.strip_prefix("function ") {
+            leading_name(rest)
+        } else if let Some(rest) = line.strip_prefix("import ") {
+            let name = leading_name(rest);
+            if rest.contains(" from ") {
+                name
+            } else {
+                String::new()
+            }
+        } else if let Some(rest) = ["const ", "let ", "var "]
+            .iter()
+            .find_map(|keyword| line.strip_prefix(keyword))
+        {
+            let name = leading_name(rest);
+            let value = rest[name.len()..]
+                .trim_start()
+                .strip_prefix('=')
+                .unwrap_or_default()
+                .trim_start();
+            if value.starts_with("require(") || value.starts_with("class") {
+                name
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+        if name.starts_with(|c: char| c.is_ascii_uppercase())
+            && (name.ends_with("Error") || name.ends_with("Exception"))
+            && !builtin.contains(&name.as_str())
+        {
+            add(&name, &mut found);
+        }
+    }
+    found
 }
 
 /// Render the harness of one target. The text is a pure function of the
@@ -511,12 +602,12 @@ pub fn render(target: &JsTarget) -> String {
         [JsInputKind::Bytes] => (
             "",
             String::new(),
-            format!("  return target.{export}(data);\n"),
+            guarded_call(&format!("target.{export}(data)"), target),
         ),
         [JsInputKind::Text] => (
             "",
             String::new(),
-            format!("  return target.{export}(data.toString('utf-8'));\n"),
+            guarded_call(&format!("target.{export}(data.toString('utf-8'))"), target),
         ),
         inputs => {
             let mut body = String::from("  const provider = new FuzzedDataProvider(data);\n");
@@ -530,7 +621,10 @@ pub fn render(target: &JsTarget) -> String {
                 );
                 names.push(name);
             }
-            let _ = writeln!(body, "  return target.{export}({});", names.join(", "));
+            body.push_str(&guarded_call(
+                &format!("target.{export}({})", names.join(", ")),
+                target,
+            ));
             (
                 "import { createRequire } from 'node:module';\n",
                 format!(
@@ -541,9 +635,33 @@ pub fn render(target: &JsTarget) -> String {
             )
         }
     };
+    let expects = if target.expected_errors.is_empty() {
+        String::new()
+    } else {
+        format!(" expects:{}", target.expected_errors.join(","))
+    };
+    let rejection = if target.expected_errors.is_empty() {
+        String::new()
+    } else {
+        let names = target
+            .expected_errors
+            .iter()
+            .map(|name| format!("'{name}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "const expected = [{names}];\n\
+             function rejection(error) {{\n\
+             \x20 const name = error && error.constructor && error.constructor.name;\n\
+             \x20 if (!expected.includes(name)) {{\n\
+             \x20   throw error;\n\
+             \x20 }}\n\
+             }}\n"
+        )
+    };
     format!(
         "{launcher}\
-         {directive}{file} {export} {inputs}\n\
+         {directive}{file} {export} {inputs}{expects}\n\
          import fs from 'node:fs';\n\
          {provider_import}\
          import path from 'node:path';\n\
@@ -558,6 +676,7 @@ pub fn render(target: &JsTarget) -> String {
          \x20 throw new Error('oxfuzz: {file} does not export a function named {export}');\n\
          }}\n\
          {provider}\
+         {rejection}\
          \n\
          export function fuzz(data) {{\n\
          {callback}\
@@ -568,6 +687,25 @@ pub fn render(target: &JsTarget) -> String {
         inputs = kinds.join(","),
         directory = hf_engine::jazzerjs::HARNESS_DIR_ENV,
         retained = RETAINED_SOURCES_DIR,
+    )
+}
+
+/// The call to the target inside `fuzz`: returned as is, or, when the module
+/// has expected errors, with those let pass whether thrown or rejected.
+fn guarded_call(call: &str, target: &JsTarget) -> String {
+    if target.expected_errors.is_empty() {
+        return format!("  return {call};\n");
+    }
+    format!(
+        "  try {{\n\
+         \x20   const result = {call};\n\
+         \x20   if (result && typeof result.then === 'function') {{\n\
+         \x20     return result.catch(rejection);\n\
+         \x20   }}\n\
+         \x20   return result;\n\
+         \x20 }} catch (error) {{\n\
+         \x20   rejection(error);\n\
+         \x20 }}\n"
     )
 }
 
@@ -599,8 +737,25 @@ pub fn recorded_target(source: &str) -> Result<JsTarget, ClassifiedError> {
         .find_map(|line| line.strip_prefix(TARGET_DIRECTIVE))
         .ok_or_else(malformed)?;
     let fields: Vec<&str> = line.split(' ').collect();
-    let [file, export, inputs] = fields.as_slice() else {
-        return Err(malformed());
+    let (file, export, inputs, expects) = match fields.as_slice() {
+        [file, export, inputs] => (file, export, inputs, None),
+        [file, export, inputs, expects] => (file, export, inputs, Some(*expects)),
+        _ => return Err(malformed()),
+    };
+    let expected_errors: Vec<String> = match expects {
+        None => Vec::new(),
+        Some(field) => {
+            let names: Vec<String> = field
+                .strip_prefix("expects:")
+                .ok_or_else(malformed)?
+                .split(',')
+                .map(str::to_owned)
+                .collect();
+            if names.len() > MAX_EXPECTED_ERRORS || !names.iter().all(|name| is_identifier(name)) {
+                return Err(malformed());
+            }
+            names
+        }
     };
     if !is_module_path(file) || !is_identifier(export) {
         return Err(malformed());
@@ -617,6 +772,7 @@ pub fn recorded_target(source: &str) -> Result<JsTarget, ClassifiedError> {
         file: (*file).to_owned(),
         export: (*export).to_owned(),
         inputs,
+        expected_errors,
     })
 }
 
@@ -942,6 +1098,7 @@ mod tests {
                 file: "src/codec.mjs".to_owned(),
                 export: "decode".to_owned(),
                 inputs: vec![JsInputKind::Text],
+                expected_errors: Vec::new(),
             }
         );
 
@@ -1034,10 +1191,81 @@ mod tests {
             path.contains("cannot be loaded by the JavaScript harness"),
             "{path}"
         );
-        let undocumented = refuse("frames.js", "plain", 14, "function plain(text)");
+    }
+
+    #[test]
+    fn an_undocumented_function_takes_the_input_as_text_in_its_first_parameter() {
+        // js-yaml 4.1.0: `function load(input, options)` has no JSDoc, like
+        // most real JavaScript, and was refused. With no `@param` line at all,
+        // the first parameter takes the input as a string and the rest are
+        // left out, as a JavaScript caller may; the directive shows the
+        // choice to the reviewer.
+        let plain = template(
+            &candidate("frames.js", "plain", 14, "function plain(text)"),
+            FRAMES,
+        )
+        .unwrap();
+        assert!(plain.contains(" frames.js plain string\n"), "{plain}");
         assert!(
-            undocumented.contains("does not document the type of 'text'"),
-            "{undocumented}"
+            plain.contains("  return target.plain(data.toString('utf-8'));\n"),
+            "{plain}"
+        );
+
+        let loader = "var YAMLException = require('./exception');\n\
+                      function load(input, options) {\n  throw new YAMLException('bad');\n}\n\
+                      module.exports.load = load;\n";
+        let source = template(
+            &candidate("lib/loader.js", "load", 2, "function load(input, options)"),
+            loader,
+        )
+        .unwrap();
+        assert!(
+            source.contains(" lib/loader.js load string expects:YAMLException\n"),
+            "{source}"
+        );
+        for expected in [
+            "const expected = ['YAMLException'];\n",
+            "  try {\n    const result = target.load(data.toString('utf-8'));\n",
+            "      return result.catch(rejection);\n",
+            "  } catch (error) {\n    rejection(error);\n  }\n",
+        ] {
+            assert!(source.contains(expected), "{expected:?}\n{source}");
+        }
+        assert_eq!(render(&recorded_target(&source).unwrap()), source);
+        assert!(
+            lint(&source, "load").is_empty(),
+            "{:?}",
+            lint(&source, "load")
+        );
+        // A partly documented function still names the parameter it lacks.
+        let partly = template(
+            &candidate(
+                "frames.js",
+                "parse",
+                10,
+                "function parse(data, depth, extra, strict)",
+            ),
+            FRAMES,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            partly.contains("does not document the type of 'extra'"),
+            "{partly}"
+        );
+    }
+
+    #[test]
+    fn the_modules_own_error_classes_are_expected() {
+        let source = "const YAMLException = require('./exception');\n\
+                      class ParseError extends Error {}\n\
+                      function FormatError(message) { this.message = message; }\n\
+                      import TokenError from './token.js';\n\
+                      function throwError(state, message) { throw generateError(state, message); }\n\
+                      const limit = () => { throw new RangeError('deep'); };\n";
+        assert_eq!(
+            super::module_errors(source),
+            ["YAMLException", "ParseError", "FormatError", "TokenError"]
         );
     }
 

@@ -117,6 +117,17 @@ The argv is fixed libFuzzer flags (`-max_total_time`, `-artifact_prefix`,
 recorded seed and per-input timeout). A run is one JVM; fork and job flags
 are refused.
 
+The template treats the types in the method's `throws` clause, qualified
+through the file's imports, `java.lang` or its own package, as the method's
+rejections of an input (JSON-java's `XML.toJSONObject` declares
+`JSONException`): the entry point declares `throws Throwable`, catches, and
+rethrows anything that is not one of them. `Exception`, `Throwable`,
+`RuntimeException` and `Error` are never treated as rejections. The
+directive records the list (`throws:org.json.JSONException`).
+
+The seed is passed as its low 32 bits, the value libFuzzer keeps of any
+`-seed`; Jazzer refuses a wider value and would not start.
+
 An uncaught exception or a Jazzer bug-detector report exits 77 and writes
 `crash-<sha1>`, collected like a libFuzzer artifact. Classification names the
 exception line and signs the `at` frames of the code under test, leaving out

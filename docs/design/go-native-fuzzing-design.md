@@ -22,8 +22,11 @@ network disabled.
 - **Harness.** A Go harness is always the fixed template
   (`hf_harness::go_native::template`): one `FuzzXxx` that passes the input to
   the selected function. A function of one `[]byte` or `string` receives the
-  input as it is. Any other parameter list made of `[]byte`, `string`,
-  `bool`, integer and float types is decoded from one `[]byte` input by a
+  input as it is. An `any` (`interface{}`) parameter is a decode destination
+  (`Decode(data string, v any)`, the shape of `json.Unmarshal`): it reads no
+  input and receives a fresh `*map[string]interface{}`. Any other parameter
+  list made of `[]byte`, `string`, `bool`, integer and float types, and such
+  destinations, is decoded from one `[]byte` input by a
   small reader the template carries (fixed-width little-endian numbers, a
   length-prefixed slice or string for every parameter but the last, which
   takes the rest), so the fuzz callback, and with it the corpus format, is

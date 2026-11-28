@@ -83,6 +83,22 @@ retain only the current release; older entries remain here as the record.
 - Triage of an AFL++ run that saved no crash input no longer starts CASR
   and warns "No crashes found", and the expected empty-input gap of the
   AFL++ behavioral probe is no longer logged as a warning.
+- Go, Python, Java and JavaScript fuzzing work on real libraries
+  (BurntSushi/toml, tomli, JSON-java, js-yaml 4.1.0) end to end:
+  - Jazzer runs start: the run seed is passed as the 32-bit value libFuzzer
+    already used (Jazzer refused a wider one, and every Jazzer smoke run
+    failed); the full seed stays recorded.
+  - The Python, Java and JavaScript templates let a target reject an input
+    the way its API does (tomli's `TOMLDecodeError`, a Java `throws`
+    clause, js-yaml's `YAMLException`) instead of reporting the first
+    invalid input as a crash; a Java method with a checked exception now
+    compiles.
+  - The Go template accepts an `any` decode destination
+    (`Decode(data string, v any)`, the shape of `json.Unmarshal`).
+  - A JavaScript function with no JSDoc takes the input as a string in its
+    first parameter instead of being refused.
+  - Go runs record their total execution count.
+  - `oxfuzz harness --help` names every harness engine.
 
 ## 0.9.13 - 2026-11-27
 

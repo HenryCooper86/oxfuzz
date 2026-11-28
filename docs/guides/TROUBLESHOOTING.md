@@ -425,13 +425,26 @@ the top level of a `.js`, `.mjs` or `.cjs` file and exported under its own
 name. Methods, classes, default exports, generators, and TypeScript are
 outside it.
 
-`does not document the type of '<name>'` means a required parameter has no
-JSDoc type. JavaScript has no types to read, and calling the function with
-the wrong kind of value would report an error the harness caused, so each
-required parameter needs a line in the comment block directly above the
-function: `@param {Buffer} data`, with `Buffer`, `Uint8Array`, `string`,
-`number` or `boolean` as the type. Parameters with a default value and
-parameters documented as optional are left out of the call.
+A function with no `@param` line at all (js-yaml's `load(input, options)`)
+takes the input as text in its first parameter, and its other parameters are
+left out, as a JavaScript caller may leave them; the harness's directive line
+records `string` so the reviewer sees the choice. `does not document the
+type of '<name>'` means the function documents some parameters but not a
+required one: JavaScript has no types to read, and calling the function with
+the wrong kind of value would report an error the harness caused, so add a
+line to the comment block directly above the function: `@param {Buffer}
+data`, with `Buffer`, `Uint8Array`, `string`, `number` or `boolean` as the
+type. Parameters with a default value and parameters documented as optional
+are left out of the call.
+
+The JavaScript, Python and Java templates let a target reject an input the
+way its own API does: an error class the JavaScript module defines or
+imports (js-yaml's `YAMLException`), an exception class the Python module
+defines or a `ValueError`, `RecursionError`, `OverflowError`, `UnicodeError`
+or `EOFError` it raises itself (tomli's `TOMLDecodeError` and its nesting
+limit), and the types a Java method declares in its `throws` clause
+(JSON-java's `JSONException`). Every other exception is a finding. The
+harness's directive line lists what it lets pass.
 
 `the project root has no package.json` means the directory given as
 `<PROJECT>` is not the package root. Point the command at the directory that
@@ -512,9 +525,11 @@ A Go target builds only for the `go-native` engine. Add `"go-native"` to
 `[fuzzing] enabled_engines` and pass `--engine go-native`; any other engine is
 refused before work starts. The harness path covers a package-level exported
 function whose parameters are each `[]byte`, `string`, `bool`, an integer
-type or a float type; methods, generic functions, functions in package
-`main`, and parameters of any other type (structs, interfaces, slices of
-anything but bytes) are refused with the reason.
+type, a float type, or an `any` (`interface{}`) decode destination, which
+gets a fresh `*map[string]interface{}`; at least one parameter must be read
+from the input. Methods, generic functions, functions in package `main`, and
+parameters of any other type (structs, named interfaces, slices of anything
+but bytes) are refused with the reason.
 
 The build runs offline (`GOPROXY=off`): a module that imports packages outside
 the standard library must carry a `vendor/` tree, otherwise `go test -c` fails

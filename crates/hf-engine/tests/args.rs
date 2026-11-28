@@ -757,17 +757,17 @@ fn libfuzzer_seed_follows_extra_args_so_the_recorded_seed_wins() {
     // hand-passed `-seed=` in the escape hatch must not silently override it.
     // libFuzzer applies the last occurrence of a repeated flag, so the
     // recorded seed is emitted after `extra_args`.
-    let wide = 9_223_372_036_854_775_809_u64; // 2^63+1: every bit must survive
+    // 2^63+1. libFuzzer keeps the low 32 bits of `-seed` (it prints `Seed: 1`
+    // for this value), and Jazzer refuses anything wider, so the argv carries
+    // those bits; the full value stays recorded in the run config.
+    let wide = 9_223_372_036_854_775_809_u64;
     let mut c = cfg(EngineKind::LibFuzzer, 60);
     c.seed = Some(wide);
     c.extra_args.push("-seed=9".to_owned());
     let args =
         hf_engine::libfuzzer::build_run_args(&c, "/work/fuzz_bin", "/work/corpus", "/work/out")
             .unwrap();
-    let recorded = args
-        .iter()
-        .rposition(|a| a == &format!("-seed={wide}"))
-        .unwrap();
+    let recorded = args.iter().rposition(|a| a == "-seed=1").unwrap();
     let hatch = args.iter().position(|a| a == "-seed=9").unwrap();
     assert!(
         hatch < recorded,
@@ -1200,4 +1200,21 @@ fn atheris_and_jazzer_start_the_artifact_as_one_libfuzzer_process() {
         assert!(!hf_engine::atheris::exited_outside_fuzzing(finished));
         assert!(!hf_engine::jazzer::exited_outside_fuzzing(finished));
     }
+}
+
+#[test]
+fn a_jazzer_run_passes_a_seed_jazzer_accepts() {
+    // JSON-java under Jazzer: the agent refused `-seed=3549391019218961329`
+    // ("exceeds range of unsigned int") and the smoke run never started.
+    // libFuzzer uses the same low 32 bits, 2508325809, for that seed.
+    let mut c = cfg(EngineKind::Jazzer, 60);
+    c.seed = Some(3_549_391_019_218_961_329);
+    let args =
+        hf_engine::jazzer::build_run_args(&c, "/work/fuzz", "/work/corpus", "/work/out").unwrap();
+    assert!(args.iter().any(|a| a == "-seed=2508325809"), "{args:?}");
+    // Low bits of zero would read as "random": one keeps it fixed.
+    c.seed = Some(1 << 32);
+    let args =
+        hf_engine::jazzer::build_run_args(&c, "/work/fuzz", "/work/corpus", "/work/out").unwrap();
+    assert!(args.iter().any(|a| a == "-seed=1"), "{args:?}");
 }

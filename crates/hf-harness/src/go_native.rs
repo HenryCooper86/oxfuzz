@@ -9,8 +9,9 @@
 //! test binary is what smoke runs and campaigns execute.
 //!
 //! The supported target class is a package-level exported function whose
-//! parameters are each `[]byte`, `string`, `bool`, an integer type, or a
-//! float type. A function taking exactly one `[]byte` or `string` is fuzzed
+//! parameters are each `[]byte`, `string`, `bool`, an integer type, a float
+//! type, or an `any` (`interface{}`) decode destination, at least one of
+//! them read from the input. A function taking exactly one `[]byte` or `string` is fuzzed
 //! with that Go type directly; any other accepted parameter list is filled
 //! from one `[]byte` fuzz input by a small decoder written into the harness,
 //! so the corpus format is the same for every Go target.
@@ -113,6 +114,10 @@ pub enum GoParameter {
         name: &'static str,
         bytes: u8,
     },
+    /// An `any` or `interface{}` parameter: the value a decoder fills
+    /// (`json.Unmarshal(data, v)`). It reads no input and is passed a fresh
+    /// `*map[string]interface{}`, which JSON, TOML and YAML decoders accept.
+    Destination,
 }
 
 /// Integer types the decoder can build, with the input bytes each takes.
@@ -145,6 +150,7 @@ impl GoParameter {
                 name: "float64",
                 bytes: 8,
             }),
+            "any" | "interface{}" => Some(Self::Destination),
             _ => INTEGER_TYPES
                 .iter()
                 .find(|(integer, _)| *integer == name)
@@ -165,7 +171,13 @@ impl GoParameter {
             Self::Integer { name, bytes } => format!("{name}(in.number({bytes}))"),
             Self::Float { bytes: 4, .. } => "math.Float32frombits(uint32(in.number(4)))".to_owned(),
             Self::Float { .. } => "math.Float64frombits(in.number(8))".to_owned(),
+            Self::Destination => "&map[string]interface{}{}".to_owned(),
         }
+    }
+
+    /// Whether the argument is read from the fuzz input.
+    fn reads_input(self) -> bool {
+        self != Self::Destination
     }
 }
 
@@ -369,12 +381,12 @@ pub fn template(target: &TargetCandidate, target_source: &str) -> Result<String,
     let kind = signature.and_then(|signature| input_kind(signature, symbol));
     let typed = signature
         .and_then(|signature| parameters(signature, symbol))
-        .filter(|parameters| !parameters.is_empty())
+        .filter(|parameters| parameters.iter().any(|parameter| parameter.reads_input()))
         .ok_or_else(|| {
             invalid(format!(
                 "'{symbol}' is not in the supported Go target class: a package-level function \
-                 whose parameters are each []byte, string, bool, an integer type, or a float \
-                 type{}",
+                 whose parameters are each []byte, string, bool, an integer type, a float \
+                 type, or an `any` destination, at least one of them input{}",
                 signature
                     .map(|signature| format!(" (found: {signature})"))
                     .unwrap_or_default()
@@ -444,12 +456,16 @@ fn typed_template(
     };
     let mut arguments = String::new();
     let mut names = Vec::with_capacity(parameters.len());
+    // The last parameter that reads input takes what is left of it.
+    let last_input = parameters
+        .iter()
+        .rposition(|parameter| parameter.reads_input());
     for (index, parameter) in parameters.iter().enumerate() {
         let name = format!("a{index}");
         let _ = writeln!(
             arguments,
             "\t\t{name} := {}",
-            parameter.decode(index + 1 == parameters.len())
+            parameter.decode(Some(index) == last_input)
         );
         names.push(name);
     }
@@ -850,6 +866,46 @@ mod tests {
     }
 
     #[test]
+    fn a_decode_destination_gets_a_fresh_map_and_takes_no_input() {
+        // BurntSushi/toml: `func Decode(data string, v any) (MetaData, error)`,
+        // the shape of every Go decoder (`json.Unmarshal`), was outside the
+        // supported class, and Go harnesses have no model-written path.
+        let target = candidate(
+            "decode.go",
+            "Decode",
+            "func Decode(data string, v any) (MetaData, error)",
+        );
+        let source = template(&target, "package toml\n").unwrap();
+        for expected in [
+            // The input parameter is the last one that reads input, so it
+            // takes the whole input: a raw TOML corpus file works as is.
+            "\t\ta0 := string(in.rest())\n",
+            "\t\ta1 := &map[string]interface{}{}\n",
+            "\t\tDecode(a0, a1)\n",
+        ] {
+            assert!(source.contains(expected), "{expected:?}\n{source}");
+        }
+        assert!(
+            lint(&source, "Decode").is_empty(),
+            "{:?}",
+            lint(&source, "Decode")
+        );
+        assert_eq!(
+            parameters(
+                "func Unmarshal(data []byte, v interface{}) error",
+                "Unmarshal"
+            ),
+            Some(vec![GoParameter::Bytes, GoParameter::Destination])
+        );
+        // A destination alone gives the fuzzer nothing to vary.
+        assert!(template(
+            &candidate("p.go", "Fill", "func Fill(v any) error"),
+            "package p\n"
+        )
+        .is_err());
+    }
+
+    #[test]
     fn a_typed_target_decodes_its_arguments_from_one_byte_slice() {
         let target = candidate(
             "pkg/wire/parse.go",
@@ -997,7 +1053,9 @@ mod tests {
             let message = refused(&outside, "package p\n");
             assert!(
                 message.contains("not in the supported Go target class")
-                    && message.contains("[]byte, string, bool, an integer type, or a float type")
+                    && message.contains(
+                        "[]byte, string, bool, an integer type, a float type, or an `any` destination"
+                    )
                     && message.contains(signature),
                 "{signature}: {message}"
             );

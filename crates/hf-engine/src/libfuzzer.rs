@@ -82,7 +82,7 @@ pub fn build_run_args(
     // (what replay re-executes), so the escape hatch must not silently
     // override it.
     if let Some(seed) = cfg.seed {
-        args.push(format!("-seed={seed}"));
+        args.push(format!("-seed={}", crate::seed::engine_seed(seed)));
     }
     // The explicit per-input timeout is emitted after `extra_args`: libFuzzer
     // applies the last occurrence of a repeated flag, so a configured timeout
@@ -135,7 +135,7 @@ pub(crate) fn build_single_process_args(
     args.push(corpus.to_owned());
     args.extend(cfg.extra_args.iter().cloned());
     if let Some(seed) = cfg.seed {
-        args.push(format!("-seed={seed}"));
+        args.push(format!("-seed={}", crate::seed::engine_seed(seed)));
     }
     if let Some(timeout) = cfg.input_timeout {
         args.push(format!("-timeout={}", crate::timeout_secs_ceil(timeout)));

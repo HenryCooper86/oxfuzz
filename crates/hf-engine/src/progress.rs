@@ -374,6 +374,15 @@ fn go_native_status_events(line: &str, lower: &str) -> Option<Vec<FuzzProgress>>
         return None;
     }
     let mut events = Vec::new();
+    if let Some(total) = lower
+        .find("execs:")
+        .and_then(|at| first_number(&lower[at + "execs:".len()..]))
+    {
+        events.push(FuzzProgress::Stats(EngineStats {
+            execs_total: Some(total),
+            ..EngineStats::default()
+        }));
+    }
     // The line carries two parenthesized groups -- the rate `(4115/sec)` and
     // the coverage total `(total: 8)` -- so anchor on `/sec)` and scan back
     // to its opening parenthesis rather than taking the last group.
@@ -553,6 +562,25 @@ fn first_number(s: &str) -> Option<u64> {
 mod tests {
     use super::{parse_progress_events, parse_syzkaller_status};
     use hf_core::engine::FuzzProgress;
+
+    #[test]
+    fn a_go_status_line_reports_its_execution_total() {
+        // BurntSushi/toml under go-native: the run summary had a peak rate
+        // and coverage but no total, though every status line carries it.
+        let events = parse_progress_events(
+            "fuzz: elapsed: 9s, execs: 1045336 (120113/sec), new interesting: 57 (total: 875)",
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                FuzzProgress::Stats(stats) if stats.execs_total == Some(1_045_336)
+            )),
+            "{events:?}"
+        );
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, FuzzProgress::EdgesCovered(875))));
+    }
 
     #[test]
     fn malformed_engine_rates_never_emit_nonfinite_or_negative_values() {

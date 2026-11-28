@@ -148,6 +148,10 @@ pub struct PythonTarget {
     pub function: String,
     /// What each of the function's required parameters takes, in order.
     pub inputs: Vec<PythonInputKind>,
+    /// Exception classes the target's own module defines, which the harness
+    /// catches as the target's deliberate rejection of an input
+    /// ([`module_errors`]). Empty: every exception is a finding.
+    pub expected_errors: Vec<String>,
 }
 
 impl PythonTarget {
@@ -354,7 +358,94 @@ pub fn target_of(candidate: &TargetCandidate) -> Result<PythonTarget, Classified
         module,
         function: symbol.to_owned(),
         inputs: input_kinds(signature, symbol)?,
+        expected_errors: Vec::new(),
     })
+}
+
+/// Most exception classes one harness catches.
+const MAX_EXPECTED_ERRORS: usize = 8;
+
+/// Built-in exceptions that say an input was bad, which a module may raise
+/// on purpose to reject one (tomli's nesting limit is `raise
+/// RecursionError(...)`). An explicit `raise` of one of these in the target
+/// module makes it expected. The others stay findings however they are
+/// raised: a module raises `TypeError`, `KeyError` or `IndexError` for API
+/// misuse or internal control flow, not to reject input the harness passes,
+/// and `AssertionError` or a bare `Exception` is never a contract.
+const BUILTIN_REJECTIONS: [&str; 6] = [
+    "ValueError",
+    "RecursionError",
+    "OverflowError",
+    "UnicodeError",
+    "UnicodeDecodeError",
+    "EOFError",
+];
+
+/// The exceptions a module uses to reject an input on purpose: the classes
+/// it defines at top level whose name, or a base's, ends in `Error` or
+/// `Exception` (`class TOMLDecodeError(ValueError):`), then the
+/// built-in input errors (`ValueError`, `RecursionError`, `OverflowError`,
+/// `UnicodeError`, `UnicodeDecodeError`, `EOFError`) it raises explicitly.
+/// A built-in such as
+/// `IndexError` that the module never raises itself stays a finding.
+#[must_use]
+pub fn module_errors(module_source: &str) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for line in module_source.lines() {
+        let Some(rest) = line.strip_prefix("class ") else {
+            continue;
+        };
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        let bases = rest[name.len()..]
+            .trim_start()
+            .strip_prefix('(')
+            .and_then(|bases| bases.split_once(')'))
+            .map_or("", |(bases, _)| bases);
+        let error_like = |word: &str| {
+            let word = word.trim().rsplit('.').next().unwrap_or_default();
+            word.ends_with("Error") || word.ends_with("Exception")
+        };
+        if is_identifier(&name)
+            && (error_like(&name) || bases.split(',').any(error_like))
+            && !found.contains(&name)
+            && found.len() < MAX_EXPECTED_ERRORS
+        {
+            found.push(name);
+        }
+    }
+    for line in module_source.lines() {
+        let Some(rest) = line.trim_start().strip_prefix("raise ") else {
+            continue;
+        };
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if BUILTIN_REJECTIONS.contains(&name.as_str())
+            && !found.contains(&name)
+            && found.len() < MAX_EXPECTED_ERRORS
+        {
+            found.push(name);
+        }
+    }
+    found
+}
+
+/// [`template`], catching the exception classes `module_source`, the target
+/// module's text, defines ([`module_errors`]).
+///
+/// # Errors
+/// See [`target_of`].
+pub fn template_with_module(
+    candidate: &TargetCandidate,
+    module_source: Option<&str>,
+) -> Result<String, ClassifiedError> {
+    let mut target = target_of(candidate)?;
+    target.expected_errors = module_source.map(module_errors).unwrap_or_default();
+    Ok(render(&target))
 }
 
 /// Render the harness script of one target. The text is a pure function of
@@ -401,6 +492,32 @@ pub fn render(target: &PythonTarget) -> String {
             body
         }
     };
+    let callback = if target.expected_errors.is_empty() {
+        callback
+    } else {
+        let caught = target
+            .expected_errors
+            .iter()
+            .map(|name| {
+                if BUILTIN_REJECTIONS.contains(&name.as_str()) {
+                    format!("{name},")
+                } else {
+                    format!("oxfuzz_target.{name},")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut indented = String::new();
+        for line in callback.lines() {
+            let _ = writeln!(indented, "    {line}");
+        }
+        format!("\x20   try:\n{indented}\x20   except ({caught}):\n\x20       pass\n")
+    };
+    let errors = if target.expected_errors.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", target.expected_errors.join(","))
+    };
     let vendored = VENDORED_PACKAGES_DIR
         .split('/')
         .map(|part| format!("\"{part}\""))
@@ -408,7 +525,7 @@ pub fn render(target: &PythonTarget) -> String {
         .join(", ");
     format!(
         "{interpreter}\n\
-         {directive}{root_mark} {module}:{function} {input}\n\
+         {directive}{root_mark} {module}:{function} {input}{errors}\n\
          import os\n\
          import sys\n\
          \n\
@@ -464,8 +581,20 @@ pub fn recorded_target(source: &str) -> Result<PythonTarget, ClassifiedError> {
         .find_map(|line| line.strip_prefix(TARGET_DIRECTIVE))
         .ok_or_else(malformed)?;
     let fields: Vec<&str> = line.split(' ').collect();
-    let [root, target, input] = fields.as_slice() else {
-        return Err(malformed());
+    let (root, target, input, errors) = match fields.as_slice() {
+        [root, target, input] => (root, target, input, None),
+        [root, target, input, errors] => (root, target, input, Some(*errors)),
+        _ => return Err(malformed()),
+    };
+    let expected_errors: Vec<String> = match errors {
+        None => Vec::new(),
+        Some(errors) => {
+            let names: Vec<String> = errors.split(',').map(str::to_owned).collect();
+            if names.len() > MAX_EXPECTED_ERRORS || !names.iter().all(|name| is_identifier(name)) {
+                return Err(malformed());
+            }
+            names
+        }
     };
     let root = match *root {
         PROJECT_ROOT_MARK => String::new(),
@@ -485,6 +614,7 @@ pub fn recorded_target(source: &str) -> Result<PythonTarget, ClassifiedError> {
             .map(PythonInputKind::parse)
             .collect::<Option<Vec<_>>>()
             .ok_or_else(malformed)?,
+        expected_errors,
     })
 }
 
@@ -593,6 +723,86 @@ mod tests {
             reachable_functions: Vec::new(),
             accumulated_complexity: 0,
         }
+    }
+
+    #[test]
+    fn the_target_modules_own_errors_are_expected_rejections() {
+        // tomli: `loads` raises `TOMLDecodeError` for every invalid document.
+        // The template let it propagate, so the first smoke input was a
+        // "crash" (`TOMLDecodeError: Invalid statement`).
+        let module = "from ._re import x\n\nclass DEPRECATED_DEFAULT:\n    pass\n\n\
+                      class TOMLDecodeError(ValueError):\n    pass\n\n\
+                      class Flags:\n    pass\n\n    class InnerError(Exception):\n        pass\n";
+        assert_eq!(
+            super::module_errors(module),
+            vec!["TOMLDecodeError".to_owned()]
+        );
+        // tomli also raises a built-in on purpose: its nesting limit is a
+        // `raise RecursionError(...)`, and its own fuzzer catches it. A
+        // deliberate `raise` of an assertion or a bare `Exception` is not a
+        // rejection the harness may hide.
+        let raising = format!(
+            "{module}\ndef parse(s):\n    if deep:\n        raise RecursionError(\n            'nested'\n        )\n\
+             \x20   assert s, 'never'\n    raise AssertionError('bug')\n    raise Exception('x')\n\
+             \x20   raise TypeError('Expected str object')\n    raise KeyError(key)\n"
+        );
+        assert_eq!(
+            super::module_errors(&raising),
+            vec!["TOMLDecodeError".to_owned(), "RecursionError".to_owned()]
+        );
+        let caught = template_with_module(
+            &candidate(
+                "src/tomli/_parser.py",
+                "loads",
+                "def loads(__s: str) -> dict",
+            ),
+            Some(&raising),
+        )
+        .unwrap();
+        assert!(
+            caught.contains("    except (oxfuzz_target.TOMLDecodeError, RecursionError,):\n"),
+            "{caught}"
+        );
+        assert!(
+            lint(&caught, "loads").is_empty(),
+            "{:?}",
+            lint(&caught, "loads")
+        );
+
+        let target = candidate(
+            "src/tomli/_parser.py",
+            "loads",
+            "def loads(__s: str) -> dict",
+        );
+        let source = template_with_module(&target, Some(module)).unwrap();
+        assert!(
+            source.contains("# oxfuzz:python-target src tomli._parser:loads str TOMLDecodeError\n"),
+            "{source}"
+        );
+        assert!(
+            source.contains(
+                "def TestOneInput(data):\n    try:\n        \
+                 oxfuzz_target.loads(data.decode(\"utf-8\", \"replace\"))\n    \
+                 except (oxfuzz_target.TOMLDecodeError,):\n        pass\n"
+            ),
+            "{source}"
+        );
+        assert!(
+            lint(&source, "loads").is_empty(),
+            "{:?}",
+            lint(&source, "loads")
+        );
+        // The recorded errors round-trip through the directive the lint reads.
+        assert_eq!(
+            recorded_target(&source).unwrap().expected_errors,
+            vec!["TOMLDecodeError".to_owned()]
+        );
+        // A built-in raised by the target is still a finding: nothing is
+        // caught when the module defines no error of its own.
+        let plain =
+            template_with_module(&target, Some("def loads(s):\n    return s[0]\n")).unwrap();
+        assert!(!plain.contains("try:"), "{plain}");
+        assert_eq!(plain, template(&target).unwrap());
     }
 
     #[test]
@@ -760,6 +970,7 @@ mod tests {
                 module: "pkg.frames".to_owned(),
                 function: "parse".to_owned(),
                 inputs: vec![PythonInputKind::Text],
+                expected_errors: Vec::new(),
             }
         );
 
