@@ -3338,3 +3338,66 @@ async fn exports_of_an_untriaged_crashing_run_refuse_and_name_triage() {
     let sarif = container.export_sarif(&project, "parse").await.unwrap();
     assert!(sarif.contains("\"results\": []"), "{sarif}");
 }
+
+/// Reading cached coverage never creates a target workspace. The Discover
+/// view's "Unreached entry points" panel reads cached coverage for every
+/// discovered target and left one empty workspace folder per target (96 for
+/// c-ares) although it measures nothing.
+#[tokio::test]
+async fn a_coverage_read_for_a_target_without_a_harness_creates_no_workspace() {
+    isolate_workspace();
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("no_harness_project");
+    std::fs::create_dir_all(&project).unwrap();
+    let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None);
+
+    assert!(container
+        .coverage_functions(&project, "parse")
+        .await
+        .is_empty());
+    assert!(container
+        .coverage_summary(&project, "parse")
+        .await
+        .is_none());
+
+    assert!(
+        !hf_service::workspace_dir(&project, "parse").exists(),
+        "a read created {}",
+        hf_service::workspace_dir(&project, "parse").display()
+    );
+}
+
+/// Opening the Corpus view for a discovered target that was never prepared
+/// answers "no harness yet" without creating its workspace.
+#[tokio::test]
+async fn corpus_capabilities_of_an_unprepared_target_create_no_workspace() {
+    isolate_workspace();
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("unprepared_project");
+    std::fs::create_dir_all(&project).unwrap();
+    let project = project.canonicalize().unwrap();
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("runs.db"))
+            .await
+            .unwrap(),
+    );
+    let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None)
+        .with_store(Arc::clone(&store));
+    let target = stored_target(&project, "parse");
+    store
+        .upsert_target(&target, chrono::Utc::now())
+        .await
+        .unwrap();
+
+    let capabilities = container
+        .corpus_capabilities(&project, "parse")
+        .await
+        .unwrap();
+
+    assert!(!capabilities.minimize.available);
+    assert_eq!(
+        capabilities.minimize.reason_code.as_deref(),
+        Some("active_harness_missing")
+    );
+    assert!(!hf_service::workspace_dir(&project, "parse").exists());
+}
