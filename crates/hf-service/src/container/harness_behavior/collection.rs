@@ -382,7 +382,13 @@ impl ServiceContainer {
                     Ok(value) => measured.push(value),
                     Err(error) => {
                         no_empty_baseline |= batch == "empty";
-                        tracing::warn!(%error, batch, "behavioral probe unavailable");
+                        if batch == "empty" {
+                            // Expected: the AFL++ driver does not run a
+                            // zero-length input; the report says so.
+                            tracing::info!(%error, batch, "behavioral probe unavailable");
+                        } else {
+                            tracing::warn!(%error, batch, "behavioral probe unavailable");
+                        }
                         report.issues.push(format!("{batch}: {error}"));
                         measured.clear();
                         break;

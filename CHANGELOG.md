@@ -80,6 +80,9 @@ retain only the current release; older entries remain here as the record.
   up from about 500.
 - The syzkaller guide says an emulated kernel campaign needs an idle host
   that stays awake (`caffeinate` on macOS).
+- Triage of an AFL++ run that saved no crash input no longer starts CASR
+  and warns "No crashes found", and the expected empty-input gap of the
+  AFL++ behavioral probe is no longer logged as a warning.
 
 ## 0.9.13 - 2026-11-27
 

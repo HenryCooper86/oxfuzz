@@ -1094,6 +1094,12 @@ impl ServiceContainer {
         let casr_container = container_input_path(workspace, &casr_host);
         let inventory = hf_crash::ingest_for_engine(out_dir, engine, run_id, target_id)?;
         let total_inputs = inventory.crashes.len();
+        if total_inputs == 0 {
+            // Nothing to replay: `casr-afl` on an AFL++ tree with no crash
+            // input exits 1 ("No crashes found"). The other engines returned
+            // above, when no input was staged.
+            return Ok(None);
+        }
         let input_limit_reached = inventory.artifact_limit_reached || held_back > 0;
         self.scan_progress(|progress| {
             progress.phase = ScanPhase::Casr;
