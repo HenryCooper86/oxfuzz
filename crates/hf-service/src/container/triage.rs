@@ -1442,6 +1442,18 @@ impl ServiceContainer {
                 "syzkaller crash ingestion reached a safety limit"
             );
         }
+        // syz-manager counts every crash record, including VM failures with no
+        // kernel report ("lost connection to test machine" under emulation).
+        // Say which records were left out, so "no kernel bug" is not read as a
+        // contradiction of the campaign's crash count.
+        if !ingested.skipped_without_kernel_report.is_empty() {
+            tracing::warn!(
+                run_id = %run_id,
+                "{} syzkaller crash record(s) hold no kernel report and are not kernel bugs: {}",
+                ingested.skipped_without_kernel_report.len(),
+                ingested.skipped_without_kernel_report.join("; ")
+            );
+        }
         self.scan_progress(|progress| {
             progress.phase = ScanPhase::Persisting;
             progress.total_inputs = Some(ingested.crashes.len());
