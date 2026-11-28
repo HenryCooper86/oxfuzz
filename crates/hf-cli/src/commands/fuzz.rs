@@ -23,7 +23,9 @@ fn print_line(json: bool, line: &str) {
 
 /// Render one stage boundary as a short header line: which stage, and the
 /// target/engine/revision facts it acts on.
-fn render_stage(project: &Path, stage: &FuzzStage) -> String {
+/// `model_off` is the run's `--ai off`: no draft or repair calls a model, so
+/// the lines never promise one.
+fn render_stage(project: &Path, stage: &FuzzStage, model_off: bool) -> String {
     match stage {
         FuzzStage::PreparedHarness { target, engine, source_sha256 } => format!("--- [2/5] harness: compiling supplied source for '{target}' ({}, SHA-256 {source_sha256}); no drafting or repair ---", engine.as_str()),
         FuzzStage::Discover { lang } => {
@@ -43,6 +45,12 @@ fn render_stage(project: &Path, stage: &FuzzStage) -> String {
                     "--- [2/5] harness: reusing the promoted {} revision for '{target}' ---",
                     engine.as_str()
                 )
+            } else if model_off {
+                format!(
+                    "--- [2/5] harness: drafting '{target}' from the template and compiling it for {} \
+                     (no repair without a model) ---",
+                    engine.as_str()
+                )
             } else {
                 format!(
                     "--- [2/5] harness: drafting and compiling '{target}' for {} (auto-repair up to {}x) ---",
@@ -51,7 +59,7 @@ fn render_stage(project: &Path, stage: &FuzzStage) -> String {
                 )
             }
         }
-        FuzzStage::HarnessStep { target, step } => render_harness_step(target, *step),
+        FuzzStage::HarnessStep { target, step } => render_harness_step(target, *step, model_off),
         FuzzStage::Smoke { target, .. } => {
             format!("--- [3/5] smoke: qualifying '{target}' ---")
         }
@@ -71,9 +79,14 @@ fn render_stage(project: &Path, stage: &FuzzStage) -> String {
 }
 
 /// Render one step inside the harness stage as an indented line.
-fn render_harness_step(target: &str, step: HarnessStep) -> String {
+fn render_harness_step(target: &str, step: HarnessStep, model_off: bool) -> String {
     match step {
-        HarnessStep::Drafting => format!("    harness: drafting '{target}' with the model"),
+        // `--ai auto` drafts from the template when no provider answers, so
+        // only `--ai off` can name the source for certain.
+        HarnessStep::Drafting if model_off => {
+            format!("    harness: drafting '{target}' from the template")
+        }
+        HarnessStep::Drafting => format!("    harness: drafting '{target}'"),
         HarnessStep::Compiling { attempt } => {
             format!("    harness: compile attempt {attempt} in the sandbox")
         }
@@ -173,7 +186,8 @@ pub(crate) async fn cmd_fuzz(args: crate::args::FuzzArgs) -> anyhow::Result<()> 
             "[fuzz] --ai off: no model is called at any stage of this pipeline.",
         );
     }
-    let on_stage = |stage: FuzzStage| print_line(json, &render_stage(&project, &stage));
+    let model_off = ai == AiOption::Off;
+    let on_stage = |stage: FuzzStage| print_line(json, &render_stage(&project, &stage, model_off));
     let on_progress: Box<dyn Fn(hf_service::FuzzProgress) + Send + Sync> = if json {
         Box::new(crate::commands::status::eprinting_sink())
     } else {
@@ -332,7 +346,7 @@ mod tests {
     #[test]
     fn stage_headers_name_the_stage_target_and_engine() {
         let project = std::path::Path::new("/proj");
-        let discover = render_stage(project, &FuzzStage::Discover { lang: None });
+        let discover = render_stage(project, &FuzzStage::Discover { lang: None }, false);
         assert!(discover.contains("discover"), "{discover}");
         assert!(discover.contains("auto-detect"), "{discover}");
         assert!(discover.contains("/proj"), "{discover}");
@@ -342,6 +356,7 @@ mod tests {
             &FuzzStage::Discover {
                 lang: Some(TargetLanguage::C),
             },
+            false,
         );
         assert!(discover.contains("language: c"), "{discover}");
 
@@ -352,6 +367,7 @@ mod tests {
                 engine: EngineKind::LibFuzzer,
                 reused: false,
             },
+            false,
         );
         assert!(fresh.contains("parse_entry"), "{fresh}");
         assert!(fresh.contains("libfuzzer"), "{fresh}");
@@ -364,6 +380,7 @@ mod tests {
                 engine: EngineKind::LibFuzzer,
                 reused: true,
             },
+            false,
         );
         assert!(reused.contains("reusing"), "{reused}");
 
@@ -373,6 +390,7 @@ mod tests {
                 target: "parse_entry".to_owned(),
                 engine: EngineKind::LibFuzzer,
             },
+            false,
         );
         assert!(promote.contains("approval"), "{promote}");
 
@@ -384,9 +402,40 @@ mod tests {
                 duration_secs: 60,
                 iterations: 3,
             },
+            false,
         );
         assert!(campaign.contains("60s"), "{campaign}");
         assert!(campaign.contains("afl++"), "{campaign}");
+    }
+
+    #[test]
+    fn an_ai_off_run_never_mentions_the_model_or_repairs() {
+        // `oxfuzz fuzz --ai off` printed "no model is called", then
+        // "drafting ... with the model" and "auto-repair up to 2x".
+        let project = std::path::Path::new("/proj");
+        let header = render_stage(
+            project,
+            &FuzzStage::Harness {
+                target: "parse_entry".to_owned(),
+                engine: EngineKind::LibFuzzer,
+                reused: false,
+            },
+            true,
+        );
+        assert!(header.contains("from the template"), "{header}");
+        assert!(!header.contains("auto-repair"), "{header}");
+        let drafting = render_stage(
+            project,
+            &FuzzStage::HarnessStep {
+                target: "parse_entry".to_owned(),
+                step: HarnessStep::Drafting,
+            },
+            true,
+        );
+        assert_eq!(
+            drafting,
+            "    harness: drafting 'parse_entry' from the template"
+        );
     }
 
     #[test]
@@ -399,11 +448,12 @@ mod tests {
                     target: "parse_entry".to_owned(),
                     step,
                 },
+                false,
             )
         };
         assert_eq!(
             step(HarnessStep::Drafting),
-            "    harness: drafting 'parse_entry' with the model"
+            "    harness: drafting 'parse_entry'"
         );
         assert_eq!(
             step(HarnessStep::Compiling { attempt: 2 }),

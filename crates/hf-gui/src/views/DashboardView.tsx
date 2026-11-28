@@ -993,6 +993,7 @@ function HealthPanel({ status, dashboard }: { status: SystemStatus | null; dashb
     ["AFL++", status?.aflplusplus],
     ["honggfuzz", status?.honggfuzz],
     ["syzkaller", status?.syzkaller],
+    ["Go native fuzzing", status?.go_native],
     ["Atheris", status?.atheris],
     ["Jazzer", status?.jazzer],
     ["Jazzer.js", status?.jazzer_js],

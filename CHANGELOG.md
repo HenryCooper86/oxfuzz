@@ -104,6 +104,15 @@ retain only the current release; older entries remain here as the record.
     for a Go, Python, Java or JavaScript one, and `corpus --op minimize`
     says the engine has no merge pass and points to `--op prune`.
   - Every `--lang` help lists `java` and `javascript`.
+  - `oxfuzz doctor`, the Dashboard and the About tab report whether the
+    sandbox image can run Go native fuzzing, Atheris, Jazzer and
+    Jazzer.js, and one of those engines alone makes the setup ready.
+- `oxfuzz fuzz --ai off` no longer reports drafting "with the model" or an
+  auto-repair budget it cannot use.
+- The model-free C template gives a second output length (lz4's
+  `targetOutputSize, dstCapacity`) the output buffer's capacity instead of
+  the input size; `LZ4_decompress_safe_partial` reaches 1,140 edges in 30
+  seconds instead of 183.
 
 ## 0.9.13 - 2026-11-27
 
