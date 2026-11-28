@@ -388,17 +388,84 @@ pub(crate) fn observe_smoke(
     exit_code: i32,
 ) -> bool {
     if let Some(record) = &mut harness.custom_mutator {
-        let observed = log.contains(MUTATION_WITNESS);
-        record.self_test = Some(hf_core::mutator::MutatorSelfTest {
-            exit_code,
-            mutation_observed: observed,
-            trim_observed: log.contains(TRIM_WITNESS),
-            log: log.chars().take(16384).collect(),
-            log_truncated: log.chars().count() > 16384,
-        });
-        return observed && exit_code == 0;
+        let test = self_test_from(log, exit_code);
+        let passed = test.passed();
+        record.self_test = Some(test);
+        return passed;
     }
     true
+}
+
+/// Characters of the smoke log kept as evidence, split between its head and
+/// its tail: the end is where a run reports the crash that ended it.
+const SELF_TEST_LOG_CHARS: usize = 16384;
+
+/// Callback names that put a crash in the mutator rather than the target.
+const MUTATOR_FRAMES: [&str; 3] = [
+    "LLVMFuzzerCustomMutator",
+    "LLVMFuzzerCustomCrossOver",
+    "afl_custom_",
+];
+
+/// The self-test a bounded smoke run's output and exit status amount to.
+fn self_test_from(log: &str, exit_code: i32) -> hf_core::mutator::MutatorSelfTest {
+    let mutation_observed = log.contains(MUTATION_WITNESS);
+    let crashed = exit_code != 0 && hf_crash_like(log);
+    let in_mutator = MUTATOR_FRAMES
+        .iter()
+        .any(|frame| crash_frame_names(log, frame));
+    let chars = log.chars().count();
+    let log_truncated = chars > SELF_TEST_LOG_CHARS;
+    let kept = if log_truncated {
+        let half = SELF_TEST_LOG_CHARS / 2;
+        let head: String = log.chars().take(half).collect();
+        let tail: String = log.chars().skip(chars - half).collect();
+        format!("{head}\n[... truncated ...]\n{tail}")
+    } else {
+        log.to_owned()
+    };
+    hf_core::mutator::MutatorSelfTest {
+        exit_code,
+        mutation_observed,
+        trim_observed: log.contains(TRIM_WITNESS),
+        log: kept,
+        log_truncated,
+        target_finding: (mutation_observed && crashed && !in_mutator)
+            .then(|| crash_report_line(log))
+            .flatten(),
+    }
+}
+
+/// The first line of a run's output that reports its crash.
+fn crash_report_line(log: &str) -> Option<String> {
+    log.lines()
+        .map(str::trim)
+        .find(|line| {
+            line.contains("ERROR: AddressSanitizer")
+                || line.contains("ERROR: MemorySanitizer")
+                || line.contains("WARNING: ThreadSanitizer")
+                || line.contains("runtime error:")
+                || line.contains("deadly signal")
+        })
+        .map(|line| line.chars().take(300).collect())
+}
+
+/// Whether a run's output reports a sanitizer or signal crash.
+fn hf_crash_like(log: &str) -> bool {
+    log.contains("ERROR: AddressSanitizer")
+        || log.contains("ERROR: MemorySanitizer")
+        || log.contains("WARNING: ThreadSanitizer")
+        || log.contains("runtime error:")
+        || log.contains("deadly signal")
+}
+
+/// Whether `frame` appears on a crash stack line (`#N 0x... in <frame>`),
+/// as opposed to libFuzzer's startup note that it found the callback.
+fn crash_frame_names(log: &str, frame: &str) -> bool {
+    log.lines().any(|line| {
+        let line = line.trim_start();
+        line.starts_with('#') && line.contains(" in ") && line.contains(frame)
+    })
 }
 
 /// Verify the staged artifact and reviewed source in the smoke executor itself.
@@ -430,5 +497,55 @@ pub(crate) fn validate_smoke(
         _ => Err(invalid(
             "smoke source and compiled artifact record disagree",
         )),
+    }
+}
+
+#[cfg(test)]
+mod self_test_tests {
+    use super::{self_test_from, MUTATION_WITNESS};
+
+    #[test]
+    fn a_target_crash_after_mutation_qualifies_and_a_mutator_crash_does_not() {
+        // c-ares: mutated inputs reached the target's known bug
+        // (CVE-2016-5180), the run exited 1, and the self-test failed although
+        // the mutator had run cleanly.
+        let target = format!(
+            "INFO: found LLVMFuzzerCustomMutator (0xaaaa). Disabling -len_control\n{MUTATION_WITNESS}\n\
+             ==1==ERROR: AddressSanitizer: heap-buffer-overflow\n\
+                 #1 0x5 in ares_create_query /work/ares_create_query.c:201:7\n\
+                 #2 0x6 in LLVMFuzzerTestOneInput /work/harness.c:26:5\n"
+        );
+        let test = self_test_from(&target, 1);
+        assert_eq!(
+            test.target_finding.as_deref(),
+            Some("==1==ERROR: AddressSanitizer: heap-buffer-overflow")
+        );
+        assert!(test.passed(), "{test:?}");
+
+        let mutator = format!(
+            "{MUTATION_WITNESS}\n==1==ERROR: AddressSanitizer: heap-buffer-overflow\n\
+                 #0 0x5 in LLVMFuzzerCustomMutator /work/harness.c:90:3\n"
+        );
+        let test = self_test_from(&mutator, 1);
+        assert!(test.target_finding.is_none() && !test.passed(), "{test:?}");
+
+        // No mutation observed, or a failure that is no crash, still fails.
+        assert!(!self_test_from("==1==ERROR: AddressSanitizer: x\n", 1).passed());
+        assert!(!self_test_from(MUTATION_WITNESS, 2).passed());
+        assert!(self_test_from(MUTATION_WITNESS, 0).passed());
+    }
+
+    #[test]
+    fn a_long_log_keeps_its_end_where_the_crash_is() {
+        let log = format!(
+            "{}SUMMARY: AddressSanitizer: heap-buffer-overflow",
+            "x".repeat(40_000)
+        );
+        let test = self_test_from(&log, 1);
+        assert!(test.log_truncated);
+        assert!(test
+            .log
+            .ends_with("SUMMARY: AddressSanitizer: heap-buffer-overflow"));
+        assert!(test.log.chars().count() < 17_000);
     }
 }

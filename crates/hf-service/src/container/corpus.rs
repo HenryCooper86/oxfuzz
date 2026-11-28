@@ -58,7 +58,7 @@ fn qualification_reason_code(message: &str) -> &'static str {
         "build_inputs_stale"
     } else if message.contains("another target") {
         "active_harness_target_mismatch"
-    } else if message.contains(" uses ") && message.contains(" rather than ") {
+    } else if message.contains("but the active harness for") && message.contains("is built for") {
         "active_harness_engine_mismatch"
     } else if message.contains("no active harness")
         || message.contains("active harness record")
@@ -220,13 +220,20 @@ impl ServiceContainer {
         // Prefer the deduplicated crash set triage persisted for the latest run;
         // fall back to whatever crash inputs are staged under the run output.
         let mut inputs: Vec<PathBuf> = Vec::new();
+        let mut triaged = false;
         if let Some(store) = &self.store {
             if let Some(run) = &run {
                 let crashes = store.list_crashes_by_run(run.id).await?;
-                inputs.extend(crashes.into_iter().map(|c| c.input_path));
+                triaged = !crashes.is_empty();
+                inputs.extend(
+                    crashes
+                        .into_iter()
+                        .filter(|crash| !is_resource_exhaustion(crash))
+                        .map(|c| c.input_path),
+                );
             }
         }
-        if inputs.is_empty() {
+        if inputs.is_empty() && !triaged {
             let out_dir = match run.as_ref() {
                 Some(run) => run_output_dir(&workspace, run)?,
                 None => workspace.join("out"),
@@ -235,6 +242,7 @@ impl ServiceContainer {
                 || collect_legacy_crash_inputs(&out_dir),
                 |run| collect_crash_inputs(run.engine, &out_dir),
             );
+            inputs.retain(|path| !is_resource_exhaustion_artifact(path));
         }
 
         let (mut corpus, added) = hf_corpus::absorb(&corpus_dir, &inputs)?;
@@ -1232,5 +1240,76 @@ impl ServiceContainer {
             before_bytes: before.bytes,
             after_bytes: after.bytes,
         })
+    }
+}
+
+/// Whether a triaged finding is resource exhaustion (out of memory, or a
+/// per-input timeout) rather than a memory-safety crash. Absorbing such an
+/// input into the corpus makes every later run and smoke test hit the same
+/// kill or stall at its first execution, and a clean smoke run (which
+/// promotion requires) becomes impossible; the finding itself stays.
+fn is_resource_exhaustion(crash: &hf_core::crash::Crash) -> bool {
+    crash.kind == hf_core::crash::CrashKind::Timeout || crash.summary.starts_with("out of memory")
+}
+
+/// The untriaged counterpart: libFuzzer names its resource artifacts.
+fn is_resource_exhaustion_artifact(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("oom-") || name.starts_with("timeout-"))
+}
+
+#[cfg(test)]
+mod resource_exhaustion_tests {
+    fn crash(kind: hf_core::crash::CrashKind, summary: &str) -> hf_core::crash::Crash {
+        hf_core::crash::Crash {
+            id: uuid::Uuid::nil(),
+            run_id: uuid::Uuid::nil(),
+            target_id: uuid::Uuid::nil(),
+            input_path: std::path::PathBuf::from("/w/out/x"),
+            stack_signature: String::new(),
+            kind,
+            summary: summary.to_owned(),
+            minimized: false,
+            reproduction: None,
+            control_replay: None,
+            bug_report: None,
+            casr: None,
+            origin: hf_core::crash::CrashOrigin::default(),
+        }
+    }
+
+    #[test]
+    fn out_of_memory_and_timeouts_are_kept_out_of_the_corpus() {
+        // LibTIFF: closeout absorbed an out-of-memory input, and the next
+        // smoke run of the same harness crashed on it and could not pass.
+        use hf_core::crash::CrashKind;
+        assert!(super::is_resource_exhaustion(&crash(
+            CrashKind::Other,
+            "out of memory: the input drove the target past the sandbox memory limit"
+        )));
+        assert!(super::is_resource_exhaustion(&crash(
+            CrashKind::Other,
+            "out of memory: malloc(4294967296)"
+        )));
+        assert!(super::is_resource_exhaustion(&crash(
+            CrashKind::Timeout,
+            "timeout"
+        )));
+        assert!(!super::is_resource_exhaustion(&crash(
+            CrashKind::Asan,
+            "heap-buffer-overflow at ares_create_query.c:201"
+        )));
+        for (name, expected) in [
+            ("oom-7c1f", true),
+            ("timeout-ab", true),
+            ("crash-12", false),
+        ] {
+            assert_eq!(
+                super::is_resource_exhaustion_artifact(std::path::Path::new(name)),
+                expected,
+                "{name}"
+            );
+        }
     }
 }

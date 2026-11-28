@@ -91,6 +91,70 @@ impl RuntimeAdapter for LimitCapturingRuntime {
     }
 }
 
+/// libpng under honggfuzz: one decoded image allocated past the 2 GiB
+/// sandbox before the sanitizer's periodic RSS check ran, and the kernel
+/// killed honggfuzz with the run. An `ASan` run caps single allocations and RSS
+/// below the sandbox. honggfuzz keeps a preset `ASAN_OPTIONS` instead of its
+/// own defaults, so the preset carries those defaults verbatim (crash
+/// detection depends on `abort_on_error=1` and the `handle_*=2` flags).
+#[test]
+fn honggfuzz_asan_runs_cap_memory_below_the_sandbox_and_keep_its_defaults() {
+    let mut cfg = run_config(EngineKind::Honggfuzz, 10);
+    cfg.max_mem_mb = 2048;
+    let env = hf_engine::runner::run_env(EngineKind::Honggfuzz, &cfg).expect("env resolves");
+    let options = env.get("ASAN_OPTIONS").expect("ASan options are set");
+    for expected in [
+        "allocator_may_return_null=1",
+        "handle_segv=2",
+        "handle_abort=2",
+        "abort_on_error=1",
+        "symbolize=1",
+        "detect_leaks=0",
+        "max_allocation_size_mb=1024",
+        "soft_rss_limit_mb=1536",
+    ] {
+        assert!(
+            options.split(':').any(|o| o == expected),
+            "{expected} in {options}"
+        );
+    }
+
+    // Each honggfuzz thread runs its own target process: the sandbox is
+    // shared, so the caps are per process (two threads at 4 GiB were killed
+    // with whole-sandbox caps).
+    let mut threads = run_config(EngineKind::Honggfuzz, 10);
+    threads.max_mem_mb = 4096;
+    threads.max_cpus = 2;
+    let env = hf_engine::runner::run_env(EngineKind::Honggfuzz, &threads).expect("env resolves");
+    let options = env.get("ASAN_OPTIONS").expect("ASan options are set");
+    assert!(options.contains(":soft_rss_limit_mb=1536:"), "{options}");
+    assert!(
+        options.ends_with(":max_allocation_size_mb=1024"),
+        "{options}"
+    );
+
+    // An operator-provided ASAN_OPTIONS wins outright.
+    cfg.env
+        .push(("ASAN_OPTIONS".to_owned(), "detect_leaks=1".to_owned()));
+    let env = hf_engine::runner::run_env(EngineKind::Honggfuzz, &cfg).expect("env resolves");
+    assert_eq!(
+        env.get("ASAN_OPTIONS").map(String::as_str),
+        Some("detect_leaks=1")
+    );
+
+    // Other sanitizers and engines are left to their own defaults.
+    let mut ubsan = run_config(EngineKind::Honggfuzz, 10);
+    ubsan.sanitizer = Sanitizer::Undefined;
+    let env = hf_engine::runner::run_env(EngineKind::Honggfuzz, &ubsan).expect("env resolves");
+    assert!(!env.contains_key("ASAN_OPTIONS"), "{env:?}");
+    let env = hf_engine::runner::run_env(
+        EngineKind::AflPlusPlus,
+        &run_config(EngineKind::AflPlusPlus, 10),
+    )
+    .expect("env resolves");
+    assert!(!env.contains_key("ASAN_OPTIONS"), "{env:?}");
+}
+
 #[tokio::test]
 async fn libfuzzer_fork_runs_disable_the_exit_time_leak_sanitizer() {
     let runtime = LimitCapturingRuntime {
@@ -878,6 +942,68 @@ async fn runner_accepts_a_libfuzzer_done_line_on_an_unlisted_exit() {
 }
 
 #[tokio::test]
+async fn runner_accepts_a_libfuzzer_fork_parent_exit_line_on_an_unlisted_exit() {
+    // In fork mode with `-ignore_crashes=1` the parent fuzzes for the whole
+    // budget and then exits with the last job's status (1 after an ignored
+    // ASan crash), closing with `INFO: exiting: <code> time: <T>s`. That is a
+    // finished campaign, not an engine failure that discards its coverage.
+    let rt = MockRuntime {
+        exit_code: 1,
+        stdout: "#26503612: cov: 216 ft: 395 corp: 80 exec/s: 0 oom/timeout/crash: 0/0/2454 \
+                 time: 180s job: 2455 dft_time: 0\n\
+                 INFO: fuzzed for 180 seconds, wrapping up soon\n\
+                 INFO: exiting: 1 time: 180s\n"
+            .to_owned(),
+        termination: CommandTermination::Completed,
+    };
+    let mut cfg = run_config(EngineKind::LibFuzzer, 180);
+    cfg.max_cpus = 2;
+    let result = EngineRunner::new()
+        .run(
+            EngineKind::LibFuzzer,
+            &cfg,
+            "/work/fuzz_bin",
+            "/work/corpus",
+            "/work/out",
+            &rt,
+            &PathBuf::from("/work"),
+        )
+        .await
+        .expect("the fork parent's closing line completes the campaign");
+    assert!(result
+        .progress
+        .iter()
+        .any(|e| matches!(e, FuzzProgress::Done)));
+}
+
+#[tokio::test]
+async fn runner_rejects_exiting_prose_without_the_fork_parent_shape() {
+    // Target output such as "INFO: exiting: shutting down" is not the
+    // parent's closing line; exit 1 stays an engine failure.
+    let rt = MockRuntime {
+        exit_code: 1,
+        stdout: "INFO: exiting: shutting down the parser\nexiting: 1 time: 3s\n".to_owned(),
+        termination: CommandTermination::Completed,
+    };
+    let cfg = run_config(EngineKind::LibFuzzer, 60);
+    let outcome = EngineRunner::new()
+        .run(
+            EngineKind::LibFuzzer,
+            &cfg,
+            "/work/fuzz_bin",
+            "/work/corpus",
+            "/work/out",
+            &rt,
+            &PathBuf::from("/work"),
+        )
+        .await;
+    assert!(
+        outcome.is_err(),
+        "unanchored exiting prose must not validate exit 1"
+    );
+}
+
+#[tokio::test]
 async fn runner_accepts_a_sanitizer_summary_line_on_an_unlisted_exit() {
     // A sanitizer report ends with a line starting `SUMMARY:`; the prose
     // word "summary" inside target output is not that line.
@@ -1121,4 +1247,40 @@ fn the_run_file_limit_admits_each_engines_shared_memory_file() {
     // Go's fuzz coordinator truncates a 100 MiB shared-memory file per
     // worker; the default 64 MiB limit fails the run before its first input.
     assert!(run_file_size_limit_bytes(EngineKind::GoNative) >= 100 * 1024 * 1024);
+}
+
+/// libFuzzer keeps no statistics file, so the run's execution total comes
+/// only from its status lines; the run result must keep it (a fork-mode
+/// campaign showed "Total executions: Unknown").
+#[tokio::test]
+async fn a_libfuzzer_run_result_keeps_the_cumulative_execution_total() {
+    let rt = MockRuntime {
+        exit_code: 0,
+        stdout: "#1204512: cov: 411 ft: 900 corp: 70 exec/s: 459957 oom/timeout/crash: 0/0/12 time: 2s job: 3 dft_time: 0\n\
+                 #26503612: cov: 436 ft: 1200 corp: 80 exec/s: 384333 oom/timeout/crash: 0/0/461 time: 57s job: 461 dft_time: 0\n\
+                 INFO: exiting: 0 time: 60s\n"
+            .to_owned(),
+        termination: CommandTermination::Completed,
+    };
+    let result = EngineRunner::new()
+        .run(
+            EngineKind::LibFuzzer,
+            &run_config(EngineKind::LibFuzzer, 60),
+            "/work/fuzz_bin",
+            "/work/corpus",
+            "/work/out",
+            &rt,
+            &PathBuf::from("/work"),
+        )
+        .await
+        .unwrap();
+    let totals: Vec<u64> = result
+        .progress
+        .iter()
+        .filter_map(|event| match event {
+            FuzzProgress::Stats(stats) => stats.execs_total,
+            _ => None,
+        })
+        .collect();
+    assert_eq!(totals, vec![26_503_612], "{:?}", result.progress);
 }

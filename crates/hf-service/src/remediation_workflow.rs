@@ -233,6 +233,8 @@ impl ServiceContainer {
         )
         .await
         .map_err(|error| ClassifiedError::Validation(error.to_string()))?;
+        let owner =
+            crate::process_ownership::hold(crate::process_ownership::REMEDIATION, req.operation_id);
         store
             .claim_remediation_operation(req.operation_id, chrono::Utc::now())
             .await
@@ -240,6 +242,7 @@ impl ServiceContainer {
         let container = self.clone();
         let operation_id = req.operation_id;
         tokio::spawn(async move {
+            let _owner = owner;
             if let Err(error) = container.run_remediation_workflow(operation_id).await {
                 tracing::error!(
                     %error,

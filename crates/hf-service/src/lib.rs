@@ -65,6 +65,10 @@ pub mod model_budget;
 pub mod notifications;
 #[cfg(feature = "oracle-studio")]
 pub mod oracle_studio;
+// Cross-process ownership of AI discoveries and remediations, the only
+// operations whose interrupted-state sweeps need it.
+#[cfg(any(feature = "ai-target-ranking", feature = "patch-to-proof"))]
+mod process_ownership;
 pub mod recovery;
 #[cfg(feature = "proof-carrying")]
 pub mod remediation;
@@ -129,6 +133,9 @@ pub use hf_core::runtime::{
 };
 pub use hf_core::target::{Sanitizer, TargetInventory, TargetLanguage};
 pub use hf_core::types::{Message, ProviderId, Role, SessionId};
+pub use hf_coverage::CoverageSummaryView;
+/// The coverage-plateau proposal a [`RunSummary`] carries.
+pub use hf_coverage::StagnationProposal;
 pub use hf_guardrails::{
     Action, ApprovalGate, EnvApprovalGate, GuardrailPolicy, Guardrails, RiskTier,
 };

@@ -413,6 +413,38 @@ fn honggfuzz_keeps_aslr_so_crashes_deduplicate_by_stack() {
 }
 
 #[test]
+fn honggfuzz_caps_target_memory_below_the_sandbox_limit() {
+    // libpng under honggfuzz: a decoded image grew past the 2 GiB sandbox,
+    // the kernel killed honggfuzz itself (exit 137), and the run's coverage
+    // was discarded. `--rlimit_rss` also sets the sanitizer's soft RSS limit,
+    // so allocations fail inside the target before the sandbox is exhausted.
+    let mut run = cfg(EngineKind::Honggfuzz, 10);
+    run.max_mem_mb = 2048;
+    let args =
+        hf_engine::honggfuzz::build_run_args(&run, "/work/fuzz_bin", "/work/corpus", "/work/out")
+            .unwrap();
+    let separator = args.iter().position(|a| a == "--").expect("--");
+    let at = args
+        .iter()
+        .position(|a| a == "--rlimit_rss")
+        .expect("--rlimit_rss");
+    assert!(at < separator);
+    assert_eq!(args[at + 1], "1536");
+
+    // Per target process: two threads split the sandbox.
+    run.max_mem_mb = 4096;
+    run.max_cpus = 2;
+    let args =
+        hf_engine::honggfuzz::build_run_args(&run, "/work/fuzz_bin", "/work/corpus", "/work/out")
+            .unwrap();
+    let at = args
+        .iter()
+        .position(|a| a == "--rlimit_rss")
+        .expect("--rlimit_rss");
+    assert_eq!(args[at + 1], "1536");
+}
+
+#[test]
 fn honggfuzz_workers_follow_the_resolved_cpu_limit() {
     for cpus in [1, 2] {
         let mut c = cfg(EngineKind::Honggfuzz, 10);
@@ -518,6 +550,10 @@ fn libfuzzer_fork_follows_the_resolved_cpu_allocation() {
         !args.iter().any(|arg| arg == "-detect_leaks=0"),
         "single-process runs keep leak detection on: {args:?}"
     );
+    assert!(
+        !args.iter().any(|arg| arg.starts_with("-ignore_crashes")),
+        "a single-process run stops at its first crash: {args:?}"
+    );
 
     // An allocation above one becomes libFuzzer's own multi-process mode.
     let mut parallel = cfg(EngineKind::LibFuzzer, 3600);
@@ -536,6 +572,13 @@ fn libfuzzer_fork_follows_the_resolved_cpu_allocation() {
     assert!(
         args.contains(&"-detect_leaks=0".to_owned()),
         "fork children misreport the forked heap snapshot as leaked; leak detection must be off in fork mode: {args:?}"
+    );
+    // Fork mode exists for crash-resistant continuation, but libFuzzer's
+    // parent stops every job at the first child crash unless told to ignore
+    // it; without the flag a campaign ends at its first finding.
+    assert!(
+        args.contains(&"-ignore_crashes=1".to_owned()),
+        "fork mode must continue after a child crash: {args:?}"
     );
 
     // Overridable: a caller's extra_args wins (libFuzzer takes the last one).

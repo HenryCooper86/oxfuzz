@@ -189,10 +189,15 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
             repair,
             refine,
             adopt,
-            promote,
+            promotion,
             no_llm_review,
             build,
         }) => {
+            if promotion.promote_with_findings {
+                commands::harness::cmd_harness_promote_with_findings(project, &target, &engine)
+                    .await?;
+                return Ok(());
+            }
             let review_bypass = if no_llm_review {
                 hf_service::HarnessReviewBypass::Requested
             } else {
@@ -208,7 +213,7 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
                 repair,
                 refine,
                 adopt,
-                promote,
+                promotion.promote,
                 review_bypass,
                 &build,
             )

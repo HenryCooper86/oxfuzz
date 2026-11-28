@@ -32,3 +32,22 @@ it("shows the six closeout steps and a plain-language trust verdict", async () =
     expect(host.textContent).not.toContain("Unqualified");
   } finally { await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals(); }
 });
+
+it("names a step that has not run once, without repeating the label", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  invoke.mockResolvedValue({
+    schema_version: 3, run_id: "run-2", availability: { status: "available" }, resumed_at: null,
+    steps: [],
+  });
+  const host = document.createElement("div"); document.body.append(host); const root = createRoot(host);
+  try {
+    await act(async () => root.render(<I18nProvider><RunCloseoutPanel runId="run-2" runKind="Campaign" runStatus="Done" /></I18nProvider>));
+    await act(async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); });
+    const steps = [...host.querySelectorAll("li")].map((item) => item.textContent ?? "");
+    expect(steps).toHaveLength(6);
+    for (const text of steps) {
+      expect(text).toContain("Pending");
+      expect(text).not.toMatch(/Pending:\s*Pending/);
+    }
+  } finally { await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals(); }
+});

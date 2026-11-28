@@ -25,6 +25,9 @@ struct ProgressAggregate {
     peak_edges: u64,
     peak_execs: f64,
     crashes: u64,
+    /// The largest cumulative execution counter a status line reported.
+    /// libFuzzer keeps no statistics file, so this is its only total.
+    execs_total: Option<u64>,
 }
 
 impl ProgressAggregate {
@@ -40,9 +43,15 @@ impl ProgressAggregate {
             // A Stats snapshot restates the scalar EdgesCovered/ExecsPerSec
             // events parsed from the same engine line; the aggregate keeps
             // peaking only the dedicated scalar events, so the run summary is
-            // unchanged whether or not a line carried a snapshot. Stats
-            // carries no crash counter.
-            FuzzProgress::LogLine(_) | FuzzProgress::Stats(_) | FuzzProgress::Done => {}
+            // unchanged whether or not a line carried a snapshot. Only the
+            // cumulative execution counter, which no scalar event carries, is
+            // kept from it. Stats carries no crash counter.
+            FuzzProgress::Stats(stats) => {
+                if let Some(total) = stats.execs_total {
+                    self.execs_total = Some(self.execs_total.map_or(total, |seen| seen.max(total)));
+                }
+            }
+            FuzzProgress::LogLine(_) | FuzzProgress::Done => {}
         }
     }
 
@@ -63,6 +72,12 @@ impl ProgressAggregate {
             progress.push(FuzzProgress::CrashesFound(
                 u32::try_from(self.crashes).unwrap_or(u32::MAX),
             ));
+        }
+        if let Some(total) = self.execs_total {
+            progress.push(FuzzProgress::Stats(hf_core::engine::EngineStats {
+                execs_total: Some(total),
+                ..hf_core::engine::EngineStats::default()
+            }));
         }
         if done {
             progress.push(FuzzProgress::Done);
@@ -94,6 +109,13 @@ pub const fn run_file_size_limit_bytes(engine: EngineKind) -> u64 {
     }
 }
 
+/// The `ASAN_OPTIONS` honggfuzz 2.6 sets for a target when none is preset
+/// (`kSAN_REGULAR` in its `sanitizers.c`). A preset replaces them wholesale
+/// ("Not overriding it!"), so a preset that adds limits repeats them.
+const HONGGFUZZ_ASAN_DEFAULTS: &str = "symbolize=1:detect_leaks=0:disable_coredump=0:\
+detect_odr_violation=0:allocator_may_return_null=1:allow_user_segv_handler=0:handle_segv=2:\
+handle_sigbus=2:handle_abort=2:handle_sigill=2:handle_sigfpe=2:abort_on_error=1";
+
 /// Assemble the sandbox environment for one engine run from the typed config.
 ///
 /// `cfg.env` passes through untouched except for the runner-owned keys:
@@ -118,6 +140,12 @@ pub const fn run_file_size_limit_bytes(engine: EngineKind) -> u64 {
 ///   that, turning the `UBSan` `Die()` (exit code 1, no signal) into a non-crash
 ///   those signal-based engines never save (verified against the pinned
 ///   sandbox: AFL++ 4.09c saved 0 crashes with a preset, 1 without).
+/// - A honggfuzz run over an `ASan` build caps each target process's single
+///   allocations and soft RSS limit at its share of the sandbox memory (see
+///   [`crate::honggfuzz::target_memory_caps_mb`]; unless the
+///   operator set `ASAN_OPTIONS`): a target that allocates past the sandbox
+///   gets honggfuzz itself killed and the run discarded. honggfuzz keeps a
+///   preset instead of its defaults, so the preset repeats them.
 /// - AFL++ session resume is environment-driven: `cfg.resume` injects
 ///   `AFL_AUTORESUME=1`, so afl-fuzz continues the output tree the service
 ///   copied into this run's staging instead of refusing the existing tree.
@@ -173,6 +201,19 @@ pub fn run_env(
         };
         if let Some(options) = options {
             env.insert("TSAN_OPTIONS".to_owned(), options.to_owned());
+        }
+    }
+    if engine == EngineKind::Honggfuzz
+        && cfg.sanitizer == hf_core::target::Sanitizer::Address
+        && !env.contains_key("ASAN_OPTIONS")
+    {
+        if let Some((rss, allocation)) = crate::honggfuzz::target_memory_caps_mb(cfg) {
+            env.insert(
+                "ASAN_OPTIONS".to_owned(),
+                format!(
+                    "{HONGGFUZZ_ASAN_DEFAULTS}:soft_rss_limit_mb={rss}:max_allocation_size_mb={allocation}"
+                ),
+            );
         }
     }
     if engine == EngineKind::AflPlusPlus {
@@ -549,7 +590,10 @@ fn strip_terminal_colors(line: &str) -> String {
 /// - libFuzzer's `Done <N> runs in <T> seconds` line (and the bare `DONE`
 ///   sentinel a run closes with), and
 /// - a sanitizer/UBSan report's closing `SUMMARY:` line, which starts the
-///   line in full capitals.
+///   line in full capitals, and
+/// - libFuzzer's fork-mode parent closing line `INFO: exiting: <code> time:
+///   <T>s`. With `-ignore_crashes=1` the parent fuzzes for the whole budget
+///   and then exits with the last job's status (1 after an ignored crash).
 ///
 /// The anchors are engine-specific shapes but need no engine parameter: no
 /// other engine prints either form, and the sanitizer `SUMMARY:` can close a
@@ -558,6 +602,18 @@ fn line_signals_completion(line: &str) -> bool {
     let trimmed = line.trim_start();
     if trimmed.starts_with("SUMMARY:") {
         return true;
+    }
+    if let Some(rest) = trimmed.strip_prefix("INFO: exiting: ") {
+        let mut fields = rest.split_whitespace();
+        let code = fields
+            .next()
+            .is_some_and(|code| code.parse::<i32>().is_ok());
+        let time = fields.next() == Some("time:")
+            && fields
+                .next()
+                .and_then(|value| value.strip_suffix('s'))
+                .is_some_and(|secs| secs.parse::<u64>().is_ok());
+        return code && time;
     }
     let lower = trimmed.to_ascii_lowercase();
     if lower == "done" {

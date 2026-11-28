@@ -50,6 +50,10 @@ const SOURCE_EXTENSIONS: [&str; 8] = ["c", "h", "cc", "cpp", "cxx", "hpp", "hh",
 /// Directory names a live build never stages.
 const SKIPPED_DIRECTORIES: [&str; 4] = [".git", "target", "build", "node_modules"];
 
+/// The bisection root's directory of staged generated build inputs. Not a
+/// commit hash, so it never collides with a revision directory.
+const GENERATED_INPUTS_DIR: &str = "generated-inputs";
+
 /// What replaying the crash input at one commit showed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -496,6 +500,46 @@ struct SandboxTester<'a> {
     input: &'a [u8],
     /// `<workspace_root>/<project>/.bisect/<crash id>`.
     root: PathBuf,
+    /// The configured build's generated inputs (`config.h` and the like),
+    /// staged once. A revision is materialized from git, which holds none
+    /// of them, so each revision gets the ones it lacks.
+    generated: Option<PathBuf>,
+}
+
+/// Copy every regular file under `from` that `into` does not already hold,
+/// at the same relative path. A revision's own files are never replaced:
+/// only what its checkout lacks (the generated headers) is filled in.
+/// Symbolic links are not followed. Returns the number of files copied.
+fn fill_missing_files(from: &Path, into: &Path) -> std::io::Result<usize> {
+    let mut copied = 0;
+    let mut pending = vec![from.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory)? {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            let path = entry.path();
+            if kind.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if !kind.is_file() {
+                continue;
+            }
+            let Ok(relative) = path.strip_prefix(from) else {
+                continue;
+            };
+            let destination = into.join(relative);
+            if std::fs::symlink_metadata(&destination).is_ok() {
+                continue;
+            }
+            if let Some(parent) = destination.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(&path, &destination)?;
+            copied += 1;
+        }
+    }
+    Ok(copied)
 }
 
 impl SandboxTester<'_> {
@@ -509,6 +553,11 @@ impl SandboxTester<'_> {
                 BisectVerdict::Skip,
                 first_line(error.to_string().as_bytes()),
             ));
+        }
+        if let Some(generated) = &self.generated {
+            fill_missing_files(generated, directory).map_err(|error| {
+                ClassifiedError::Internal(format!("stage generated build inputs: {error}"))
+            })?;
         }
         std::fs::write(directory.join(INPUT_NAME), self.input)
             .map_err(|error| ClassifiedError::Internal(format!("stage crash input: {error}")))?;
@@ -647,12 +696,36 @@ impl ServiceContainer {
                 .join(".bisect")
                 .join(id.to_string()),
         )?;
+        // Stage the configured build's generated inputs once, outside the
+        // per-commit directories, for every revision to fill its gaps from.
+        let generated_dir = root.join(GENERATED_INPUTS_DIR);
+        std::fs::create_dir_all(&generated_dir).map_err(|error| {
+            ClassifiedError::Internal(format!("stage generated build inputs: {error}"))
+        })?;
+        self.stage_generated_build_inputs_for_project(project, &generated_dir)
+            .await?;
+        // The units the promoted build linked, as the harness workspace
+        // recorded them from the compile database. Without the list every
+        // `.c` file of a revision is linked, including units the configured
+        // build never compiles (c-ares then failed in its own headers).
+        let units = super::workspace::workspace_dir(project, target)
+            .join(hf_harness::project_sources::LINK_UNITS_FILE);
+        if units.is_file() {
+            std::fs::copy(
+                &units,
+                generated_dir.join(hf_harness::project_sources::LINK_UNITS_FILE),
+            )
+            .map_err(|error| {
+                ClassifiedError::Internal(format!("stage the recorded link units: {error}"))
+            })?;
+        }
         let mut tester = SandboxTester {
             runtime: self.runtime.as_ref(),
             project,
             harness: &harness,
             input: &input,
             root: root.clone(),
+            generated: Some(generated_dir),
         };
         let mut steps = Vec::new();
         let outcome = run_bisection(project, &good, &bad, &commits, &mut tester, &mut steps).await;
@@ -758,6 +831,30 @@ fn read_crash_input(path: &Path) -> Result<Vec<u8>, ClassifiedError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_revision_gets_only_the_generated_files_it_lacks() {
+        // c-ares: every revision failed on the missing ares_config.h that
+        // only the configured build generates.
+        let generated = tempfile::tempdir().unwrap();
+        let revision = tempfile::tempdir().unwrap();
+        std::fs::write(generated.path().join("ares_config.h"), "#define HAVE_X 1").unwrap();
+        std::fs::create_dir(generated.path().join("include")).unwrap();
+        std::fs::write(generated.path().join("include/ares_build.h"), "gen").unwrap();
+        std::fs::write(generated.path().join("ares.h"), "today's header").unwrap();
+        std::fs::write(revision.path().join("ares.h"), "the revision's header").unwrap();
+
+        let copied = super::fill_missing_files(generated.path(), revision.path()).unwrap();
+
+        assert_eq!(copied, 2);
+        assert!(revision.path().join("ares_config.h").is_file());
+        assert!(revision.path().join("include/ares_build.h").is_file());
+        assert_eq!(
+            std::fs::read_to_string(revision.path().join("ares.h")).unwrap(),
+            "the revision's header",
+            "a revision's own file is never replaced"
+        );
+    }
+
     use super::*;
 
     /// A tester scripted by commit name: `g*` good, `b*` bad, `s*` skip.
@@ -1097,6 +1194,7 @@ mod tests {
             harness: &harness,
             input: &input,
             root: workspace.path().to_path_buf(),
+            generated: None,
         };
         let mut steps = Vec::new();
         let result = run_bisection(repo.path(), &good, &bad, &commits, &mut tester, &mut steps)

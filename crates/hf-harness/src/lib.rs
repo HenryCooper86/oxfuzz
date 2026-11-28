@@ -21,7 +21,7 @@ pub use lint::{
 pub use generator::{
     build_command, build_command_for_source, cmplog_build_command, cmplog_build_command_for_source,
     compile_with_options, draft_analyzed, parse_seed_array, refine, render_finding_repair_request,
-    repair, repairable_smoke_failure, repaired_source_from_response,
+    repair, repairable_smoke_failure, repaired_source_from_response, repro_build_script,
     smoke_fuzz_in_paths_with_config_and_sandbox_image, source_calls_symbol, source_defines_symbol,
     summarize_diagnostics, try_compile_with_options, try_compile_with_options_streaming,
     CompileFailure, CompileResult, HarnessDraftContext, AFL_LLVM_CMPLOG_ENV,

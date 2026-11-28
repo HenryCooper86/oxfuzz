@@ -13,8 +13,8 @@ use std::path::{Component, Path, PathBuf};
 use hf_core::{
     build::{BuildContext, CompileEntry},
     runtime::{
-        classify_fixed_sandbox_include_path, contains_absolute_path_fragment,
-        FixedSandboxIncludePath, MAX_PORTABLE_DEFINE_BYTES,
+        classify_fixed_sandbox_include_path, portable_define_value, FixedSandboxIncludePath,
+        MAX_PORTABLE_DEFINE_BYTES,
     },
 };
 use serde::Deserialize;
@@ -266,7 +266,7 @@ fn accepted_define(token: &str) -> bool {
     if body.len() > MAX_PORTABLE_DEFINE_BYTES
         || body
             .split_once('=')
-            .is_some_and(|(_, value)| contains_absolute_path_fragment(value))
+            .is_some_and(|(_, value)| !portable_define_value(value))
     {
         return false;
     }
@@ -630,6 +630,42 @@ mod tests {
         assert!(context
             .dropped
             .contains(&"-DPREFIX=prefix:/Users/alice/project".to_owned()));
+    }
+
+    #[test]
+    fn keeps_a_define_naming_a_standard_system_path() {
+        // Every libexif unit is compiled with `-DLOCALEDIR=".../locale"`; with
+        // it dropped the harness build failed on an undeclared identifier. A
+        // standard system location identifies no host and exists in the
+        // sandbox's own namespace.
+        let database = serde_json::json!([{
+            "directory": "/proj",
+            "file": "/proj/a.c",
+            "arguments": [
+                "cc",
+                "-DLOCALEDIR=\"/usr/local/share/locale\"",
+                "-DSYSCONFDIR=/etc",
+                "-DDATADIR='/usr/share/app'",
+                "-DSEARCH=\"/usr/lib:/Users/alice/lib\"",
+                "-DESCAPE=\"/usr/../Users/alice\"",
+                "-DHOMEDIR=\"/home/alice/.config\"",
+                "-c",
+                "/proj/a.c"
+            ]
+        }])
+        .to_string();
+        let entries = parse_compile_database(&database).expect("parse compile database");
+
+        let context = extract_build_context(&entries, &PathBuf::from("/proj"));
+
+        assert_eq!(
+            context.defines,
+            vec![
+                "-DLOCALEDIR=\"/usr/local/share/locale\"",
+                "-DSYSCONFDIR=/etc",
+                "-DDATADIR='/usr/share/app'",
+            ]
+        );
     }
 
     #[test]

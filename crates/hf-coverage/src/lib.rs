@@ -9,7 +9,8 @@ use uuid::Uuid;
 
 mod summary;
 pub use summary::{
-    parse_llvm_cov_summary, parse_llvm_cov_uncovered, CoverageSummary, UncoveredRegion,
+    parse_llvm_cov_summary, parse_llvm_cov_uncovered, CoverageSummary, CoverageSummaryView,
+    UncoveredRegion,
 };
 
 /// A proposal when coverage stagnates.

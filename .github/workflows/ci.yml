@@ -140,6 +140,16 @@ jobs:
       - name: Lint
         run: scripts/tests/gates.sh frontend-lint
 
+  sidecar:
+    name: Automotive sidecar tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      - name: Run the sidecar's Python tests against its pinned Scapy
+        run: scripts/tests/gates.sh sidecar-tests
+
   supply-chain:
     name: Dependency policy
     runs-on: ubuntu-latest

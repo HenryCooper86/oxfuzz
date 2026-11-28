@@ -40,6 +40,37 @@ impl CoverageSummary {
     }
 }
 
+/// A [`CoverageSummary`] with each percentage computed, as the desktop app
+/// and the REST API present it.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct CoverageSummaryView {
+    pub lines_covered: u64,
+    pub lines_total: u64,
+    pub line_percent: f64,
+    pub functions_covered: u64,
+    pub functions_total: u64,
+    pub function_percent: f64,
+    pub regions_covered: u64,
+    pub regions_total: u64,
+    pub region_percent: f64,
+}
+
+impl From<CoverageSummary> for CoverageSummaryView {
+    fn from(summary: CoverageSummary) -> Self {
+        Self {
+            lines_covered: summary.lines_covered,
+            lines_total: summary.lines_total,
+            line_percent: summary.line_percent(),
+            functions_covered: summary.functions_covered,
+            functions_total: summary.functions_total,
+            function_percent: summary.function_percent(),
+            regions_covered: summary.regions_covered,
+            regions_total: summary.regions_total,
+            region_percent: summary.region_percent(),
+        }
+    }
+}
+
 fn percent(covered: u64, total: u64) -> f64 {
     if total == 0 {
         return 0.0;
@@ -280,5 +311,21 @@ mod tests {
         let summary = parse_llvm_cov_summary(EXPORT).expect("totals must still parse");
         assert_eq!(summary.functions_covered, 2);
         assert_eq!(summary.functions_total, 3);
+    }
+
+    #[test]
+    fn the_summary_view_carries_each_count_with_its_percentage() {
+        let view = CoverageSummaryView::from(CoverageSummary {
+            lines_covered: 86,
+            lines_total: 5758,
+            functions_covered: 2,
+            functions_total: 165,
+            regions_covered: 0,
+            regions_total: 0,
+        });
+        assert_eq!((view.lines_covered, view.lines_total), (86, 5758));
+        assert!((view.line_percent - 1.4936).abs() < 0.001);
+        assert!((view.function_percent - 1.2121).abs() < 0.001);
+        assert!(view.region_percent.abs() < f64::EPSILON);
     }
 }

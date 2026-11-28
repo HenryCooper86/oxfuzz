@@ -185,7 +185,7 @@ impl crate::ServiceContainer {
         let plan = profile_build_plan(profile);
         let limits = ResourceLimits {
             max_mem_mb: 4096,
-            max_cpus: 2,
+            max_cpus: super::BUILD_STEP_CPUS,
             max_duration_secs: 600,
             env: std::collections::HashMap::new(),
             ptrace: false,

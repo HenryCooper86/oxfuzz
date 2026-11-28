@@ -285,7 +285,11 @@ async fn cmake_uses_exact_options_whole_snapshot_component_workdir_and_selected_
     assert_eq!(result.status, BuildTerminalStatus::Succeeded);
     assert!(result.build_context.is_some());
     let calls = f.runtime.builds();
-    assert_eq!(calls.len(), 1);
+    assert_eq!(calls.len(), 2);
+    assert_eq!(
+        calls[1].argv,
+        ["cmake", "--build", "../../build/parser", "--parallel", "2"]
+    );
     assert_eq!(
         calls[0].argv,
         [

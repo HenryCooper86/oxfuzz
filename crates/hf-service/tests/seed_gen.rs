@@ -227,6 +227,38 @@ async fn generate_seeds_reports_only_the_seeds_it_wrote() {
     );
 }
 
+/// `oxfuzz ci` seeds heuristically. libpng's corpus already held the model
+/// seed `llmseed_4` with the bytes `test`, the heuristic `seed_ascii` wrote the
+/// same bytes, and the gate failed after fuzzing with "duplicate corpus hash".
+#[tokio::test]
+async fn generate_seeds_skips_content_the_corpus_already_holds() {
+    isolate_workspace();
+    let project = write_sample_project();
+    let store = Arc::new(
+        hf_storage::Store::connect(project.path().join("seeds.db"))
+            .await
+            .unwrap(),
+    );
+    let container =
+        ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None).with_store(store);
+    let corpus = hf_service::workspace_dir(project.path(), "parse_entry").join("corpus");
+    std::fs::create_dir_all(&corpus).unwrap();
+    std::fs::write(corpus.join("llmseed_4"), b"test").unwrap();
+
+    let written = container
+        .generate_seeds(project.path(), "parse_entry")
+        .await
+        .expect("seeding must not fail on content the corpus already holds");
+
+    assert!(!written.is_empty(), "the other heuristic seeds are written");
+    let holders = std::fs::read_dir(&corpus)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| std::fs::read(entry.path()).unwrap() == b"test")
+        .count();
+    assert_eq!(holders, 1, "one file holds each content");
+}
+
 /// A proposed seed whose bytes are already in the corpus under another name
 /// adds nothing, and two files with one digest cannot be recorded for a
 /// target: before, the whole seeding call (and the scheduled campaign that

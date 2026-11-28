@@ -50,6 +50,81 @@ describe("transport", () => {
     }
   });
 
+  it("maps the unreached-surface and attribution panels to their web routes", async () => {
+    // The Discover step's two coverage panels showed "Unsupported command in
+    // web mode" in the browser while the desktop app answered them.
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(url), init: init ?? {} });
+      return new Response(JSON.stringify({}), { status: 200 });
+    }) as typeof fetch;
+    try {
+      const transport = createHttpTransport();
+      await transport.invoke("unreached_surface", { project: "/p", lang: "c" });
+      await transport.invoke("coverage_attribution", { project: "/p", lang: "c" });
+      expect(calls.map(({ url, init }) => [new URL(url).pathname, init.method])).toEqual([
+        ["/coverage/unreached", "POST"],
+        ["/coverage/attribution", "POST"],
+      ]);
+      expect(JSON.parse(String(calls[1].init.body))).toEqual({ project: "/p", lang: "c" });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("maps the corpus view's coverage and concolic commands to their web routes", async () => {
+    // The Corpus view showed "Unsupported command in web mode" for its
+    // coverage summary and concolic availability, and could not run concolic.
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(url), init: init ?? {} });
+      return new Response(JSON.stringify({}), { status: 200 });
+    }) as typeof fetch;
+    try {
+      const transport = createHttpTransport();
+      await transport.invoke("coverage_summary", { project: "/p", target: "parse" });
+      await transport.invoke("concolic_availability");
+      await transport.invoke("corpus_concolic", { project: "/p", target: "parse" });
+      expect(calls.map(({ url, init }) => [new URL(url).pathname, init.method])).toEqual([
+        ["/coverage/summary", "POST"],
+        ["/corpus/concolic/availability", "GET"],
+        ["/corpus/concolic", "POST"],
+      ]);
+      expect(JSON.parse(String(calls[0].init.body))).toEqual({ project: "/p", target: "parse" });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("maps the binary-only workflow to its web routes", async () => {
+    // The Binary view failed in the browser: none of its commands had a route.
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(url), init: init ?? {} });
+      return new Response(JSON.stringify({}), { status: 200 });
+    }) as typeof fetch;
+    try {
+      const transport = createHttpTransport();
+      const options = { project: "/p", binary: "/p/tool", input: "file", durationSecs: 60, timeoutMs: 1000, targetArgs: ["-D", "@@"] };
+      await transport.invoke("binary_fuzz", { options });
+      await transport.invoke("binary_sessions", { project: "/p" });
+      await transport.invoke("binary_stop", { project: "/p", session: "s" });
+      await transport.invoke("binary_issue_export", { project: "/p", report: "/w/report.json", finding: "ab" });
+      expect(calls.map(({ url, init }) => [new URL(url).pathname, init.method])).toEqual([
+        ["/binary/fuzz", "POST"],
+        ["/binary/sessions", "POST"],
+        ["/binary/stop", "POST"],
+        ["/binary/issue-export", "POST"],
+      ]);
+      expect(JSON.parse(String(calls[0].init.body))).toEqual({ options });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("nests the selected revision range in the change impact request", async () => {
     const calls: Array<{ url: string; init: RequestInit }> = [];
     const originalFetch = globalThis.fetch;

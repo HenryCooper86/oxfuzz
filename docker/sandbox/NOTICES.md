@@ -142,7 +142,8 @@ archives. Notable packages and their licences, taken from each package's
   (GPL-2.0-or-later and GPL-3.0-or-later files), GNU binutils, libbfd and
   libopcodes (GPL-3.0-or-later), QEMU system emulators and utilities
   (GPL-2.0-or-later with LGPL and other licences for some files), GNU make
-  (GPL-3.0-or-later), Bison, Flex, Libtool, Bear (GPL-3.0-or-later), OpenJDK 21
+  (GPL-3.0-or-later), Bison, Flex, Libtool, Bear (GPL-3.0-or-later), GNU gettext
+  and autopoint (GPL-3.0-or-later), OpenJDK 21
   (GPL-2.0 with the Classpath exception, with LGPL-2.1, MIT and BSD files).
 - Apache-2.0 WITH LLVM-exception: Clang, LLVM, LLD, libFuzzer and the
   compiler runtime libraries, versions 17 and 18 (some files MIT or BSD-3-Clause).

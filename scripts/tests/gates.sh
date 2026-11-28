@@ -12,7 +12,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
-ALL_GATES=(fmt clippy check check-no-default-features check-feature-matrix test feature-behavior doc deny coverage performance script-tests translation-pairing frontend-test frontend-lint)
+ALL_GATES=(fmt clippy check check-no-default-features check-feature-matrix test feature-behavior doc deny coverage performance script-tests translation-pairing sidecar-tests frontend-test frontend-lint)
 
 # Keep the two package groups separate so each instrumented test run has an
 # explicit package set and its own report.
@@ -245,6 +245,32 @@ gate_frontend_test() {
   npm --prefix crates/hf-gui audit --audit-level=moderate
   npm --prefix crates/hf-gui test
   npm --prefix crates/hf-gui run build
+}
+
+# The optional automotive sidecar's Python tests, against its pinned Scapy, in
+# a throwaway virtual environment. No CI job ran them before, and a capture
+# that is not PCAP reached users as "sidecar operation failed unexpectedly".
+gate_sidecar_tests() {
+  local venv
+  venv="$(mktemp -d)"
+  python3 -m venv "${venv}"
+  "${venv}/bin/python" -m pip install --quiet --no-deps \
+    -r sidecars/scapy_automotive/requirements-can.txt
+  sidecar_unittests "${venv}/bin/python"
+}
+
+# Run every sidecar test module with `python`; the modules import their
+# shared fixtures (`test_validation`) as top-level modules.
+sidecar_unittests() {
+  local python="$1"
+  (
+    cd sidecars/scapy_automotive/tests
+    local modules=() file
+    for file in test_*.py; do
+      modules+=("${file%.py}")
+    done
+    PYTHONPATH=../src:. "${python}" -m unittest "${modules[@]}"
+  )
 }
 
 gate_frontend_lint() {

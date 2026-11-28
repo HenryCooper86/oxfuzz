@@ -57,6 +57,7 @@ async fn live_qemu_session_finds_and_confirms_a_planted_crash() {
             continue_from: None,
             compcov: false,
             persistent: None,
+            target_args: Vec::new(),
         };
         let session = Uuid::new_v4();
         let session_root = root.path().join(format!("session-{session}"));
@@ -194,6 +195,7 @@ async fn live_dictionary_reaches_afl_and_a_session_continues_from_its_queue() {
         continue_from: None,
         compcov: false,
         persistent: None,
+        target_args: Vec::new(),
     };
     let first_root = root.path().join("first");
     std::fs::create_dir_all(&first_root).unwrap();
@@ -310,6 +312,7 @@ async fn live_compcov_finds_a_magic_value_and_a_stopped_session_keeps_its_result
         continue_from: None,
         compcov: true,
         persistent: None,
+        target_args: Vec::new(),
     };
     let session_root = root.path().join("session");
     std::fs::create_dir_all(&session_root).unwrap();
@@ -399,6 +402,7 @@ async fn live_persistent_session_loops_on_main_faster_and_stays_stable() {
             continue_from: None,
             compcov: true,
             persistent,
+            target_args: Vec::new(),
         };
         let session_root = root.path().join(format!("session-{}", outcomes.len()));
         std::fs::create_dir_all(&session_root).unwrap();
@@ -493,6 +497,7 @@ async fn live_socket_session_fuzzes_a_server_through_its_first_connection() {
         continue_from: None,
         compcov: false,
         persistent: None,
+        target_args: Vec::new(),
     };
     let session = Uuid::new_v4();
     let session_root = root.path().join("session");
@@ -538,7 +543,7 @@ async fn live_socket_session_fuzzes_a_server_through_its_first_connection() {
     // shim ends the process with a clean exit.
     let benign = runtime
         .run_command_opts(
-            &replay_command(BinaryInput::Socket, "unused"),
+            &replay_command(BinaryInput::Socket, "unused", &[]),
             &session_root,
             &limits(
                 REPLAY_SECS,
@@ -669,6 +674,7 @@ async fn live_socket_sessions_reach_datagram_servers_and_stateful_exchanges() {
             continue_from: None,
             compcov: false,
             persistent: None,
+            target_args: Vec::new(),
         };
         let session_root = root.path().join(format!("session-{name}"));
         std::fs::create_dir_all(&session_root).unwrap();
@@ -724,7 +730,7 @@ async fn live_socket_sessions_reach_datagram_servers_and_stateful_exchanges() {
         // cleanly once the server asks for more.
         let clean = runtime
             .run_command_opts(
-                &replay_command(input, "unused"),
+                &replay_command(input, "unused", &[]),
                 &session_root,
                 &limits(REPLAY_SECS, replay_env(false, input).unwrap()),
                 &session_sandbox(&session_root, Some(benign)),

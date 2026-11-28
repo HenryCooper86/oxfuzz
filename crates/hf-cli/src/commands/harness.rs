@@ -296,15 +296,41 @@ fn promotion_required_message() -> &'static str {
 /// What the operator can do when the smoke run itself crashed. Promotion from
 /// the command line takes clean smoke evidence only; approving a harness with
 /// known findings is a desktop-app decision.
-fn smoke_crash_guidance(project: &std::path::Path, target: &str, crashes: u32) -> String {
+fn smoke_crash_guidance(
+    project: &std::path::Path,
+    target: &str,
+    engine: &str,
+    crashes: u32,
+) -> String {
     let noun = if crashes == 1 { "crash" } else { "crashes" };
+    let project = project.display();
     format!(
-        "not promoted: the smoke run found {crashes} {noun}, and command-line promotion takes \
-         clean smoke evidence only. Inspect the finding with `oxfuzz triage {} --target {target}`; \
-         then fix the bug and rerun, or approve the harness with known findings in the desktop \
-         app's Harness step.",
-        project.display()
+        "not promoted: the smoke run found {crashes} {noun}, and `--promote` takes clean smoke \
+         evidence only. Inspect the finding with `oxfuzz triage {project} --target {target}`; then \
+         fix the bug and rerun, or approve this revision with its known findings: `oxfuzz harness \
+         {project} --target {target} --engine {engine} --promote-with-findings`."
     )
+}
+
+/// `oxfuzz harness --promote-with-findings`: approve the active revision for
+/// full campaigns while retaining the crashes its smoke run found. Drafts,
+/// compiles and runs nothing; the service refuses a revision whose smoke run
+/// was clean or whose qualification evidence no longer matches.
+pub(crate) async fn cmd_harness_promote_with_findings(
+    project: PathBuf,
+    target: &str,
+    engine: &str,
+) -> anyhow::Result<()> {
+    let engine = parse_engine(engine)?;
+    let container = crate::approval::bootstrap().await;
+    let harness = container
+        .harness_promote_with_findings(&project, target, engine)
+        .await?;
+    println!(
+        "promotion: {:?} with known findings ({})",
+        harness.status, harness.id
+    );
+    Ok(())
 }
 
 /// Smoke-qualify the active harness. `smoke_repairs` is the number of
@@ -385,7 +411,7 @@ async fn qualify_harness(
     } else if smoke.summary.crashes > 0 {
         println!(
             "{}",
-            smoke_crash_guidance(project, target, smoke.summary.crashes)
+            smoke_crash_guidance(project, target, engine.as_str(), smoke.summary.crashes)
         );
     } else {
         println!("{}", promotion_required_message());
@@ -473,11 +499,20 @@ pub(crate) async fn cmd_run(
         // otherwise (the same seeding a campaign does). A failure here is not
         // fatal (the engine can still run on an empty corpus) but must not be
         // silent.
-        if let Err(e) = container
+        // Announced first: a model draft can take minutes, and without this
+        // line the command sits silent before the run header appears.
+        println!("\n--- Seeding the corpus for {target} ---");
+        if ai != AiOption::Off {
+            println!(
+                "  asking the model for format-aware seed inputs (this can take a few minutes)"
+            );
+        }
+        match container
             .generate_seeds_llm(&project, target, lang, hf_service::LLM_SEED_COUNT)
             .await
         {
-            eprintln!("warning: could not generate seed corpus: {e}");
+            Ok(seeds) => println!("  {} seed input(s) written to the corpus", seeds.len()),
+            Err(e) => eprintln!("warning: could not generate seed corpus: {e}"),
         }
 
         println!("\n--- Running {engine} for {duration_secs}s (live, Ctrl-C to stop) ---");
@@ -524,11 +559,30 @@ pub(crate) async fn cmd_run(
     if let Some(total) = summary.execs_total {
         println!("  total executions: {total}");
     }
-    println!("  crashes detected: {}", summary.crashes);
+    // These are saved crashing inputs, not distinct bugs: one shallow bug can
+    // leave hundreds (a fork-mode libFuzzer run writes one per job), and the
+    // artifact scan stops at its safety limit. Triage groups them.
+    if summary.crashes > 0 {
+        println!(
+            "  crashing inputs saved: {} (`oxfuzz triage` groups them into findings)",
+            summary.crashes
+        );
+    } else {
+        println!("  crashing inputs saved: 0");
+    }
     if let Some(hangs) = summary.hangs {
         println!("  hangs (per-input timeouts): {hangs}");
     }
     println!("  edges covered: {}", summary.edges);
+    if summary.stopped_at_first_crash {
+        // Single-process libFuzzer exits at its first crash; without this
+        // line a near-zero run reads like a full campaign that found little.
+        println!(
+            "  stopped at the first crash: libFuzzer ends a single-process run there, so the \
+             rest of the budget went unused. Fix that crash and rerun, or rerun with --cpus 2 \
+             or more: fork mode continues past crashes (fuzzing.sandbox.max_cpus caps it)."
+        );
+    }
     if summary.cmplog {
         // Cost visibility: the companion ran on interesting inputs, so this
         // run's exec/s is not comparable with a plain run's.
@@ -537,9 +591,51 @@ pub(crate) async fn cmd_run(
         );
     }
     if let Some(proposal) = &summary.stagnation {
-        println!("  coverage stalled: {proposal:?} -- consider regenerating the harness or adding seeds/a dictionary");
+        println!("  coverage stalled: {}", stagnation_advice(proposal));
     }
     Ok(())
+}
+
+/// The operator-facing advice for a coverage-plateau proposal. The proposal
+/// escalates with how long coverage stayed flat, so each tier names its own
+/// next step instead of printing the enum's debug name.
+fn stagnation_advice(proposal: &hf_service::StagnationProposal) -> &'static str {
+    match proposal {
+        hf_service::StagnationProposal::CustomMutator => {
+            "improve the inputs -- add seeds (`oxfuzz corpus --op llmseed`), a dictionary \
+             (`oxfuzz dict --set`), or a custom mutator (`oxfuzz mutator`)"
+        }
+        hf_service::StagnationProposal::NewHarness => {
+            "regenerate the harness to reach new code (`oxfuzz harness --refine`)"
+        }
+        hf_service::StagnationProposal::Stop => {
+            "flat for a long time -- this target looks exhausted; consider stopping it"
+        }
+    }
+}
+
+#[cfg(test)]
+mod stagnation_advice_tests {
+    use hf_service::StagnationProposal;
+
+    #[test]
+    fn each_tier_names_its_own_next_step_not_a_debug_name() {
+        let inputs = super::stagnation_advice(&StagnationProposal::CustomMutator);
+        assert!(
+            inputs.contains("--op llmseed") && inputs.contains("dict"),
+            "{inputs}"
+        );
+        assert!(super::stagnation_advice(&StagnationProposal::NewHarness).contains("--refine"));
+        assert!(super::stagnation_advice(&StagnationProposal::Stop).contains("stopping"));
+        for proposal in [
+            StagnationProposal::CustomMutator,
+            StagnationProposal::NewHarness,
+            StagnationProposal::Stop,
+        ] {
+            let advice = super::stagnation_advice(&proposal);
+            assert!(!advice.contains("CustomMutator") && !advice.contains("NewHarness"));
+        }
+    }
 }
 
 /// Ask for a harness repair from one finding and print how to adopt it.
@@ -866,7 +962,12 @@ mod promotion_guidance_tests {
     fn a_crashing_smoke_run_is_not_pointed_at_a_promotion_that_will_refuse() {
         // `work-order promote` accepts clean smoke evidence only, so naming it
         // after a crashing smoke run sent the operator to a refusal.
-        let message = smoke_crash_guidance(std::path::Path::new("/proj"), "parse_number", 1);
+        let message = smoke_crash_guidance(
+            std::path::Path::new("/proj"),
+            "parse_number",
+            "libfuzzer",
+            1,
+        );
 
         assert!(message.contains("found 1 crash"), "{message}");
         assert!(
@@ -874,8 +975,16 @@ mod promotion_guidance_tests {
             "{message}"
         );
         assert!(message.contains("known findings"), "{message}");
+        assert!(
+            message.contains(
+                "oxfuzz harness /proj --target parse_number --engine libfuzzer --promote-with-findings"
+            ),
+            "the command line names its own way to approve the findings: {message}"
+        );
         assert!(!message.contains("work-order promote"), "{message}");
-        assert!(smoke_crash_guidance(std::path::Path::new("/p"), "t", 2).contains("2 crashes"));
+        assert!(
+            smoke_crash_guidance(std::path::Path::new("/p"), "t", "afl++", 2).contains("2 crashes")
+        );
     }
 
     #[test]

@@ -224,7 +224,11 @@ For `component_root=components/parser` and
 
 ```text
 cmake -S . -B ../../build/parser -DCMAKE_EXPORT_COMPILE_COMMANDS=ON <definitions>
+cmake --build ../../build/parser --parallel 2
 ```
+
+(the build writes headers a project generates while building, such as
+libpng's `pnglibconf.h`, which harness compiles include)
 
 or, for plain Make:
 
@@ -233,21 +237,29 @@ mkdir -p -- ../../build/parser
 bear --output ../../build/parser/compile_commands.json -- make -B
 ```
 
-for Meson (setup writes the compile database into the build directory; no
-project build runs):
+for Meson (setup writes the compile database into the build directory; the
+build writes `custom_target` headers):
 
 ```text
 meson setup ../../build/parser
+meson compile -C ../../build/parser -j 2
 ```
 
 or, for Autotools (in-tree configure, then the forced Make build recorded
 by Bear):
 
 ```text
-autoreconf -i
+autoreconf -f -i
 ./configure
-bear --output ../../build/parser/compile_commands.json -- make -B
+find . -type f ( -name *.o -o -name *.lo -o -name *.obj ) -delete
+bear --output ../../build/parser/compile_commands.json -- make -j2
 ```
+
+The third step deletes objects an earlier in-tree build left so that every
+compile happens, and is recorded, under Bear. It does not run the project's
+own `make clean`: real projects ship broken clean rules (libexif 0.6.14's needs
+a `clean-apidocs` target that exists only when its documentation is
+configured).
 
 or, for Bazel (one query; no action of the project's build graph executes):
 

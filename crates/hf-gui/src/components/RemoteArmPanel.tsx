@@ -3,10 +3,18 @@ import { useState } from "react";
 import { useI18n } from "../i18nContext";
 import { formatInvokeError } from "../lib/invokeError";
 import { discoveryApi, type RemoteArmAction } from "../lib/parityDiscovery";
+import { isTauriEnvironment } from "../lib/transport";
+import { DesktopOnlyNotice } from "./RestServerPanel";
 import { Button, Input } from "./ui";
 
 /** Arm, disarm or query another running server (`oxfuzz arm --url`). */
 export function RemoteArmPanel() {
+  // The desktop app makes this request itself; a browser calls the other
+  // server's API directly, and this server never relays to an arbitrary URL.
+  return isTauriEnvironment() ? <DesktopRemoteArmPanel /> : <DesktopOnlyNotice title="parityDiscovery.remote.title" />;
+}
+
+function DesktopRemoteArmPanel() {
   const { t } = useI18n();
   const [url, setUrl] = useState("");
   // Held in memory for the request only: never persisted.

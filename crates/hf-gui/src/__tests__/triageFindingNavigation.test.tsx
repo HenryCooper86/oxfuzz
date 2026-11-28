@@ -360,6 +360,33 @@ describe("retained finding navigation", () => {
     expect(container.textContent).not.toContain("historical/parser.c:73");
   });
 
+  it("opens the latest occurrence when the saved finding's bug recurred in the latest run", async () => {
+    // The saved selection was an older occurrence; the latest run reproduced
+    // the same bug, so restoring the old one disabled Compose Report, SARIF
+    // and DefectDojo until the user found and clicked the newer row.
+    const oldOccurrence = { ...older, bug_key: "t:bug-1" } as FindingReviewItem;
+    const latestOccurrence = {
+      ...finding("latest-crash", "latest-run", PROJECT_A, "/evidence/latest/crash-input"),
+      bug_key: "t:bug-1",
+      latest_scoped_actions_allowed: true,
+      latest_scoped_action_reason: null,
+    } as FindingReviewItem;
+    invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "finding_review_queue") return Promise.resolve([oldOccurrence, latestOccurrence]);
+      if (command === "finding_review") {
+        return Promise.resolve(args?.findingId === latestOccurrence.crash.id ? latestOccurrence : oldOccurrence);
+      }
+      if (command === "binary_sessions") return Promise.resolve([]);
+      throw new Error(`unexpected command ${command}`);
+    });
+    await act(async () => root.render(<Providers><TriageView /></Providers>));
+    await flush();
+    await flush();
+    const reviewed = invoke.mock.calls.filter(([command]) => command === "finding_review").map(([, args]) => args.findingId);
+    expect(reviewed[reviewed.length - 1]).toBe(latestOccurrence.crash.id);
+    expect(container.textContent).not.toContain("This finding belongs to a historical run.");
+  });
+
   it("restores exact historical evidence per project without starting work", async () => {
     await act(async () => root.render(<Providers><TriageView /></Providers>));
     await flush();

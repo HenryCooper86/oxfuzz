@@ -226,8 +226,14 @@ fn meson_and_autotools_plans_derive_output_from_selected_database() {
         let plan = profile_build_plan(&profile);
         match system {
             ProfileBuildSystem::Meson => {
-                assert_eq!(plan.steps.len(), 1);
+                // Setup writes the database; the build writes the headers
+                // `custom_target`s generate, which harness compiles include.
+                assert_eq!(plan.steps.len(), 2);
                 assert_eq!(plan.steps[0].argv, ["meson", "setup", "build/parser"]);
+                assert_eq!(
+                    plan.steps[1].argv,
+                    ["meson", "compile", "-C", "build/parser", "-j", "2"]
+                );
                 assert_eq!(plan.steps[0].working_dir, ".");
                 assert_eq!(
                     required_build_dependencies(&profile),
@@ -238,18 +244,35 @@ fn meson_and_autotools_plans_derive_output_from_selected_database() {
                 );
             }
             ProfileBuildSystem::Autotools => {
-                assert_eq!(plan.steps.len(), 3);
-                assert_eq!(plan.steps[0].argv, ["autoreconf", "-i"]);
+                // `make clean` then a parallel build, not `make -B`: forcing
+                // every target re-runs autotools' own regeneration rules under
+                // Bear, which took LibTIFF 4.0.4 past the 10-minute step limit
+                // (14 seconds this way, with the same 114 compiles recorded).
+                assert_eq!(plan.steps.len(), 4);
+                // `-f` refreshes config.guess/config.sub: a 2008 copy (LibTIFF
+                // 4.0.4) cannot guess aarch64 and `./configure` stops there.
+                assert_eq!(plan.steps[0].argv, ["autoreconf", "-f", "-i"]);
                 assert_eq!(plan.steps[1].argv, ["./configure"]);
+                // Objects an in-tree build left are deleted directly rather
+                // than through `make clean`: the project's own clean rules
+                // can be broken (libexif 0.6.14 asks for a `clean-apidocs`
+                // target that exists only with its docs configured).
                 assert_eq!(
                     plan.steps[2].argv,
+                    [
+                        "find", ".", "-type", "f", "(", "-name", "*.o", "-o", "-name", "*.lo",
+                        "-o", "-name", "*.obj", ")", "-delete"
+                    ]
+                );
+                assert_eq!(
+                    plan.steps[3].argv,
                     [
                         "bear",
                         "--output",
                         "build/parser/compile_commands.json",
                         "--",
                         "make",
-                        "-B"
+                        "-j2"
                     ]
                 );
                 for step in &plan.steps {
@@ -493,6 +516,12 @@ fn nested_cmake_and_make_plans_derive_output_from_selected_database() {
             "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
             "-DBUILD_TESTING=OFF"
         ]
+    );
+    // libpng generates pnglibconf.h while building, not while configuring;
+    // without the build step no harness can include png.h.
+    assert_eq!(
+        plan.steps[1].argv,
+        ["cmake", "--build", "../../build/parser", "--parallel", "2"]
     );
     assert_eq!(plan.steps[0].working_dir, "components/parser");
     std::fs::remove_file(project.path().join("components/parser/CMakeLists.txt")).unwrap();
@@ -794,6 +823,11 @@ async fn configured_harness_admission_enforces_saved_profile_without_optional_fe
         .unwrap_err();
     assert!(
         error.to_string().contains("build_diagnosis_unavailable"),
+        "{error}"
+    );
+    // The refusal names the step that clears it.
+    assert!(
+        error.to_string().contains("oxfuzz build diagnose"),
         "{error}"
     );
     assert!(store.list_all_targets().await.unwrap().is_empty());

@@ -75,6 +75,15 @@ frontend:
     - scripts/tests/gates.sh frontend-test
     - scripts/tests/gates.sh frontend-lint
 
+sidecar-tests:
+  stage: gate
+  # The optional automotive sidecar is Python; its tests need its pinned Scapy
+  # and nothing else.
+  image: python:3.12.9-slim-bookworm
+  script:
+    - apt-get update -qq && apt-get install -y -qq bash
+    - scripts/tests/gates.sh sidecar-tests
+
 script-tests:
   stage: gate
   # These tests are written in Python, but their dependencies are not. The

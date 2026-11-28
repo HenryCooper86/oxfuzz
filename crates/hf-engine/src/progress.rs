@@ -295,7 +295,14 @@ fn fork_aggregate_execs(line: &str) -> Option<f64> {
     // `dft_time:` field on the line from being read as the elapsed time.
     let seconds = uptime_from_fork_line(&line.to_ascii_lowercase())? as f64;
     // Sub-second elapsed times produce unstable rates.
-    (seconds >= 1.0).then_some(total as f64 / seconds)
+    if seconds < 1.0 {
+        return None;
+    }
+    // libFuzzer prints whole seconds rounded down, so the elapsed time is
+    // under one second more than printed. Dividing by that upper bound never
+    // overstates the rate; dividing by the printed value doubled it on a
+    // line printed 1.9 s into a run.
+    Some(total as f64 / (seconds + 1.0))
 }
 
 /// Whether a raw engine-stdout line reports an individual crash/finding event.

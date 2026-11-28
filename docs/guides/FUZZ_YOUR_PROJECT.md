@@ -161,10 +161,10 @@ in the sandbox with networking disabled:
 
 | System | Steps |
 | --- | --- |
-| CMake | `cmake -S . -B <db dir> -DCMAKE_EXPORT_COMPILE_COMMANDS=ON <definitions>` (configure only) |
+| CMake | `cmake -S . -B <db dir> -DCMAKE_EXPORT_COMPILE_COMMANDS=ON <definitions>`, then `cmake --build <db dir> --parallel 2` |
 | Make | `mkdir -p -- <db dir>`, then `bear --output <db> -- make -B` |
-| Meson | `meson setup <db dir>` (configure only) |
-| Autotools | `autoreconf -i`, `./configure`, then `bear --output <db> -- make -B` |
+| Meson | `meson setup <db dir>`, then `meson compile -C <db dir> -j 2` |
+| Autotools | `autoreconf -f -i`, `./configure`, delete leftover `*.o`/`*.lo`/`*.obj` objects, then `bear --output <db> -- make -j2` |
 | Bazel | `oxfuzz-bazel-compdb <db>` (one offline `bazel aquery`; nothing is compiled) |
 
 Notes:

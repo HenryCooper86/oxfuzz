@@ -241,6 +241,41 @@ pub fn classify_fixed_sandbox_include_path(value: &str) -> FixedSandboxIncludePa
 /// Maximum bytes accepted for one portable compiler definition.
 pub const MAX_PORTABLE_DEFINE_BYTES: usize = 4_096;
 
+/// Standard system locations a compiler definition may name. They identify
+/// no host or user, and exist in the sandbox's own filesystem namespace:
+/// autotools projects compile every unit with `-DLOCALEDIR="/usr/.../locale"`.
+const STANDARD_SYSTEM_PREFIXES: [&str; 8] = [
+    "/usr/", "/etc", "/var/", "/opt/", "/lib/", "/lib64/", "/srv/", "/run/",
+];
+
+/// Whether the value half of a `-D` definition is portable: it holds no
+/// absolute path, or it is exactly one standard system path, bare or in
+/// matching quotes, with no `..` component and no second path behind it.
+#[must_use]
+pub fn portable_define_value(value: &str) -> bool {
+    !contains_absolute_path_fragment(value) || is_standard_system_path(value)
+}
+
+fn is_standard_system_path(value: &str) -> bool {
+    let path = ['"', '\'']
+        .iter()
+        .find_map(|quote| {
+            value
+                .strip_prefix(*quote)
+                .and_then(|inner| inner.strip_suffix(*quote))
+        })
+        .unwrap_or(value);
+    let under_prefix = STANDARD_SYSTEM_PREFIXES.iter().any(|prefix| {
+        path.strip_prefix(prefix)
+            .is_some_and(|rest| prefix.ends_with('/') || rest.is_empty() || rest.starts_with('/'))
+    });
+    under_prefix
+        && path.split('/').all(|component| component != "..")
+        && path.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '/' | '.' | '_' | '-' | '+')
+        })
+}
+
 const MAX_URI_SCHEME_BYTES: usize = 32;
 
 /// Detect a Unix or Windows absolute path anywhere inside a portable value.
@@ -506,9 +541,37 @@ pub trait RuntimeAdapter: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_fixed_sandbox_include_path, contains_absolute_path_fragment, posix_relative,
-        CommandResult, CommandTermination, FixedSandboxIncludePath, ImmutableImageReference,
+        classify_fixed_sandbox_include_path, contains_absolute_path_fragment,
+        portable_define_value, posix_relative, CommandResult, CommandTermination,
+        FixedSandboxIncludePath, ImmutableImageReference,
     };
+
+    #[test]
+    fn a_standard_system_path_is_a_portable_define_value() {
+        for value in [
+            "\"/usr/local/share/locale\"",
+            "/etc",
+            "/etc/app.conf",
+            "'/usr/share/app'",
+            "/var/lib/app",
+            "1.2.3",
+            "https://example.test/api",
+        ] {
+            assert!(portable_define_value(value), "{value}");
+        }
+        for value in [
+            "/Users/alice/project",
+            "\"/home/alice/.config\"",
+            "\"/usr/lib:/Users/alice/lib\"",
+            "/usr/../Users/alice",
+            "/etcetera/x",
+            "\"/usr/share/app'",
+            "/tmp/build",
+            "C:\\Users\\alice",
+        ] {
+            assert!(!portable_define_value(value), "{value}");
+        }
+    }
 
     #[test]
     fn fixed_sandbox_include_paths_classify_canonical_and_invalid_spellings() {

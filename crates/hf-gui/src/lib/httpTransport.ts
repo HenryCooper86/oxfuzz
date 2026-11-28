@@ -50,6 +50,36 @@ const COMMAND_MAP: Record<string, CommandEndpoint> = {
   harness_promote: { method: "POST", path: "/harness/promote" },
   harness_promote_with_findings: { method: "POST", path: "/harness/promote-with-findings" },
   coverage_functions: { method: "POST", path: "/coverage/functions" },
+  coverage_summary: { method: "POST", path: "/coverage/summary" },
+  concolic_availability: { method: "GET", path: "/corpus/concolic/availability" },
+  corpus_concolic: { method: "POST", path: "/corpus/concolic" },
+  harness_refine: { method: "POST", path: "/harness/refine" },
+  harness_adopt_revision: { method: "POST", path: "/harness/adopt-revision" },
+  harness_smoke_with_options: { method: "POST", path: "/harness/smoke-with-options" },
+  attach_grammar_mutator: { method: "POST", path: "/harness/mutator/grammar" },
+  grammar_mutator_source: { method: "POST", path: "/harness/mutator/grammar-source" },
+  verify_regressions: { method: "POST", path: "/crashes/verify-regressions" },
+  bisect_crash: { method: "POST", path: "/crashes/bisect" },
+  run_campaign: { method: "POST", path: "/campaign/run" },
+  run_ci_gate: { method: "POST", path: "/ci-gate" },
+  run_detail: { method: "GET", path: "/runs/detail/{run_id}" },
+  campaign_trust_report: { method: "GET", path: "/runs/{run_id}/trust" },
+  capture_run_edges: { method: "POST", path: "/runs/{run_id}/edges", emptyBody: true },
+  run_edge_diff: { method: "POST", path: "/runs/edge-diff" },
+  user_dictionary: { method: "POST", path: "/dictionary" },
+  set_user_dictionary: { method: "POST", path: "/dictionary/set" },
+  clear_user_dictionary: { method: "POST", path: "/dictionary/clear" },
+  fuzzing_preflight: { method: "POST", path: "/fuzzing/preflight" },
+  clang_available: { method: "GET", path: "/clang/available" },
+  clang_analysis_start: { method: "POST", path: "/clang/analysis" },
+  clang_analysis_status: { method: "GET", path: "/clang/analysis/{operation_id}" },
+  clang_analysis_result: { method: "GET", path: "/clang/analysis/{operation_id}/result" },
+  clang_analysis_cancel: { method: "POST", path: "/clang/analysis/{operation_id}/cancel", emptyBody: true },
+  notifications_test: { method: "POST", path: "/notifications/test", emptyBody: true },
+  notify_latest_run: { method: "POST", path: "/notifications/latest-run" },
+  thaw_provider: { method: "POST", path: "/providers/{provider_id}/thaw", emptyBody: true },
+  automotive_scan_uds: { method: "POST", path: "/automotive/scan-uds" },
+  automotive_live_monitor: { method: "POST", path: "/automotive/live-monitor" },
   work_order_export: { method: "POST", path: "/harness/work-orders" },
   work_order_list: { method: "GET", path: "/harness/work-orders" },
   work_order_get: { method: "GET", path: "/harness/work-orders/{work_order_id}" },
@@ -139,6 +169,20 @@ const COMMAND_MAP: Record<string, CommandEndpoint> = {
   build_history: { method: "GET", path: "/build/history" },
   harness_tournament: { method: "POST", path: "/harness/tournament" },
   coverage_blockers: { method: "POST", path: "/coverage/blockers" },
+  unreached_surface: { method: "POST", path: "/coverage/unreached" },
+  binary_fuzz: { method: "POST", path: "/binary/fuzz" },
+  binary_inspect: { method: "POST", path: "/binary/inspect" },
+  binary_seed_drafts: { method: "POST", path: "/binary/seed-drafts" },
+  binary_dictionary_refine: { method: "POST", path: "/binary/dictionary-refine" },
+  binary_progress: { method: "POST", path: "/binary/progress" },
+  binary_stop: { method: "POST", path: "/binary/stop" },
+  binary_sessions: { method: "POST", path: "/binary/sessions" },
+  binary_session: { method: "POST", path: "/binary/session" },
+  binary_finding_explanation: { method: "POST", path: "/binary/finding-explanation" },
+  binary_finding_explain: { method: "POST", path: "/binary/finding-explain" },
+  binary_issue_export: { method: "POST", path: "/binary/issue-export" },
+  binary_file_issue: { method: "POST", path: "/binary/file-issue" },
+  coverage_attribution: { method: "POST", path: "/coverage/attribution" },
   automotive_lab_coverage: { method: "POST", path: "/automotive/lab/coverage" },
   automotive_lab_plan: { method: "POST", path: "/automotive/lab/plan" },
   automotive_lab_simulate: { method: "POST", path: "/automotive/lab/simulate" },
@@ -396,6 +440,58 @@ function finiteMetric(value: number | null | undefined): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+/**
+ * Commands the browser answers without a `COMMAND_MAP` route: run lifecycle
+ * handled by the transport itself, window lifecycle no-ops, and files saved
+ * as browser downloads.
+ */
+const BROWSER_HANDLED_COMMANDS: ReadonlySet<string> = new Set([
+  "run_fuzzer", "replay_run", "cancel_run", "semgrep_enrich", "semgrep_cancel", "run_syzkaller",
+  "show_window", "heartbeat_pong", "toggle_devtools",
+  "save_text_file", "export_coverage_line_report",
+]);
+
+/**
+ * Commands only the desktop app performs. Each call site checks
+ * `isTauriEnvironment()` and shows the browser an accurate state instead:
+ * native dialogs and windows, the embedded DefectDojo view, the REST server
+ * the desktop hosts (the browser is already talking to one), arming another
+ * server (the browser can call it directly), workspace-wide cleanup and
+ * interrupted-run recovery (the server owns its storage), host-path file
+ * imports, and exports whose browser path downloads the content instead.
+ */
+export const DESKTOP_ONLY_COMMANDS: ReadonlySet<string> = new Set([
+  "open_file_dialog", "open_folder_dialog", "open_url", "reveal_path",
+  "defectdojo_embed", "defectdojo_embed_close", "defectdojo_embed_reload", "open_defectdojo",
+  "rest_server_start", "rest_server_status", "rest_server_stop", "remote_schedule_arm",
+  "clear_workspace", "interrupted_runs", "dismiss_interrupted_run", "knowledge_summary",
+  "automotive_import_capture", "automotive_diff_captures",
+  "export_markdown", "export_report", "export_repro", "export_sarif",
+]);
+
+/** Whether the browser transport answers `command`. */
+export function isWebCommand(command: string): boolean {
+  return command in COMMAND_MAP || BROWSER_HANDLED_COMMANDS.has(command);
+}
+
+/** Save `contents` through the browser's download. */
+function downloadText(fileName: string, contents: string, type: string) {
+  const url = URL.createObjectURL(new Blob([contents], { type }));
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = fileName;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+/** The desktop's file name for a line-coverage report of `target`. */
+function lineReportFileName(target: string, format: string): string {
+  const stem = target.replace(/[^A-Za-z0-9_-]/g, "_");
+  if (format === "lcov") return `oxfuzz_${stem}.lcov.info`;
+  if (format === "html") return `oxfuzz_${stem}_coverage.html`;
+  throw new Error(`unknown coverage report format '${format}'; expected lcov or html`);
+}
+
 export function createHttpTransport(options: HttpTransportOptions = {}): Transport {
   const baseUrl = options.baseUrl ?? DEFAULT_BASE_URL;
   const token = options.token ?? DEFAULT_API_TOKEN;
@@ -601,6 +697,26 @@ export function createHttpTransport(options: HttpTransportOptions = {}): Transpo
       }
       if (command === "semgrep_cancel") {
         return cancelSemgrep(args, options) as Promise<T>;
+      }
+      if (command === "save_text_file") {
+        const fileName = String(args?.fileName ?? "oxfuzz.txt");
+        downloadText(fileName, String(args?.contents ?? ""), "text/plain");
+        return fileName as T;
+      }
+      if (command === "export_coverage_line_report") {
+        const format = String(args?.format ?? "");
+        const fileName = lineReportFileName(String(args?.target ?? ""), format);
+        const report = await request<{
+          lcov: string; html: string; lines_hit: number; lines_total: number; files: number; skipped_files: number;
+        }>({ method: "POST", path: "/coverage/line-report" }, { project: args?.project, target: args?.target }, options);
+        downloadText(fileName, format === "lcov" ? report.lcov : report.html, format === "lcov" ? "text/plain" : "text/html");
+        return {
+          path: fileName,
+          lines_hit: report.lines_hit,
+          lines_total: report.lines_total,
+          files: report.files,
+          skipped_files: report.skipped_files,
+        } as T;
       }
       if (command === "run_syzkaller") {
         throw new Error("Syzkaller campaigns are unavailable in web mode");

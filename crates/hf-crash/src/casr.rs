@@ -81,6 +81,11 @@ pub fn cluster_from_path(path: &std::path::Path) -> Option<u32> {
 #[must_use]
 pub fn kind_from_short(short: &str) -> CrashKind {
     let s = short.to_ascii_lowercase();
+    // CASR's "Undefined" names the absence of a class, not undefined
+    // behavior; matched exactly, ahead of the `undefined` substring below.
+    if s.trim() == "undefined" {
+        return CrashKind::Other;
+    }
     if s.contains("leak") {
         // Before the `sanitizer` catch-all below: a CASR leak description names
         // `LeakSanitizer`, which would otherwise be read as an `ASan` finding.
@@ -189,6 +194,20 @@ pub fn casrep_sanitizer_log(json: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn casr_undefined_class_is_not_undefined_behavior() {
+        // CASR's "Undefined" short description means it assigned no class;
+        // UBSan findings carry their own descriptions.
+        assert_eq!(
+            super::kind_from_short("Undefined"),
+            hf_core::crash::CrashKind::Other
+        );
+        assert_eq!(
+            super::kind_from_short("UndefinedBehavior"),
+            hf_core::crash::CrashKind::Ubsan
+        );
+    }
+
     use super::*;
 
     // A trimmed but realistic casr-san report for a heap overflow.

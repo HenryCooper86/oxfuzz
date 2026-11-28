@@ -36,6 +36,7 @@ class ScapyPcapDecoder:
 
     def decode(self, path: Path, max_events: int) -> list[dict[str, Any]]:
         try:
+            from scapy.error import Scapy_Exception
             from scapy.utils import PcapReader
         except ImportError as error:
             raise SidecarError(
@@ -72,6 +73,16 @@ class ScapyPcapDecoder:
                         break
         except SidecarError:
             raise
+        except Scapy_Exception as error:
+            # Scapy's own type for a file that is not PCAP or PCAPNG, such as a
+            # candump text log; it is not an OSError.
+            raise SidecarError(
+                "pcap_decode_error",
+                "The capture is not a PCAP or PCAPNG file; convert a text log "
+                "(candump, ASC) to PCAP, or use CAN log analysis for text logs",
+                field="path",
+                details={"reason": str(error)},
+            ) from error
         except (OSError, ValueError) as error:
             raise SidecarError(
                 "pcap_decode_error",

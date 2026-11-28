@@ -578,3 +578,134 @@ async fn directory_named_like_source_file_does_not_abort_scan() {
         inv.candidates.iter().map(|c| &c.symbol).collect::<Vec<_>>()
     );
 }
+
+/// c-ares `ares_platform.c` holds an 11,000-entry service table inside an
+/// `#ifdef`; tree-sitter's error recovery nests one node per entry, so the
+/// parse tree is tens of thousands of levels deep. A recursive walk overflows
+/// the stack and aborts the whole process; the scan must finish and still
+/// report the functions in the file.
+#[tokio::test]
+async fn a_parse_tree_tens_of_thousands_of_levels_deep_does_not_overflow_the_stack() {
+    use std::fmt::Write as _;
+    let project = tempfile::tempdir().unwrap();
+    let mut src = String::from(
+        "struct pvt { char *name; char **aliases; unsigned short port; char *proto; };\n\
+         static struct pvt ports[] = {\n#ifdef USE_WELL_KNOWN\n",
+    );
+    for i in 0..10_000 {
+        writeln!(src, "{{\"svc{i}\", {{NULL}}, {i}, \"tcp\"}},").unwrap();
+    }
+    src.push_str("#endif\n{NULL, {NULL}, 0, NULL}\n};\n");
+    src.push_str(
+        "int lookup_service(const char *data, unsigned long len) {\n\
+         if (len > 2 && data[0] == 'x') return 1;\n  return 0;\n}\n",
+    );
+    std::fs::write(project.path().join("table.c"), src).unwrap();
+
+    let inv = hf_discovery::discover(project.path(), TargetLanguage::C)
+        .await
+        .expect("discover should succeed on a deeply nested parse tree");
+    assert!(
+        inv.candidates.iter().any(|c| c.symbol == "lookup_service"),
+        "the function after the table must still be found: {:?}",
+        inv.candidates.iter().map(|c| &c.symbol).collect::<Vec<_>>()
+    );
+}
+
+/// Real projects carry Latin-1 bytes in comments (c-ares `acountry.c` credits
+/// an author with an accented name). Such a file is still C; its functions
+/// must be discovered rather than the file being skipped.
+#[tokio::test]
+async fn a_source_file_with_latin1_comment_bytes_is_still_scanned() {
+    let project = tempfile::tempdir().unwrap();
+    let mut src = b"/* Copyright Gisle Vanem, Jos\xe9 */\n".to_vec();
+    src.extend_from_slice(
+        b"int decode_country(const unsigned char *data, unsigned long len) {\n\
+          if (len > 1 && data[0] == 'c') return data[1];\n  return 0;\n}\n",
+    );
+    std::fs::write(project.path().join("acountry.c"), src).unwrap();
+
+    let inv = hf_discovery::discover(project.path(), TargetLanguage::C)
+        .await
+        .expect("discover should succeed");
+    assert!(
+        inv.candidates.iter().any(|c| c.symbol == "decode_country"),
+        "a Latin-1 comment must not hide the file's functions: {:?}",
+        inv.candidates.iter().map(|c| &c.symbol).collect::<Vec<_>>()
+    );
+}
+
+/// c-ares `inet_ntop.c` defines `ares_inet_ntop` twice, once per branch of
+/// `#ifdef HAVE_INET_NTOP`. A target's id is derived from (project, file,
+/// symbol), so two candidates would share one id: AI ranking then sees the
+/// model echo the id twice and rejects the whole batch, and persistence keys
+/// collide. Discovery must report one target per identity -- the definition
+/// with the most logic, which is the one worth fuzzing.
+#[tokio::test]
+async fn a_function_defined_in_both_preprocessor_branches_is_one_target() {
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(
+        project.path().join("inet_ntop.c"),
+        "#ifndef HAVE_INET_NTOP\n\
+         const char *ares_inet_ntop(int af, const void *src, char *dst, unsigned size) {\n\
+           if (af == 2) { if (size < 16) return 0; return dst; }\n\
+           if (af == 10) { if (size < 46) return 0; return dst; }\n\
+           return 0;\n\
+         }\n\
+         #else\n\
+         const char *ares_inet_ntop(int af, const void *src, char *dst, unsigned size) {\n\
+           return inet_ntop(af, src, dst, size);\n\
+         }\n\
+         #endif\n",
+    )
+    .unwrap();
+
+    let inv = hf_discovery::discover(project.path(), TargetLanguage::C)
+        .await
+        .expect("discover should succeed");
+    let defs: Vec<_> = inv
+        .candidates
+        .iter()
+        .filter(|c| c.symbol == "ares_inet_ntop")
+        .collect();
+    assert_eq!(defs.len(), 1, "one target per (file, symbol): {defs:?}");
+    assert_eq!(defs[0].location.line, 2, "the fuller definition is kept");
+    let mut ids: Vec<_> = inv.candidates.iter().map(|c| c.id).collect();
+    let total = ids.len();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), total, "target ids must be unique");
+}
+
+/// The signature is shown to operators and in reports and work orders; it
+/// read `*ares_inet_ntop(int af, ...)`, without the return type, because it
+/// was the declarator alone.
+#[tokio::test]
+async fn a_c_signature_carries_its_return_type() {
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(
+        project.path().join("inet.c"),
+        "const char *\nares_inet_ntop(int af, const void *src, char *dst, unsigned size)\n{\n  return dst;\n}\n\
+         int ares_create_query(const char *name, int dnsclass) { return name[0] + dnsclass; }\n",
+    )
+    .unwrap();
+
+    let inv = hf_discovery::discover(project.path(), TargetLanguage::C)
+        .await
+        .expect("discover should succeed");
+    let signature = |symbol: &str| {
+        inv.candidates
+            .iter()
+            .find(|c| c.symbol == symbol)
+            .and_then(|c| c.signature.clone())
+            .unwrap_or_default()
+    };
+    assert_eq!(
+        signature("ares_inet_ntop"),
+        "const char * ares_inet_ntop(int af, const void *src, char *dst, unsigned size)"
+    );
+    assert_eq!(
+        signature("ares_create_query"),
+        "int ares_create_query(const char *name, int dnsclass)"
+    );
+}

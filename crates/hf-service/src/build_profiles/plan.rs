@@ -15,6 +15,8 @@ pub(crate) fn required_build_dependencies(profile: &BuildProfileView) -> Vec<Bui
         ProfileBuildSystem::CMake => &["cmake"][..],
         ProfileBuildSystem::Make => &["mkdir", "make", "bear"][..],
         ProfileBuildSystem::Meson => &["meson"][..],
+        // `find` (the object cleanup) is a base-image essential and not listed:
+        // a newly required tool would invalidate every earlier diagnosis.
         ProfileBuildSystem::Autotools => &["autoreconf", "make", "bear"][..],
         ProfileBuildSystem::Bazel => &["bazel", BAZEL_COMPILE_DATABASE_TOOL][..],
     };
@@ -60,10 +62,25 @@ pub(crate) fn profile_build_plan(profile: &BuildProfileView) -> BuildPlanEvidenc
                     .iter()
                     .map(|(name, value)| format!("-D{name}={value}")),
             );
-            vec![step(
-                argv,
-                "Configure the component so CMake writes the selected compile database",
-            )]
+            // Configuring writes the database; building writes the headers a
+            // project generates with custom commands (libpng's pnglibconf.h),
+            // which every harness that includes the public header needs.
+            vec![
+                step(
+                    argv,
+                    "Configure the component so CMake writes the selected compile database",
+                ),
+                step(
+                    vec![
+                        "cmake".to_owned(),
+                        "--build".to_owned(),
+                        output_dir.to_owned(),
+                        "--parallel".to_owned(),
+                        crate::build_profiles::BUILD_STEP_CPUS.to_string(),
+                    ],
+                    "Build the component so the headers it generates while building exist",
+                ),
+            ]
         }
         ProfileBuildSystem::Make => vec![
             step(
@@ -87,27 +104,60 @@ pub(crate) fn profile_build_plan(profile: &BuildProfileView) -> BuildPlanEvidenc
                 "Record the forced Make build in the selected compile database",
             ),
         ],
-        // Meson writes compile_commands.json during setup, so configuring is
-        // enough; no project build runs for the database.
-        ProfileBuildSystem::Meson => vec![step(
-            vec![
-                "meson".to_owned(),
-                "setup".to_owned(),
-                output_dir.to_owned(),
-            ],
-            "Set up the Meson build directory so Meson writes the selected compile database",
-        )],
+        // Meson writes compile_commands.json during setup.
+        ProfileBuildSystem::Meson => vec![
+            step(
+                vec![
+                    "meson".to_owned(),
+                    "setup".to_owned(),
+                    output_dir.to_owned(),
+                ],
+                "Set up the Meson build directory so Meson writes the selected compile database",
+            ),
+            // As for CMake: `custom_target` headers exist only once built.
+            step(
+                vec![
+                    "meson".to_owned(),
+                    "compile".to_owned(),
+                    "-C".to_owned(),
+                    output_dir.to_owned(),
+                    "-j".to_owned(),
+                    crate::build_profiles::BUILD_STEP_CPUS.to_string(),
+                ],
+                "Build the component so the headers it generates while building exist",
+            ),
+        ],
         // In-tree configure keeps the plan independent of whether the
         // component ships a generated configure script: autoreconf produces
-        // one from the autoconf sources when it is absent.
+        // one from the autoconf sources when it is absent. `-f` also replaces
+        // the auxiliary scripts a project shipped: an old config.guess (LibTIFF
+        // 4.0.4 carries one from 2008) cannot guess aarch64, and configure
+        // stops at "cannot guess build type". The plan runs in a staging copy,
+        // so the project's own files are never rewritten.
         ProfileBuildSystem::Autotools => vec![
             step(
-                vec!["autoreconf".to_owned(), "-i".to_owned()],
+                vec!["autoreconf".to_owned(), "-f".to_owned(), "-i".to_owned()],
                 "Generate or refresh the configure script from the autoconf sources",
             ),
             step(
                 vec!["./configure".to_owned()],
                 "Configure the component in-tree for the recorded Make build",
+            ),
+            // Not `make -B`: forcing every target also re-runs the rules that
+            // regenerate Makefiles and config.status, each under Bear's
+            // interception, which took LibTIFF 4.0.4 past the step time limit.
+            // Deleting the objects an in-tree build left in the copy makes
+            // every compile happen, and be recorded, without running the
+            // project's own clean rules, which can be broken (libexif 0.6.14's
+            // `make clean` needs a target that exists only with its docs).
+            step(
+                [
+                    "find", ".", "-type", "f", "(", "-name", "*.o", "-o", "-name", "*.lo", "-o",
+                    "-name", "*.obj", ")", "-delete",
+                ]
+                .map(str::to_owned)
+                .to_vec(),
+                "Remove objects a previous in-tree build left, so every compile is recorded",
             ),
             step(
                 vec![
@@ -116,9 +166,9 @@ pub(crate) fn profile_build_plan(profile: &BuildProfileView) -> BuildPlanEvidenc
                     output,
                     "--".to_owned(),
                     "make".to_owned(),
-                    "-B".to_owned(),
+                    format!("-j{}", crate::build_profiles::BUILD_STEP_CPUS),
                 ],
-                "Record the forced Make build in the selected compile database",
+                "Record the full Make build in the selected compile database",
             ),
         ],
         // The image's tool runs one offline `bazel aquery` against the

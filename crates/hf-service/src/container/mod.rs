@@ -111,6 +111,9 @@ mod python_atheris_tests;
 mod run;
 #[cfg(test)]
 mod rust_vendor_tests;
+mod template_release;
+#[cfg(test)]
+mod template_release_tests;
 pub(crate) use run::CampaignRunLimits;
 pub use run::{ReplayInputs, ReplayReview};
 mod function_coverage;
@@ -1510,9 +1513,11 @@ impl ServiceContainer {
             }
             if harness.engine != engine {
                 return Err(ClassifiedError::Validation(format!(
-                    "active harness for '{target}' uses {} rather than {}; compile it again",
-                    harness.engine.as_str(),
-                    engine.as_str()
+                    "this needs a {wanted} harness, but the active harness for '{target}' is \
+                     built for {active}; build one with `oxfuzz harness <project> --target \
+                     {target} --engine {wanted}`",
+                    active = harness.engine.as_str(),
+                    wanted = engine.as_str()
                 )));
             }
             if harness.source != source {
@@ -2541,6 +2546,107 @@ pub(crate) fn stopped_at_first_crash(
         })
 }
 
+/// Let a libFuzzer campaign over a harness approved with known findings keep
+/// fuzzing past them.
+///
+/// The operator approved that revision knowing its smoke run crashed, so the
+/// known crash is reached again almost at once -- often from the seed corpus
+/// itself. Single-process libFuzzer exits at that crash, which would end every
+/// campaign within its first seconds and make the approval pointless. Fork
+/// mode with `-ignore_crashes=1` keeps fuzzing for the whole budget while each
+/// crashing input is still written as an artifact for triage. An allocation
+/// above one CPU already runs that way (the adapter's own fork argv); one CPU
+/// opts in here, and the flags are recorded in the run config, so a replay
+/// reproduces them. Leak detection goes off with fork mode for the same
+/// reason the adapter gives: fork children misreport the parent's heap.
+pub(crate) fn continue_past_known_findings(config: &mut FuzzRunConfig) {
+    if config.engine != EngineKind::LibFuzzer || config.max_cpus > 1 {
+        return;
+    }
+    config.extra_args.extend(
+        ["-fork=1", "-ignore_crashes=1", "-detect_leaks=0"]
+            .into_iter()
+            .map(str::to_owned),
+    );
+    if !config.env.iter().any(|(key, _)| key == "ASAN_OPTIONS") {
+        config
+            .env
+            .push(("ASAN_OPTIONS".to_owned(), "detect_leaks=0".to_owned()));
+    }
+}
+
+#[cfg(test)]
+mod known_findings_continuation_tests {
+    use hf_core::engine::{EngineKind, FuzzRunConfig};
+
+    fn config(engine: EngineKind, max_cpus: u32) -> FuzzRunConfig {
+        FuzzRunConfig {
+            harness_id: uuid::Uuid::nil(),
+            engine,
+            duration: Some(std::time::Duration::from_secs(60)),
+            max_mem_mb: 2048,
+            max_cpus,
+            seed_corpus: None,
+            sanitizer: hf_core::target::Sanitizer::Address,
+            env: Vec::new(),
+            extra_args: vec!["-dict=/work/dict".to_owned()],
+            seed: None,
+            replay_of: None,
+            input_manifest_sha256: None,
+            input_timeout: None,
+            resume: false,
+            cmplog: false,
+        }
+    }
+
+    #[test]
+    fn a_single_cpu_libfuzzer_campaign_continues_in_fork_mode() {
+        let mut run = config(EngineKind::LibFuzzer, 1);
+        super::continue_past_known_findings(&mut run);
+        assert_eq!(
+            run.extra_args,
+            [
+                "-dict=/work/dict",
+                "-fork=1",
+                "-ignore_crashes=1",
+                "-detect_leaks=0"
+            ]
+        );
+        assert_eq!(
+            run.env,
+            [("ASAN_OPTIONS".to_owned(), "detect_leaks=0".to_owned())]
+        );
+        let args = hf_engine::libfuzzer::build_run_args(&run, "/w/h", "/w/c", "/w/o").unwrap();
+        assert!(args.contains(&"-ignore_crashes=1".to_owned()), "{args:?}");
+    }
+
+    #[test]
+    fn other_engines_and_fork_allocations_are_left_alone() {
+        for (engine, cpus) in [
+            (EngineKind::LibFuzzer, 4),
+            (EngineKind::AflPlusPlus, 1),
+            (EngineKind::Honggfuzz, 1),
+        ] {
+            let mut run = config(engine, cpus);
+            super::continue_past_known_findings(&mut run);
+            assert_eq!(run.extra_args, ["-dict=/work/dict"], "{engine:?} x{cpus}");
+            assert!(run.env.is_empty(), "{engine:?} x{cpus}");
+        }
+    }
+
+    #[test]
+    fn an_operator_asan_options_is_kept() {
+        let mut run = config(EngineKind::LibFuzzer, 1);
+        run.env
+            .push(("ASAN_OPTIONS".to_owned(), "detect_leaks=1".to_owned()));
+        super::continue_past_known_findings(&mut run);
+        assert_eq!(
+            run.env,
+            [("ASAN_OPTIONS".to_owned(), "detect_leaks=1".to_owned())]
+        );
+    }
+}
+
 #[cfg(test)]
 mod first_crash_stop_tests {
     use std::time::Duration;
@@ -2915,7 +3021,10 @@ fn heuristic_draft(
     }
     let includes = generate_includes(candidate);
     let forward_decl = generate_forward_decl(&candidate.symbol, candidate.signature.as_deref());
-    let body = generate_harness_body(&candidate.symbol, candidate.signature.as_deref());
+    let mut body = generate_harness_body(&candidate.symbol, candidate.signature.as_deref());
+    if let Some(release) = template_release::release_for(candidate) {
+        body = template_release::keep_and_release(&body, &candidate.symbol, &release);
+    }
     if persistent {
         hf_harness::persistent::require_persistent_support(engine, candidate.language)?;
         let location = format!(

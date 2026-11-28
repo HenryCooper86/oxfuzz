@@ -416,6 +416,7 @@ mod tests {
             stopped: false,
             persistent_entry: None,
             stability_pct: None,
+            target_args: Vec::new(),
         }
     }
 

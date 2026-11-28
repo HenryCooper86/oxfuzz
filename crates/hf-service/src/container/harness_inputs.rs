@@ -180,7 +180,13 @@ impl ServiceContainer {
                 })
         });
         if !ready {
-            return Err(ClassifiedError::Validation("build_diagnosis_unavailable: diagnose the current configured build before harness operations".into()));
+            return Err(ClassifiedError::Validation(format!(
+                "build_diagnosis_unavailable: diagnose the current configured build before \
+                 harness operations (`oxfuzz build diagnose {}`, or Diagnose in Build Doctor); \
+                 the saved profile, the sandbox image or a required tool changed since the \
+                 last diagnosis",
+                profile.project_root
+            )));
         }
         Ok(())
     }

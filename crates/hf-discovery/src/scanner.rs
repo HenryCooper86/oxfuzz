@@ -86,6 +86,7 @@ fn discover_blocking(
         c.project_root.clone_from(&project_root);
         c.id = deterministic_target_id(c);
     }
+    let candidates = one_candidate_per_identity(candidates);
     Ok((
         TargetInventory {
             project_root,
@@ -133,6 +134,31 @@ const TARGET_ID_NAMESPACE: Uuid = Uuid::from_bytes([
 /// project are distinct persisted targets instead of shadowing each other.
 /// Storage re-homes onto the row matching the same key
 /// (`Store::upsert_target`), so rediscovery keeps the first persisted id.
+/// Keep one candidate per target id, in first-seen order.
+///
+/// A file can define the same function more than once, one definition per
+/// preprocessor branch (c-ares `inet_ntop.c` under `#ifdef HAVE_INET_NTOP`).
+/// The id covers (project, file, symbol), so those definitions are one
+/// target; reporting both gives every consumer keyed on the id -- AI ranking,
+/// persistence, `--target file::symbol` -- two rows for one key. The kept
+/// definition is the most complex one (the earliest on a tie): a thin wrapper
+/// over a system call is rarely the code worth fuzzing.
+fn one_candidate_per_identity(candidates: Vec<TargetCandidate>) -> Vec<TargetCandidate> {
+    let mut kept: Vec<TargetCandidate> = Vec::with_capacity(candidates.len());
+    let mut slot: std::collections::HashMap<Uuid, usize> = std::collections::HashMap::new();
+    for candidate in candidates {
+        if let Some(&index) = slot.get(&candidate.id) {
+            if candidate.complexity > kept[index].complexity {
+                kept[index] = candidate;
+            }
+        } else {
+            slot.insert(candidate.id, kept.len());
+            kept.push(candidate);
+        }
+    }
+    kept
+}
+
 fn deterministic_target_id(candidate: &TargetCandidate) -> Uuid {
     let key = format!(
         "{}::{}::{}",
@@ -308,16 +334,35 @@ fn scan_lexical(
     for path in files {
         // A single unreadable or non-UTF-8 source file must not lose every
         // candidate found so far -- skip it and continue the pass.
-        let src = match std::fs::read_to_string(&path) {
-            Ok(src) => src,
-            Err(error) => {
-                tracing::warn!(path = %path.display(), %error, "skipping unreadable source file");
-                continue;
-            }
+        let Some(src) = read_source_lossy(&path) else {
+            continue;
         };
         extract(&src, &path, &mut candidates);
     }
     Ok((candidates, std::collections::HashMap::new(), Vec::new()))
+}
+
+/// Read a source file for scanning.
+///
+/// Non-UTF-8 bytes are common in real projects (Latin-1 author names in
+/// comments), and skipping such a file hides every function in it. Invalid
+/// sequences become U+FFFD: line structure is unchanged, so reported line
+/// numbers still match the file. An unreadable file (permissions, races) is
+/// skipped with a warning so one bad path does not lose the whole scan.
+fn read_source_lossy(path: &Path) -> Option<String> {
+    match std::fs::read(path) {
+        Ok(bytes) => Some(match String::from_utf8(bytes) {
+            Ok(src) => src,
+            Err(error) => {
+                tracing::debug!(path = %path.display(), "decoding non-UTF-8 source lossily");
+                String::from_utf8_lossy(error.as_bytes()).into_owned()
+            }
+        }),
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, "skipping unreadable source file");
+            None
+        }
+    }
 }
 
 /// The file `bazel vendor` writes at the top of a vendor directory.
@@ -1596,16 +1641,8 @@ fn scan_c(root: &Path, lang: TargetLanguage) -> Result<ScanResult, ClassifiedErr
     // candidate order must be identical on every machine.
     for relative in discoverable_source_files(root, lang)? {
         let path = root.join(&relative);
-        // Non-UTF-8 or unreadable sources are common in the wild (Latin-1
-        // comments, permission gaps); skip the file rather than aborting the
-        // whole project scan. tree-sitter requires `&str`, so a genuinely
-        // non-UTF-8 file can only be skipped here regardless.
-        let src = match std::fs::read_to_string(&path) {
-            Ok(src) => src,
-            Err(e) => {
-                tracing::warn!(path = %path.display(), error = %e, "skipping unreadable source file");
-                continue;
-            }
+        let Some(src) = read_source_lossy(&path) else {
+            continue;
         };
         let tree = parser.parse(&src, None).ok_or_else(|| {
             ClassifiedError::Internal(format!("parse {}: parser returned no tree", path.display()))
@@ -1887,12 +1924,13 @@ fn extract_functions(
             params,
             has_buffer_and_length(parameter_text),
         );
-        // Capture only the function prototype (declarator), not the whole
-        // definition body -- otherwise the signature spans many lines and
-        // downstream consumers (e.g. harness generation) leak body code.
+        // Capture the prototype -- the return type and qualifiers before the
+        // declarator, and the declarator -- but not the body: a signature
+        // spanning the body leaks code into every consumer. The declarator
+        // alone read `*ares_inet_ntop(...)`, without its return type.
         let signature = Some(
-            declarator
-                .utf8_text(src.as_bytes())
+            src.get(node.start_byte()..declarator.end_byte())
+                .or_else(|| declarator.utf8_text(src.as_bytes()).ok())
                 .unwrap_or("")
                 .split_whitespace()
                 .collect::<Vec<_>>()
@@ -1968,14 +2006,55 @@ fn extract_calls(func: tree_sitter::Node, src: &str) -> Vec<String> {
     callees
 }
 
+/// Visit `node` and every descendant in preorder.
+///
+/// Iterative on purpose: tree-sitter's error recovery can nest one node per
+/// entry of a large table (c-ares `ares_platform.c` parses 43,000 levels
+/// deep), and a recursive walk overflows the stack and aborts the process.
 fn walk_nodes(node: tree_sitter::Node, f: &mut dyn FnMut(tree_sitter::Node)) {
-    f(node);
     let mut cursor = node.walk();
-    if cursor.goto_first_child() {
+    loop {
+        f(cursor.node());
+        if cursor.goto_first_child() {
+            continue;
+        }
         loop {
-            walk_nodes(cursor.node(), f);
-            if !cursor.goto_next_sibling() {
+            if cursor.node() == node {
+                return;
+            }
+            if cursor.goto_next_sibling() {
                 break;
+            }
+            if !cursor.goto_parent() {
+                return;
+            }
+        }
+    }
+}
+
+/// The first descendant of `node` (excluding `node` itself), in preorder,
+/// whose kind is `kind`. Iterative for the same reason as [`walk_nodes`].
+fn first_descendant_of_kind<'a>(
+    node: tree_sitter::Node<'a>,
+    kind: &str,
+) -> Option<tree_sitter::Node<'a>> {
+    let mut cursor = node.walk();
+    if !cursor.goto_first_child() {
+        return None;
+    }
+    loop {
+        if cursor.node().kind() == kind {
+            return Some(cursor.node());
+        }
+        if cursor.goto_first_child() {
+            continue;
+        }
+        loop {
+            if cursor.goto_next_sibling() {
+                break;
+            }
+            if !cursor.goto_parent() || cursor.node() == node {
+                return None;
             }
         }
     }
@@ -2037,44 +2116,16 @@ fn function_name_node(node: tree_sitter::Node<'_>) -> Option<tree_sitter::Node<'
 }
 
 fn find_identifier<'a>(node: &tree_sitter::Node<'a>) -> Option<tree_sitter::Node<'a>> {
-    let mut cursor = node.walk();
-    if cursor.goto_first_child() {
-        loop {
-            let child = cursor.node();
-            if child.kind() == "identifier" {
-                return Some(child);
-            }
-            // Recurse into child (e.g. function_declarator wraps identifier).
-            if let Some(nested) = find_identifier(&child) {
-                return Some(nested);
-            }
-            if !cursor.goto_next_sibling() {
-                break;
-            }
-        }
-    }
-    None
+    // Preorder, so a function_declarator's own identifier is found before
+    // anything nested in its parameters.
+    first_descendant_of_kind(*node, "identifier")
 }
 
 /// The first parameter list under a function declarator.
 fn find_parameter_list(declarator: tree_sitter::Node<'_>) -> Option<tree_sitter::Node<'_>> {
-    let mut cursor = declarator.walk();
-    if !cursor.goto_first_child() {
-        return None;
-    }
-    loop {
-        let child = cursor.node();
-        if child.kind() == "parameter_list" {
-            return Some(child);
-        }
-        // A function declarator may wrap another declarator.
-        if let Some(nested) = find_parameter_list(child) {
-            return Some(nested);
-        }
-        if !cursor.goto_next_sibling() {
-            return None;
-        }
-    }
+    // A function declarator may wrap another declarator; preorder finds the
+    // outermost list first.
+    first_descendant_of_kind(declarator, "parameter_list")
 }
 
 /// How many arguments a parameter list declares.

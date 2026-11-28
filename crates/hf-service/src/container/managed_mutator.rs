@@ -214,7 +214,7 @@ pub(super) fn require_self_test(harness: &Harness) -> Result<(), ClassifiedError
         if !record
             .self_test
             .as_ref()
-            .is_some_and(|test| test.exit_code == 0 && test.mutation_observed)
+            .is_some_and(hf_core::mutator::MutatorSelfTest::passed)
         {
             return Err(invalid("native mutation callback has no successful bounded self-test; run smoke qualification"));
         }
@@ -288,6 +288,44 @@ pub(super) fn stage(
                 .env
                 .push(("AFL_CUSTOM_MUTATOR_ONLY".into(), "1".into()));
         }
+    } else if qualification {
+        // libFuzzer replays every seed before it mutates, and stops at the
+        // first crash: a corpus holding a known finding (c-ares' `\.`) ended
+        // the self-test before the mutator was ever called, so no target
+        // with known findings could qualify one. The self-test proves the
+        // callback runs, which needs no seeds; the retained initial corpus
+        // snapshot is untouched.
+        clear_working_corpus(&artifacts.corpus_host)?;
     }
     Ok(())
+}
+
+/// Remove the regular files of a run's working corpus copy.
+fn clear_working_corpus(corpus: &Path) -> Result<(), ClassifiedError> {
+    let entries = std::fs::read_dir(corpus)
+        .map_err(|error| invalid(&format!("read working corpus: {error}")))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| invalid(&format!("read working corpus: {error}")))?;
+        if entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            std::fs::remove_file(entry.path())
+                .map_err(|error| invalid(&format!("clear working corpus: {error}")))?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod qualification_corpus_tests {
+    #[test]
+    fn the_working_corpus_is_emptied_and_nothing_else() {
+        let corpus = tempfile::tempdir().unwrap();
+        std::fs::write(corpus.path().join("llmseed_7"), b"\\.").unwrap();
+        std::fs::create_dir(corpus.path().join("nested")).unwrap();
+        super::clear_working_corpus(corpus.path()).unwrap();
+        let left: Vec<_> = std::fs::read_dir(corpus.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(left, vec![std::ffi::OsString::from("nested")]);
+    }
 }

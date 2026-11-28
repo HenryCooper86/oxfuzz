@@ -32,6 +32,10 @@ pub struct BinaryFuzzOptions {
     /// Persistent mode; absent from older forms.
     #[serde(default)]
     persistent: Option<hf_service::BinaryPersistent>,
+    /// Arguments the target runs with (`@@` marks the input file); absent
+    /// from older forms.
+    #[serde(default)]
+    target_args: Vec<String>,
 }
 
 /// Fuzz an uninstrumented Linux binary in the sandbox and return the
@@ -54,6 +58,7 @@ pub async fn binary_fuzz(
             continue_from: options.continue_from,
             compcov: options.compcov,
             persistent: options.persistent,
+            target_args: options.target_args,
         })
         .await
         .map_err(|error| error.to_string())

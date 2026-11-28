@@ -18,7 +18,7 @@ pub use casr::{
     casr_command, casrep_sanitizer_log, cluster_from_path, kind_from_short, parse_casrep,
     severity_from_str,
 };
-pub use classify::{classify, looks_like_crash};
+pub use classify::{classify, looks_like_crash, OOM_KILL_MARKER};
 pub use dedup::{bug_keys, dedup, identity_keys};
 pub use frames::is_harness_function;
 pub use frames::{

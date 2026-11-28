@@ -301,6 +301,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends bear \
     && make --version \
     && pkg-config --version
 
+# `autoreconf -i` runs autopoint for every project whose configure.ac uses
+# AM_GNU_GETTEXT (libexif and most GNU-style libraries); without it the
+# Autotools profile fails at its first step. Installed late for the same
+# reason as Bear.
+RUN apt-get update && apt-get install -y --no-install-recommends autopoint gettext \
+    && rm -rf /var/lib/apt/lists/* \
+    && autopoint --version \
+    && msgfmt --version
+
 WORKDIR /work
 
 CMD ["true"]

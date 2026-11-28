@@ -90,6 +90,7 @@ impl ServiceContainer {
             .await?;
         let _workspace_operation = self.acquire_workspace_operation().await?;
         let id = Uuid::new_v4();
+        let _owner = crate::process_ownership::hold(crate::process_ownership::AI_DISCOVERY, id);
         store
             .create_ai_discovery(id, &inventory.project_root, language)
             .await?;
@@ -154,10 +155,12 @@ impl ServiceContainer {
         let workspace_operation = self.acquire_workspace_operation().await?;
         let store = self.ai_discovery_store()?;
         let id = Uuid::new_v4();
+        let owner = crate::process_ownership::hold(crate::process_ownership::AI_DISCOVERY, id);
         store.create_ai_discovery(id, &project, language).await?;
         let worker = self.clone();
         tokio::spawn(async move {
             let _workspace_operation = workspace_operation;
+            let _owner = owner;
             if let Err(error) = worker.run_ranked_scan(id, &project, language).await {
                 tracing::error!(operation_id = %id, %error, "ranked discovery failed");
                 if let Err(storage_error) =
@@ -233,10 +236,12 @@ impl ServiceContainer {
         self.authorize_recorded(Action::Discover, "discover", Some(&source.project_root))
             .await?;
         let new_id = Uuid::new_v4();
+        let owner = crate::process_ownership::hold(crate::process_ownership::AI_DISCOVERY, new_id);
         store.copy_ai_scan(id, new_id).await?;
         let worker = self.clone();
         tokio::spawn(async move {
             let _workspace_operation = workspace_operation;
+            let _owner = owner;
             if let Err(error) = worker.run_ranked_ai(new_id, &scan).await {
                 tracing::error!(operation_id = %new_id, %error, "retried AI assessment failed");
                 if let Err(storage_error) =

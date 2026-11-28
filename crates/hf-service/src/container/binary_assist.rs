@@ -737,6 +737,7 @@ mod tests {
             stopped: false,
             persistent_entry: None,
             stability_pct: None,
+            target_args: Vec::new(),
         };
         let prompt = explain_prompt(&outcome, &finding, 3, b"PIC1\x00\xff", None);
         assert!(prompt.contains("No disassembly is available"));

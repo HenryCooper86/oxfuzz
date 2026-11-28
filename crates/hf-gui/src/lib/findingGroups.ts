@@ -3,11 +3,16 @@ interface GroupableFinding {
   target_id: string;
   /** Service identity of the bug; equal for findings of one bug. */
   bug_key?: string;
+  /** Whether report, reproduction and export actions work on this finding
+   *  (it belongs to its target's latest run). */
+  latest_scoped_actions_allowed?: boolean;
 }
 
 export interface FindingGroup<T extends GroupableFinding> {
   key: string;
-  /** The first member in queue order, which is attention order. */
+  /** The member from the target's latest run, where report actions work;
+   *  else the first in queue order, which is attention order. Always
+   *  `members[0]`. */
   representative: T;
   members: T[];
   runCount: number;
@@ -29,8 +34,19 @@ export function groupFindings<T extends GroupableFinding>(items: readonly T[]): 
     if (group) group.members.push(item);
     else groups.set(key, { key, representative: item, members: [item], runCount: 0 });
   }
-  return [...groups.values()].map((group) => ({
-    ...group,
-    runCount: new Set(group.members.map((member) => member.crash.run_id)).size,
-  }));
+  return [...groups.values()].map((group) => {
+    // A bug reproduced run after run would otherwise be led by its oldest
+    // occurrence, on which Compose Report and the other latest-run actions
+    // are disabled.
+    const lead = group.members.findIndex((member) => member.latest_scoped_actions_allowed === true);
+    const members = lead > 0
+      ? [group.members[lead], ...group.members.slice(0, lead), ...group.members.slice(lead + 1)]
+      : group.members;
+    return {
+      ...group,
+      representative: members[0],
+      members,
+      runCount: new Set(members.map((member) => member.crash.run_id)).size,
+    };
+  });
 }

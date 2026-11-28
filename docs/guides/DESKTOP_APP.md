@@ -219,9 +219,10 @@ oxfuzz-owned `.oxfuzz-build/` directory inside your project, which is part of
 what you are approving.
 
 Each profile type has a fixed plan. CMake configures with
-`-DCMAKE_EXPORT_COMPILE_COMMANDS=ON`; Meson runs `meson setup`; plain Make runs
-a forced `make -B` under `bear`; Autotools runs `autoreconf -i`, `./configure`,
-and then the same `bear`-observed `make -B`; Bazel runs one offline query over
+`-DCMAKE_EXPORT_COMPILE_COMMANDS=ON` and builds; Meson runs `meson setup` and
+`meson compile`; plain Make runs
+a forced `make -B` under `bear`; Autotools runs `autoreconf -f -i`, `./configure`,
+removal of leftover object files (not the project's own `make clean`), and a `bear`-observed `make -j2`; Bazel runs one offline query over
 the vendor directory the project carries. The sandbox image (0.2.0 or later)
 installs `cmake`, `meson`, `autoconf`/`automake`/`libtool`, `make`, and `bear`,
 and from 0.2.3 Bazel 8 and 9.

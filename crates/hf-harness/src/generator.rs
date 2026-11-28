@@ -2438,6 +2438,101 @@ fn compile_script(
     )
 }
 
+/// Flags of a source-coverage build: debug info for line mapping, the
+/// libFuzzer driver so the binary replays a corpus directory with `-runs=0`,
+/// and LLVM profile instrumentation in place of any sanitizer.
+const COVERAGE_BUILD_ARGS: [&str; 5] = [
+    "-g",
+    "-O1",
+    "-fsanitize=fuzzer",
+    "-fprofile-instr-generate",
+    "-fcoverage-mapping",
+];
+
+/// The `bash -c` script that builds a source-coverage binary of a C or C++
+/// harness revision as `/work/{output_name}`.
+///
+/// It compiles what the revision's fuzzing build compiled -- the same harness
+/// source, the same project flags (include directories, defines from the
+/// compile database), and the same project translation units linked under
+/// renamed `main`s -- with clang, the libFuzzer driver, and profile
+/// instrumentation instead of the engine compiler and sanitizer. A real
+/// project (generated `config.h`, several programs with their own `main`)
+/// therefore builds for coverage exactly when it built for fuzzing.
+///
+/// `None` for languages without an LLVM source-coverage build, and for an
+/// AFL++ persistent-mode harness, which owns `main` and cannot link the
+/// libFuzzer driver.
+#[must_use]
+pub fn coverage_build_script(
+    harness: &Harness,
+    workspace: &Path,
+    output_name: &str,
+) -> Option<String> {
+    let compiler = match harness.language {
+        TargetLanguage::C => "clang",
+        TargetLanguage::Cpp => "clang++",
+        _ => return None,
+    };
+    if crate::persistent::is_persistent_source(&harness.source) {
+        return None;
+    }
+    let source_name = source_filename(harness.language);
+    let args: Vec<String> = COVERAGE_BUILD_ARGS.iter().map(|&a| a.to_owned()).collect();
+    Some(compile_script(
+        compiler,
+        &args,
+        &harness.build_cmd.extra_flags,
+        "/work",
+        source_name,
+        output_name,
+        &ProjectLinkInputs::collect(workspace, &[source_name]),
+    ))
+}
+
+/// The shell command a reproduction bundle documents: the harness build of
+/// `language` -- `compiler` and `args` with the revision's project flags, its
+/// linked project units, renamed program `main`s and system libraries --
+/// rooted at the bundle directory instead of the sandbox's `/work`.
+///
+/// `None` for a language whose build is not a C or C++ compiler line.
+#[must_use]
+pub fn repro_build_script(
+    language: TargetLanguage,
+    extra_flags: &[String],
+    workspace: &Path,
+    compiler: &str,
+    args: &[String],
+    output_name: &str,
+) -> Option<String> {
+    if !matches!(language, TargetLanguage::C | TargetLanguage::Cpp) {
+        return None;
+    }
+    let source_name = source_filename(language);
+    let flags: Vec<String> = extra_flags
+        .iter()
+        .map(|flag| rooted_at_bundle(flag))
+        .collect();
+    Some(compile_script(
+        compiler,
+        args,
+        &flags,
+        ".",
+        source_name,
+        output_name,
+        &ProjectLinkInputs::collect(workspace, &[source_name]),
+    ))
+}
+
+/// A project flag with the sandbox workspace `/work` replaced by `.`.
+fn rooted_at_bundle(flag: &str) -> String {
+    let flag = flag.replace("/work/", "./");
+    match flag.strip_suffix("/work") {
+        Some(prefix) => format!("{prefix}."),
+        None => flag,
+    }
+}
+
 /// Explicit context sections for an analysis-conditioned draft.
 pub struct HarnessDraftContext<'a> {
     /// Retrieved project examples.
@@ -2474,6 +2569,22 @@ pub fn project_build_failure(diagnostics: &str, harness_file: &str) -> Option<St
     let mut first_project_error: Option<&str> = None;
     for line in diagnostics.lines() {
         let line = line.trim();
+        // A linker diagnostic names the unit before `:(`, as in
+        // `tif_lzma.c:(.text+0x1f4): undefined reference to ...`. It carries
+        // no `error:` marker, so it is matched by what it reports.
+        if line.contains("undefined reference to") || line.contains("multiple definition of") {
+            let located = line.strip_prefix("/usr/bin/ld: ").unwrap_or(line);
+            let unit = located.split(":(").next().unwrap_or("");
+            if is_harness(unit) {
+                return None;
+            }
+            first_project_error.get_or_insert(located);
+            continue;
+        }
+        // The driver's closing summary of a failed link names no unit.
+        if line.contains("error: linker command failed") {
+            continue;
+        }
         if let Some(rest) = line.strip_prefix("In file included from ") {
             if chain_root.is_none() {
                 chain_root = rest.split(':').next();
@@ -2592,6 +2703,40 @@ mod tests {
         assert_eq!(
             project_build_failure(
                 "/work/a.c:1:1: warning: unused\nld: undefined symbol",
+                "harness.c"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_link_failure_is_attributed_to_the_unit_with_the_unresolved_symbol() {
+        // LibTIFF 4.0.4: the project's codecs call liblzma. The only `error:`
+        // line was clang's summary, reported as the project failure, which
+        // hid the symbol that was missing.
+        let project = "/usr/bin/ld: /tmp/tif_lzma-1a2b.o: in function `LZMADecode':\n\
+                       tif_lzma.c:(.text.LZMADecode+0x1f4): undefined reference to `lzma_code'\n\
+                       clang: error: linker command failed with exit code 1 (use -v to see invocation)\n";
+        assert_eq!(
+            project_build_failure(project, "harness.c").as_deref(),
+            Some("tif_lzma.c:(.text.LZMADecode+0x1f4): undefined reference to `lzma_code'")
+        );
+        let duplicate = "/usr/bin/ld: /tmp/tif_win32-9f.o: in function `TIFFOpen':\n\
+                         tif_win32.c:(.text+0x0): multiple definition of `TIFFOpen'; /tmp/tif_unix-3c.o:tif_unix.c:(.text+0x0): first defined here\n\
+                         clang: error: linker command failed with exit code 1\n";
+        assert!(project_build_failure(duplicate, "harness.c")
+            .is_some_and(|line| line.contains("multiple definition of `TIFFOpen'")));
+
+        // The harness calls something no unit defines: the model can repair
+        // that, so it is not a project failure.
+        let harness = "/usr/bin/ld: /tmp/harness-77.o: in function `LLVMFuzzerTestOneInput':\n\
+                       harness.c:(.text+0x40): undefined reference to `TIFFReadFromMemory'\n\
+                       clang: error: linker command failed with exit code 1\n";
+        assert_eq!(project_build_failure(harness, "harness.c"), None);
+        // A bare summary names no unit; repair stays available.
+        assert_eq!(
+            project_build_failure(
+                "clang: error: linker command failed with exit code 1\n",
                 "harness.c"
             ),
             None
@@ -3461,6 +3606,55 @@ mod tests {
             CompileResult::Ok(h) => assert_eq!(h.status, HarnessStatus::Compiled),
             CompileResult::Failed(_) => panic!("expected success"),
         }
+    }
+
+    #[test]
+    fn a_coverage_build_compiles_what_the_fuzzing_build_compiled() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(workspace.path().join("harness.c"), "int x;").unwrap();
+        std::fs::write(workspace.path().join("ares_create_query.c"), "int q;").unwrap();
+        std::fs::write(workspace.path().join("adig.c"), "int main(void){return 0;}").unwrap();
+        let mut harness = sample_harness();
+        harness.build_cmd.extra_flags = vec!["-I/work".to_owned(), "-DHAVE_CONFIG_H".to_owned()];
+
+        let script = coverage_build_script(&harness, workspace.path(), "fuzz_cov")
+            .expect("a C harness has a coverage build");
+
+        assert!(
+            script.contains("-fprofile-instr-generate -fcoverage-mapping"),
+            "{script}"
+        );
+        assert!(
+            script.contains("'-DHAVE_CONFIG_H'"),
+            "project defines kept: {script}"
+        );
+        assert!(
+            script.contains("ares_create_query.c"),
+            "project units linked: {script}"
+        );
+        assert!(
+            script.contains("-Dmain=oxfuzz_project_main"),
+            "a project main is renamed: {script}"
+        );
+        assert!(
+            !script.contains("-fsanitize=address"),
+            "no sanitizer: {script}"
+        );
+        assert!(script.contains("/work/'fuzz_cov'"), "{script}");
+        assert!(
+            !script.contains("*.c"),
+            "no glob over the workspace: {script}"
+        );
+    }
+
+    #[test]
+    fn a_coverage_build_is_refused_where_no_llvm_source_coverage_applies() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mut harness = sample_harness();
+        harness.language = TargetLanguage::Rust;
+        assert!(coverage_build_script(&harness, workspace.path(), "fuzz_cov").is_none());
+        let persistent = persistent_harness(EngineKind::AflPlusPlus, false);
+        assert!(coverage_build_script(&persistent, workspace.path(), "fuzz_cov").is_none());
     }
 
     /// A harness in the AFL++ persistent-mode shape: owns `main`, the
