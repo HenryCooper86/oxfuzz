@@ -20,6 +20,9 @@ Write a fuzzing harness for a target function.
    - Python (Atheris): `def TestOneInput(data):`
 3. Map fuzzer input to the target's expected input.
 4. No host I/O. No `system()`. No file writes. Deterministic.
+   Bound allocations sized by the input (image dimensions, counts) with the
+   library's limit setter, such as libpng's `png_set_user_limits`, or skip
+   oversized inputs, so an out-of-memory report means a defect.
 5. Output only the harness source in a fenced code block.
 
 ## Iteration policy

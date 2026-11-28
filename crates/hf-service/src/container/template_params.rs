@@ -172,9 +172,7 @@ fn parse_typedef(text: &str, name: &str) -> Option<(String, String)> {
     if ret.contains(';') {
         return None;
     }
-    let params = flat[at + marker.len()..]
-        .trim_start()
-        .strip_prefix('(')?;
+    let params = flat[at + marker.len()..].trim_start().strip_prefix('(')?;
     let close = params.find(')')?;
     Some((ret.trim().to_owned(), params[..close].trim().to_owned()))
 }

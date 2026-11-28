@@ -870,7 +870,10 @@ impl ServiceContainer {
                 Some(replay.working_directory),
             ),
             None => (
-                vec![binary, container_input_path(workspace, input_host_path)],
+                libfuzzer_replay_command(
+                    &binary,
+                    &container_input_path(workspace, input_host_path),
+                ),
                 None,
             ),
         };
@@ -2186,6 +2189,30 @@ mod replay_classification_tests {
     }
 }
 
+/// Largest single allocation, in MiB, an out-of-memory input may make on
+/// replay: half the replay's memory. libFuzzer names an input `oom-` when its
+/// RSS limit was crossed; a plain replay of an allocation under that limit
+/// finishes cleanly and shows nothing. Below the allocation, libFuzzer
+/// reports it with the stack that made it.
+const OOM_REPLAY_MALLOC_LIMIT_MB: u32 = 1_024;
+
+/// The replay command of a crash input: the harness binary and the input,
+/// and for a libFuzzer `oom-` input a per-allocation limit
+/// ([`OOM_REPLAY_MALLOC_LIMIT_MB`]). Only libFuzzer names an input `oom-`,
+/// so the binary takes libFuzzer flags.
+fn libfuzzer_replay_command(binary: &str, input: &str) -> Vec<String> {
+    let out_of_memory = Path::new(input)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("oom-"));
+    let mut command = vec![binary.to_owned()];
+    if out_of_memory {
+        command.push(format!("-malloc_limit_mb={OOM_REPLAY_MALLOC_LIMIT_MB}"));
+    }
+    command.push(input.to_owned());
+    command
+}
+
 fn replay_reports_a_fault(log: &str, input: &Path) -> bool {
     match input.file_name().and_then(|name| name.to_str()) {
         Some(name) if !name.is_empty() => hf_crash::looks_like_crash(&log.replace(name, "")),
@@ -2303,5 +2330,28 @@ mod enrichment_window_tests {
             None
         );
         assert_eq!(enrichment_window(None, now), Some(Duration::MAX));
+    }
+}
+
+#[cfg(test)]
+mod replay_command_tests {
+    #[test]
+    fn an_out_of_memory_input_replays_under_a_per_allocation_limit() {
+        // libpng 1.6.44: a `tEXt` chunk declaring 1.87 GB is allocated whole.
+        // Under the 2 GB fuzzing limit that only showed as RSS growth, and a
+        // plain replay finished cleanly, so the finding had no stack. Below
+        // the allocation, libFuzzer reports it with its allocation site.
+        assert_eq!(
+            super::libfuzzer_replay_command("/work/fuzz_p", "/work/out/oom-1a2b"),
+            vec![
+                "/work/fuzz_p",
+                "-malloc_limit_mb=1024",
+                "/work/out/oom-1a2b"
+            ]
+        );
+        assert_eq!(
+            super::libfuzzer_replay_command("/work/fuzz_p", "/work/out/crash-1a2b"),
+            vec!["/work/fuzz_p", "/work/out/crash-1a2b"]
+        );
     }
 }

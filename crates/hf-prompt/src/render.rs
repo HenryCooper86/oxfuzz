@@ -145,7 +145,15 @@ fn c_source_rules(language: TargetLanguage) -> &'static str {
      states it instead of guessing a header name.\n\
      - Initialize every output or context structure before the call, and release what the \
      target allocated on every path its own code would, with the project's cleanup function \
-     when one is shown. A leak report must mean a defect in the target.\n"
+     when one is shown. A leak report must mean a defect in the target.\n\
+     - When the target allocates from sizes it reads from the input (image dimensions, element \
+     counts, declared lengths), bound them: call the library's own limit setter when it has \
+     one, such as libpng's `png_set_user_limits`, or return early for an input whose declared \
+     size exceeds a few megabytes. An out-of-memory report must mean a defect, not a large \
+     allocation the format allows.\n\
+     - A local that is assigned after `setjmp` and read once `longjmp` returns there must be \
+     declared `volatile`, or be assigned before the `setjmp` call: otherwise its value on that \
+     path is indeterminate and the cleanup it guards may be skipped.\n"
 }
 
 /// Engine-specific rules for a C/C++ `LLVMFuzzerTestOneInput` harness, one
@@ -1394,6 +1402,25 @@ mod tests {
             assert!(prompt.contains("Pass the fuzzer's bytes to the target unchanged"));
             assert!(prompt.contains("on every path"), "{prompt}");
             assert!(prompt.contains("Initialize every output"), "{prompt}");
+        }
+    }
+
+    #[test]
+    fn c_family_prompts_bound_input_driven_allocations_and_setjmp_locals() {
+        // Observed on libpng: the draft left libpng's default limits (1M x 1M
+        // pixels) with every expanding transform on, so one input allocated
+        // gigabytes, runs averaged 75 exec/s and hit the memory limit; and its
+        // `info_ptr` was a plain local assigned after `setjmp` and read on
+        // the `longjmp` path, where its value is indeterminate.
+        for language in [
+            hf_core::target::TargetLanguage::C,
+            hf_core::target::TargetLanguage::Cpp,
+        ] {
+            let mut target = sample_target();
+            target.language = language;
+            let prompt = render_harness_prompt(&target, EngineKind::LibFuzzer);
+            assert!(prompt.contains("`png_set_user_limits`"), "{prompt}");
+            assert!(prompt.contains("after `setjmp`"), "{prompt}");
         }
     }
 

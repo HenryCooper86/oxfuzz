@@ -70,8 +70,16 @@ retain only the current release; older entries remain here as the record.
   buffer real storage and its own capacity (lz4's `LZ4_decompress_safe` no
   longer reports false overflows). Attribute macros defined in the source
   file no longer reach its forward declaration.
-- A libFuzzer `oom-` input that does not reproduce alone is reported as out
-  of memory instead of "Other crash detected".
+- A libFuzzer `oom-` input is replayed under a 1 GiB per-allocation limit,
+  so triage reports the allocation and its stack (libpng 1.6.44 allocates a
+  `tEXt` chunk's declared length whole) instead of "Other crash detected";
+  an input that still shows nothing is reported as out of memory.
+- C and C++ harness drafts bound allocations the input sizes (libpng's
+  `png_set_user_limits`) and declare locals read after `longjmp` `volatile`.
+  The libpng harness drafted under these rules runs at about 13,700 exec/s,
+  up from about 500.
+- The syzkaller guide says an emulated kernel campaign needs an idle host
+  that stays awake (`caffeinate` on macOS).
 
 ## 0.9.13 - 2026-11-27
 

@@ -154,10 +154,7 @@ pub fn is_auxiliary_entry(entry: &CompileEntry, project_root: &Path) -> bool {
         })
     };
     let source = lexically_normal(&entry.directory.join(&entry.file));
-    if source
-        .strip_prefix(project_root)
-        .is_ok_and(&auxiliary)
-    {
+    if source.strip_prefix(project_root).is_ok_and(&auxiliary) {
         return true;
     }
     let mut arguments = entry.arguments.iter();
