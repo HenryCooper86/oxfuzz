@@ -35,6 +35,10 @@ fn doctor_lines(status: &hf_service::SystemStatus) -> Vec<String> {
         engine(status.aflplusplus.is_ready(), "AFL++"),
         engine(status.honggfuzz.is_ready(), "honggfuzz"),
         engine(status.syzkaller.is_ready(), "syzkaller"),
+        engine(status.go_native.is_ready(), "Go native fuzzing"),
+        engine(status.atheris.is_ready(), "Atheris (Python)"),
+        engine(status.jazzer.is_ready(), "Jazzer (Java)"),
+        engine(status.jazzer_js.is_ready(), "Jazzer.js (JavaScript)"),
         format!(
             "{}  DefectDojo",
             if status.defectdojo.is_ready() {
@@ -553,6 +557,7 @@ mod doctor_tests {
             aflplusplus: StatusFlag::from(false),
             honggfuzz: StatusFlag::from(false),
             syzkaller: StatusFlag::from(false),
+            go_native: StatusFlag::from(false),
             atheris: StatusFlag::from(false),
             jazzer: StatusFlag::from(false),
             jazzer_js: StatusFlag::from(false),
@@ -575,6 +580,39 @@ mod doctor_tests {
     }
 
     #[test]
+    fn doctor_reports_the_managed_language_engines() {
+        // With go-native, atheris, jazzer and jazzer-js enabled, `doctor`
+        // listed only the four C and kernel engines, so nothing said whether
+        // the image could fuzz a Go, Python, Java or JavaScript target.
+        let status = SystemStatus {
+            docker: StatusFlag::from(true),
+            sandbox_image: StatusFlag::from(true),
+            libfuzzer: StatusFlag::from(false),
+            aflplusplus: StatusFlag::from(false),
+            honggfuzz: StatusFlag::from(false),
+            syzkaller: StatusFlag::from(false),
+            go_native: StatusFlag::from(true),
+            atheris: StatusFlag::from(true),
+            jazzer: StatusFlag::from(false),
+            jazzer_js: StatusFlag::from(true),
+            engine_probe_failed: StatusFlag::from(false),
+            defectdojo: StatusFlag::from(false),
+            sandbox_image_remedy: None,
+        };
+        let output = doctor_lines(&status).join("\n");
+        for line in [
+            "READY  Go native fuzzing",
+            "READY  Atheris (Python)",
+            "UNAVAILABLE  Jazzer (Java)",
+            "READY  Jazzer.js (JavaScript)",
+        ] {
+            assert!(output.contains(line), "{line}\n{output}");
+        }
+        // A managed-language engine alone is enough to fuzz.
+        assert!(status.fuzzing_ready());
+    }
+
+    #[test]
     fn doctor_output_distinguishes_a_failed_probe_from_missing_engines() {
         let mut status = SystemStatus {
             docker: StatusFlag::from(true),
@@ -583,6 +621,7 @@ mod doctor_tests {
             aflplusplus: StatusFlag::from(false),
             honggfuzz: StatusFlag::from(false),
             syzkaller: StatusFlag::from(false),
+            go_native: StatusFlag::from(false),
             atheris: StatusFlag::from(false),
             jazzer: StatusFlag::from(false),
             jazzer_js: StatusFlag::from(false),
@@ -612,6 +651,7 @@ mod doctor_tests {
             aflplusplus: StatusFlag::from(false),
             honggfuzz: StatusFlag::from(false),
             syzkaller: StatusFlag::from(false),
+            go_native: StatusFlag::from(false),
             atheris: StatusFlag::from(false),
             jazzer: StatusFlag::from(false),
             jazzer_js: StatusFlag::from(false),
@@ -643,6 +683,7 @@ mod doctor_tests {
             aflplusplus: StatusFlag::from(false),
             honggfuzz: StatusFlag::from(false),
             syzkaller: StatusFlag::from(false),
+            go_native: StatusFlag::from(false),
             atheris: StatusFlag::from(false),
             jazzer: StatusFlag::from(false),
             jazzer_js: StatusFlag::from(false),

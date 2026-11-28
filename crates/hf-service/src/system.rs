@@ -44,6 +44,9 @@ pub struct SystemStatus {
     pub honggfuzz: StatusFlag,
     /// syzkaller tooling is present in the sandbox image.
     pub syzkaller: StatusFlag,
+    /// The sandbox image carries the pinned Go toolchain Go native fuzzing
+    /// builds with (Go targets).
+    pub go_native: StatusFlag,
     /// The sandbox image's interpreter imports Atheris (Python targets).
     pub atheris: StatusFlag,
     /// The sandbox image carries the Jazzer launcher (JVM targets).
@@ -77,7 +80,11 @@ impl SystemStatus {
             && (self.libfuzzer.is_ready()
                 || self.aflplusplus.is_ready()
                 || self.honggfuzz.is_ready()
-                || self.syzkaller.is_ready())
+                || self.syzkaller.is_ready()
+                || self.go_native.is_ready()
+                || self.atheris.is_ready()
+                || self.jazzer.is_ready()
+                || self.jazzer_js.is_ready())
     }
 }
 
@@ -123,6 +130,9 @@ pub async fn system_status() -> SystemStatus {
         aflplusplus,
         honggfuzz,
         syzkaller,
+        go_native: engines
+            .supports(hf_core::engine::EngineKind::GoNative)
+            .into(),
         atheris: engines
             .supports(hf_core::engine::EngineKind::Atheris)
             .into(),
@@ -370,6 +380,7 @@ mod tests {
             aflplusplus: StatusFlag(false),
             honggfuzz: StatusFlag(false),
             syzkaller: StatusFlag(false),
+            go_native: StatusFlag(false),
             atheris: StatusFlag(false),
             jazzer: StatusFlag(false),
             jazzer_js: StatusFlag(false),

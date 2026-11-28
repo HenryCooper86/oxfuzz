@@ -31,7 +31,7 @@ function buildReport(status: SystemStatus | null): string {
           `- Sandbox image built: ${yn(status.sandbox_image)}`,
           `- Engines: libFuzzer=${yn(status.libfuzzer)}, AFL++=${yn(status.aflplusplus)}, ` +
             `honggfuzz=${yn(status.honggfuzz)}, syzkaller=${yn(status.syzkaller)}, ` +
-            `Atheris=${yn(status.atheris)}, Jazzer=${yn(status.jazzer)}, Jazzer.js=${yn(status.jazzer_js)}`,
+            `Go native=${yn(status.go_native)}, Atheris=${yn(status.atheris)}, Jazzer=${yn(status.jazzer)}, Jazzer.js=${yn(status.jazzer_js)}`,
           `- DefectDojo reachable: ${yn(status.defectdojo)}`,
         ].join("\n")
       : "- System status: unavailable (backend did not respond)",

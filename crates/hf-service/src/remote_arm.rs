@@ -31,8 +31,9 @@ pub fn remote_arm_endpoint(url: &str) -> String {
 /// bound to a non-loopback address requires one.
 ///
 /// # Errors
-/// Returns [`ClassifiedError::Validation`] when `url` is not an HTTP(S) URL,
-/// and [`ClassifiedError::Internal`] when the server cannot be reached,
+/// Returns [`ClassifiedError::Validation`] when `url` is not an HTTP(S) URL
+/// or the server refuses the token (401 or 403), and
+/// [`ClassifiedError::Internal`] when the server cannot be reached,
 /// answers with an error status, or its reply is not JSON.
 pub async fn remote_schedule_arm(
     url: &str,
@@ -58,6 +59,16 @@ pub async fn remote_schedule_arm(
     let response = request.send().await.map_err(|error| {
         ClassifiedError::Internal(format!("could not reach {endpoint}: {error}"))
     })?;
+    if matches!(
+        response.status(),
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+    ) {
+        return Err(ClassifiedError::Validation(format!(
+            "{endpoint} refused the request ({}): send the server's bearer token, the \
+             HF_WEB_TOKEN it was started with (`oxfuzz arm` reads HF_WEB_TOKEN)",
+            response.status()
+        )));
+    }
     if !response.status().is_success() {
         return Err(ClassifiedError::Internal(format!(
             "{endpoint} returned {}",
@@ -105,6 +116,14 @@ mod tests {
     /// Serve one HTTP request on loopback with `reply` as the JSON body and
     /// return the request text the client sent.
     async fn serve_once(reply: &'static str) -> (String, tokio::task::JoinHandle<String>) {
+        serve_once_with("200 OK", reply).await
+    }
+
+    /// [`serve_once`] answering with `status` (e.g. `401 Unauthorized`).
+    async fn serve_once_with(
+        status: &'static str,
+        reply: &'static str,
+    ) -> (String, tokio::task::JoinHandle<String>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -113,7 +132,7 @@ mod tests {
             let mut buffer = vec![0_u8; 4096];
             let read = stream.read(&mut buffer).await.unwrap();
             let response = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
                 reply.len()
             );
             stream.write_all(response.as_bytes()).await.unwrap();
@@ -147,5 +166,25 @@ mod tests {
         let request = served.await.unwrap().to_lowercase();
         assert!(request.starts_with("get /schedule/arm "), "{request}");
         assert!(!request.contains("authorization:"), "{request}");
+    }
+
+    #[tokio::test]
+    async fn a_refused_token_is_named_as_an_authentication_problem() {
+        // `oxfuzz arm --status` without `HF_WEB_TOKEN` against a server that
+        // has one printed "internal: ... returned 401 Unauthorized".
+        for status in ["401 Unauthorized", "403 Forbidden"] {
+            let (url, served) = serve_once_with(status, "{}").await;
+            let error = remote_schedule_arm(&url, RemoteArmAction::Status, None)
+                .await
+                .unwrap_err();
+            served.await.unwrap();
+            assert!(
+                matches!(error, hf_core::error::ClassifiedError::Validation(_)),
+                "{error:?}"
+            );
+            let message = error.to_string();
+            assert!(message.contains("refused the request"), "{message}");
+            assert!(message.contains("HF_WEB_TOKEN"), "{message}");
+        }
     }
 }

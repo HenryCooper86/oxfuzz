@@ -3508,6 +3508,7 @@ fn parameter_roles(params: &[&str], project_root: Option<&Path>) -> Vec<Template
     // Buffers still waiting for a length, earliest first.
     let mut awaiting_length: std::collections::VecDeque<bool> = std::collections::VecDeque::new();
     let mut input_sized = false;
+    let mut output_seen = false;
     for (i, param) in params.iter().enumerate() {
         let base = base_of(param);
         let role = if Some(i) == input {
@@ -3517,6 +3518,7 @@ fn parameter_roles(params: &[&str], project_root: Option<&Path>) -> Vec<Template
             TemplateParam::Null
         } else if byte_pointer(param) && !param.contains("const") {
             awaiting_length.push_back(false);
+            output_seen = true;
             TemplateParam::Output(base)
         } else if param.contains('*') {
             TemplateParam::Local(if base.is_empty() {
@@ -3548,6 +3550,12 @@ fn parameter_roles(params: &[&str], project_root: Option<&Path>) -> Vec<Template
                 Some(true) => {
                     input_sized = true;
                     TemplateParam::InputLength
+                }
+                // A second length named for the output (lz4's
+                // `targetOutputSize, dstCapacity`) is bounded by the same
+                // buffer, never by the input size.
+                None if output_seen && matches!(hint, Some(LengthOf::Output)) => {
+                    TemplateParam::OutputCapacity
                 }
                 None => TemplateParam::InputLength,
             }
@@ -3811,6 +3819,24 @@ mod heuristic_harness_tests {
         );
         assert!(body.contains("escape(_text, _out1, 65536);"), "{body}");
         assert!(body.contains("free(_out1);\n    free(_text);"), "{body}");
+    }
+
+    #[test]
+    fn a_second_length_of_the_output_is_its_capacity_too() {
+        // lz4: `LZ4_decompress_safe_partial(src, dst, compressedSize,
+        // targetOutputSize, dstCapacity)`. `targetOutputSize` took the
+        // output's capacity and left `dstCapacity` the input size, which
+        // overflows the 64 KiB buffer as soon as an input is larger.
+        let body = generate_harness_body(
+            "LZ4_decompress_safe_partial",
+            Some("int LZ4_decompress_safe_partial(const char* src, char* dst, int compressedSize, int targetOutputSize, int dstCapacity)"),
+        );
+        assert!(
+            body.contains(
+                "LZ4_decompress_safe_partial((const char *)data, _out1, size, 65536, 65536);"
+            ),
+            "{body}"
+        );
     }
 
     #[test]

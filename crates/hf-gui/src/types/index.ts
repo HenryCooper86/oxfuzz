@@ -313,7 +313,8 @@ export interface SystemStatus {
   aflplusplus: boolean;
   honggfuzz: boolean;
   syzkaller: boolean;
-  /** The engine probe failed, so the flags above are unknown, not absent. */
+  /** The image carries the Go toolchain Go native fuzzing builds with. */
+  go_native?: boolean;
   atheris?: boolean;
   jazzer?: boolean;
   jazzer_js?: boolean;
