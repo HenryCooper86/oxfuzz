@@ -106,9 +106,19 @@ fn owner_lock_path(wal_path: Option<&Path>, run_id: &str) -> Option<PathBuf> {
     )
 }
 
+/// How often, and how far apart, a busy owner lock is retried before the run
+/// counts as live: 100 ms in all.
+const OWNER_LOCK_PROBES: u32 = 5;
+const OWNER_LOCK_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
+
 /// Whether another process holds the owner lock of `run_id`, i.e. the run is
 /// still live. A missing file, or one locked for another reason, is not proof
 /// of a live owner, so the run counts as lost, as before owner locks existed.
+///
+/// A live owner holds its lock for the whole run, so the lock must stay busy
+/// across every probe. A lock busy only once is not an owner: a process being
+/// spawned when the owner closed its lock carries a copy of the descriptor
+/// until it execs, which held the lock of a dead owner for a moment.
 fn run_owner_is_alive(wal_path: &Path, run_id: &str) -> bool {
     let Some(path) = owner_lock_path(Some(wal_path), run_id) else {
         return false;
@@ -116,7 +126,22 @@ fn run_owner_is_alive(wal_path: &Path, run_id: &str) -> bool {
     let Ok(file) = OpenOptions::new().read(true).write(true).open(&path) else {
         return false;
     };
-    matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock))
+    lock_held_by_live_owner(&file)
+}
+
+/// Whether some other open file description keeps `file`'s lock busy across
+/// every probe ([`OWNER_LOCK_PROBES`] tries, [`OWNER_LOCK_PROBE_INTERVAL`]
+/// apart), as a live owner does; see [`run_owner_is_alive`].
+pub(crate) fn lock_held_by_live_owner(file: &File) -> bool {
+    for probe in 0..OWNER_LOCK_PROBES {
+        if probe > 0 {
+            std::thread::sleep(OWNER_LOCK_PROBE_INTERVAL);
+        }
+        if !matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock)) {
+            return false;
+        }
+    }
+    true
 }
 
 fn now() -> i64 {
@@ -653,6 +678,43 @@ mod tests {
 
     fn json_line(event: &RunEvent) -> String {
         format!("{}\n", serde_json::to_string(event).unwrap())
+    }
+
+    /// A lock held only briefly -- the copy of a closed owner's descriptor that
+    /// a process being spawned at that moment carries until it execs -- is not
+    /// a live owner. GitLab CI saw recovery tests fail this way: the suite
+    /// spawns processes in parallel, and a dropped owner looked alive.
+    #[test]
+    fn a_briefly_held_owner_lock_is_not_a_live_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal = dir.path().join("run_journal.jsonl");
+        let run = Uuid::new_v4().to_string();
+        let path = owner_lock_path(Some(&wal), &run).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let transient = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        transient.try_lock().unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            drop(transient);
+        });
+
+        assert!(!run_owner_is_alive(&wal, &run));
+        release.join().unwrap();
+
+        // A lock held throughout is a live owner.
+        let live = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        live.try_lock().unwrap();
+        assert!(run_owner_is_alive(&wal, &run));
     }
 
     /// The desktop app and the CLI share one journal. Starting `oxfuzz ci`

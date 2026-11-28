@@ -61,7 +61,9 @@ fn hold_under(root: &Path, kind: &str, id: Uuid) -> Option<OperationOwner> {
     }
 }
 
-/// Whether a live process holds the owner lock of operation `id` of `kind`.
+/// Whether a live process holds the owner lock of operation `id` of `kind`:
+/// held throughout, not only by a process being spawned at that moment (see
+/// `crate::recovery::lock_held_by_live_owner`).
 fn is_owned_under(root: &Path, kind: &str, id: Uuid) -> bool {
     let Ok(file) = OpenOptions::new()
         .read(true)
@@ -70,7 +72,7 @@ fn is_owned_under(root: &Path, kind: &str, id: Uuid) -> bool {
     else {
         return false;
     };
-    matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock))
+    crate::recovery::lock_held_by_live_owner(&file)
 }
 
 /// Take this process's owner lock for an operation.
