@@ -15,7 +15,7 @@
 //! already needs.
 
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub use hf_core::c_unit::{classify_unit, UnitRole};
 
@@ -89,6 +89,133 @@ pub struct ProjectLinkInputs {
     library: Vec<String>,
     entry_programs: Vec<String>,
     fuzz_entries: Vec<String>,
+    /// System libraries the linked code's includes call for, in
+    /// [`SYSTEM_LIBRARIES`] order.
+    system_libraries: Vec<&'static str>,
+}
+
+/// System headers whose library the project's own build links, mapped to the
+/// libraries the pinned sandbox image ships for them. `configure` and `CMake`
+/// enable optional codecs when they find these (`LibTIFF` compiles its ZIP and
+/// LZMA codecs against zlib and liblzma), but a compile database records no
+/// link line, so without them the harness link fails on undefined symbols.
+/// A header whose library the image lacks (libjpeg, libpng) is absent on
+/// purpose: naming it would fail the link with "cannot find -l...".
+const SYSTEM_LIBRARIES: [(&str, &[&str]); 13] = [
+    ("zlib.h", &["z"]),
+    ("lzma.h", &["lzma"]),
+    ("zstd.h", &["zstd"]),
+    ("openssl/", &["ssl", "crypto"]),
+    ("libxml/", &["xml2"]),
+    ("expat.h", &["expat"]),
+    ("pcre2.h", &["pcre2-8"]),
+    ("ffi.h", &["ffi"]),
+    ("glib.h", &["glib-2.0"]),
+    ("pixman.h", &["pixman-1"]),
+    ("math.h", &["m"]),
+    ("pthread.h", &["pthread"]),
+    ("dlfcn.h", &["dl"]),
+];
+
+/// Cap on header files read for system includes.
+const MAX_SCANNED_HEADERS: usize = 5_000;
+
+/// The headers a source text includes with `#include <...>` or `"..."`.
+fn included_headers(text: &str) -> impl Iterator<Item = &str> {
+    text.lines().filter_map(|line| {
+        let rest = line.trim_start().strip_prefix('#')?.trim_start();
+        let rest = rest.strip_prefix("include")?.trim_start();
+        let (open, close) = match rest.chars().next()? {
+            '<' => ('<', '>'),
+            '"' => ('"', '"'),
+            _ => return None,
+        };
+        let inner = rest.strip_prefix(open)?;
+        inner.split(close).next()
+    })
+}
+
+/// The system libraries called for by the includes of `files`.
+fn system_libraries_for(files: &[PathBuf]) -> Vec<&'static str> {
+    let mut wanted = [false; SYSTEM_LIBRARIES.len()];
+    for file in files {
+        let readable = std::fs::metadata(file).is_ok_and(|meta| meta.len() <= MAX_CLASSIFIED_BYTES);
+        if !readable {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(file) else {
+            continue;
+        };
+        let text = String::from_utf8_lossy(&bytes);
+        for header in included_headers(&text) {
+            for (index, (prefix, _)) in SYSTEM_LIBRARIES.iter().enumerate() {
+                let matches = if prefix.ends_with('/') {
+                    header.starts_with(prefix)
+                } else {
+                    header == *prefix
+                };
+                wanted[index] |= matches;
+            }
+        }
+    }
+    let mut libraries = Vec::new();
+    for (index, (_, names)) in SYSTEM_LIBRARIES.iter().enumerate() {
+        if wanted[index] {
+            for name in *names {
+                if !libraries.contains(name) {
+                    libraries.push(*name);
+                }
+            }
+        }
+    }
+    libraries
+}
+
+/// Every header file under `directory`, bounded and without following links.
+/// Every project header under `workspace`, workspace-relative and sorted, as
+/// the harness build's include directories see them.
+#[must_use]
+pub fn project_headers(workspace: &Path) -> Vec<String> {
+    let mut found = Vec::new();
+    collect_headers(workspace, &mut found);
+    let mut relative: Vec<String> = found
+        .iter()
+        .filter_map(|path| path.strip_prefix(workspace).ok())
+        .map(|path| path.to_string_lossy().replace('\\', "/"))
+        .collect();
+    relative.sort();
+    relative
+}
+
+fn collect_headers(directory: &Path, found: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if found.len() >= MAX_SCANNED_HEADERS {
+            return;
+        }
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        let path = entry.path();
+        if kind.is_dir() {
+            let name = entry.file_name();
+            if !NON_SOURCE_DIRS
+                .iter()
+                .any(|skipped| std::ffi::OsStr::new(skipped) == name)
+            {
+                collect_headers(&path, found);
+            }
+        } else if kind.is_file()
+            && path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| matches!(extension, "h" | "hh" | "hpp" | "hxx"))
+        {
+            found.push(path);
+        }
+    }
 }
 
 impl ProjectLinkInputs {
@@ -115,6 +242,32 @@ impl ProjectLinkInputs {
                 UnitRole::FuzzEntry => inputs.fuzz_entries.push(path),
             }
         }
+        if !inputs.library.is_empty() || !inputs.entry_programs.is_empty() {
+            let mut scanned: Vec<PathBuf> = inputs
+                .library
+                .iter()
+                .chain(&inputs.entry_programs)
+                .map(|path| workspace.join(path))
+                .collect();
+            collect_headers(workspace, &mut scanned);
+            inputs.system_libraries = system_libraries_for(&scanned);
+            // A C++ unit linked by the C driver (a C harness) needs the C++
+            // standard library named; the C++ driver adds it on its own, and
+            // `--as-needed` drops the duplicate.
+            let has_cpp_unit = inputs
+                .library
+                .iter()
+                .chain(&inputs.entry_programs)
+                .any(|path| {
+                    Path::new(path)
+                        .extension()
+                        .and_then(|extension| extension.to_str())
+                        .is_some_and(|extension| matches!(extension, "cc" | "cpp" | "cxx"))
+                });
+            if has_cpp_unit {
+                inputs.system_libraries.push("stdc++");
+            }
+        }
         inputs
     }
 
@@ -123,6 +276,15 @@ impl ProjectLinkInputs {
     #[must_use]
     pub fn fuzz_entries(&self) -> &[String] {
         &self.fuzz_entries
+    }
+
+    /// The workspace-relative translation units the harness build compiles:
+    /// the library units and the programs whose `main` it renames.
+    pub fn linked_units(&self) -> impl Iterator<Item = &str> {
+        self.library
+            .iter()
+            .chain(&self.entry_programs)
+            .map(String::as_str)
     }
 
     /// Shell steps that compile each entry program alone, with `main` renamed,
@@ -162,10 +324,20 @@ impl ProjectLinkInputs {
     /// Every path from the project is shell-quoted.
     #[must_use]
     pub fn link_args(&self, container_ws: &str) -> String {
+        // System libraries come last, after every object that may need them,
+        // and `--as-needed` drops any the link does not use (an include under
+        // a disabled `#ifdef` still names one).
+        let libraries = (!self.system_libraries.is_empty()).then(|| {
+            std::iter::once("-Wl,--as-needed".to_owned())
+                .chain(self.system_libraries.iter().map(|name| format!("-l{name}")))
+                .collect::<Vec<_>>()
+                .join(" ")
+        });
         self.library
             .iter()
             .map(|path| format!("{container_ws}/{}", sh_quote(path)))
             .chain((!self.entry_programs.is_empty()).then(|| ENTRY_PROGRAM_ARCHIVE.to_owned()))
+            .chain(libraries)
             .collect::<Vec<_>>()
             .join(" ")
     }
@@ -250,6 +422,18 @@ fn collect_source_files(
     }
 }
 
+/// Shell-quote each flag and join them with spaces, for interpolation into a
+/// POSIX shell command (project flags come from an untrusted compile
+/// database).
+#[must_use]
+pub fn shell_quoted(flags: &[String]) -> String {
+    flags
+        .iter()
+        .map(|flag| sh_quote(flag))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Single-quote a string for safe interpolation into a POSIX shell command.
 pub(crate) fn sh_quote(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
@@ -269,6 +453,70 @@ pub(crate) fn sh_quote(s: &str) -> String {
 mod tests {
     use super::write_link_units;
     use super::ProjectLinkInputs;
+
+    #[test]
+    fn libraries_the_project_includes_are_linked_last_and_as_needed() {
+        // LibTIFF 4.0.4: configure found zlib and liblzma, so tif_zip.c and
+        // tif_lzma.c call them; the harness link failed on inflateInit_ and
+        // lzma_code until the libraries were named.
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "libtiff/tif_zip.c",
+            "#include \"tiffiop.h\"\n#include \"zlib.h\"\nint z;",
+        );
+        write(
+            dir.path(),
+            "libtiff/tif_lzma.c",
+            "#include \"lzma.h\"\nint l;",
+        );
+        write(
+            dir.path(),
+            "libtiff/tiffiop.h",
+            "#  include <math.h>\n#include <jpeglib.h>\n",
+        );
+        write(dir.path(), "tools/tiffinfo.c", "int main(void){return 0;}");
+
+        let inputs = ProjectLinkInputs::collect(dir.path(), &["harness.c"]);
+        let args = inputs.link_args("/work");
+
+        assert!(
+            args.ends_with("/tmp/oxfuzz_project_programs.a -Wl,--as-needed -lz -llzma -lm"),
+            "{args}"
+        );
+        assert!(
+            !args.contains("-ljpeg"),
+            "the image ships no libjpeg: {args}"
+        );
+    }
+
+    #[test]
+    fn a_cpp_unit_in_a_c_link_brings_the_cpp_standard_library() {
+        // LibTIFF 4.0.4 builds tif_stream.cxx (std::ostream) next to its C
+        // units; a C harness linked by `clang` left std::ostream undefined.
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "libtiff/tif_open.c", "int o;");
+        write(
+            dir.path(),
+            "libtiff/tif_stream.cxx",
+            "#include <ostream>\nint s;",
+        );
+        let args = ProjectLinkInputs::collect(dir.path(), &["harness.c"]).link_args("/work");
+        assert!(args.ends_with("-Wl,--as-needed -lstdc++"), "{args}");
+
+        let plain = tempfile::tempdir().unwrap();
+        write(plain.path(), "a.c", "int a;");
+        let args = ProjectLinkInputs::collect(plain.path(), &["harness.c"]).link_args("/work");
+        assert!(!args.contains("stdc++"), "{args}");
+    }
+
+    #[test]
+    fn a_link_with_no_project_units_names_no_system_library() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "harness.c", "#include <zlib.h>\nint h;");
+        let inputs = ProjectLinkInputs::collect(dir.path(), &["harness.c"]);
+        assert_eq!(inputs.link_args("/work"), "");
+    }
 
     fn write(dir: &std::path::Path, path: &str, content: &str) {
         let path = dir.join(path);

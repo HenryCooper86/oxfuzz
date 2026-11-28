@@ -963,3 +963,97 @@ async fn findings_of_one_bug_across_runs_share_a_bug_key() {
     assert_eq!(key(keyed[0]), key(keyed[1]));
     assert_ne!(key(keyed[0]), key(unrelated.id));
 }
+
+/// The bundle must build the way the harness built: c-ares' bundle named
+/// `acountry.c`/`adig.c` (programs with their own `main`) on a bare clang
+/// line without `-I.` or the project's defines, and left `setup_once.h` out
+/// under a 64-file cap, so its documented build failed at the first include.
+#[tokio::test]
+async fn a_reproduction_bundle_builds_like_the_harness_build() {
+    let (container, directory, mut target, mut harness) = fixture().await;
+    target.project_root = directory.path().to_path_buf();
+    harness.id = Uuid::new_v4();
+    harness.build_cmd.extra_flags = vec![
+        "-I/work".to_owned(),
+        "-I/work/include".to_owned(),
+        "-DHAVE_CONFIG_H".to_owned(),
+    ];
+    let store = container.store().unwrap();
+    store.upsert_target(&target, Utc::now()).await.unwrap();
+    store.upsert_harness(&harness).await.unwrap();
+    let workspace = hf_service::workspace_dir(directory.path(), &target.symbol);
+    std::fs::create_dir_all(workspace.join("include")).unwrap();
+    std::fs::create_dir_all(workspace.join("test")).unwrap();
+    std::fs::write(
+        workspace.join("harness.source"),
+        "int LLVMFuzzerTestOneInput(const unsigned char *d, unsigned long n) { return 0; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        workspace.join("parser.c"),
+        "#include \"setup_once.h\"\nint parse(void) { return 0; }\n",
+    )
+    .unwrap();
+    std::fs::write(workspace.join("tool.c"), "int main(void) { return 0; }\n").unwrap();
+    std::fs::write(workspace.join("include/setup_once.h"), "#define ONCE 1\n").unwrap();
+    std::fs::write(
+        workspace.join("test/unrelated_test.c"),
+        "int main(void) { return 1; }\n",
+    )
+    .unwrap();
+    hf_harness::project_sources::write_link_units(
+        &workspace,
+        Some(&["parser.c".to_owned(), "tool.c".to_owned()]),
+    )
+    .unwrap();
+    let retained = run(
+        directory.path().to_str().unwrap(),
+        harness.id,
+        EngineKind::LibFuzzer,
+        0,
+    );
+    store.insert_run(&retained).await.unwrap();
+    let mut finding = crash(&retained, &target, CrashOrigin::Target);
+    finding.input_path = directory.path().join("crash-input");
+    std::fs::write(&finding.input_path, b"crash bytes").unwrap();
+    store.upsert_crash(&finding).await.unwrap();
+
+    let bundle = container
+        .export_repro_bundle_for_latest(
+            directory.path(),
+            &target.symbol,
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+            Some(&finding.id.to_string()),
+            &directory.path().join("reproduction"),
+        )
+        .await
+        .unwrap();
+
+    assert!(bundle.join("parser.c").is_file());
+    assert!(bundle.join("tool.c").is_file());
+    assert!(bundle.join("include/setup_once.h").is_file());
+    assert!(
+        !bundle.join("test/unrelated_test.c").exists(),
+        "only the units the build links"
+    );
+    let manifest = std::fs::read_to_string(bundle.join("REPRODUCE.md")).unwrap();
+    let build = manifest
+        .split("## Build\n```sh\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\n```").next())
+        .unwrap();
+    assert!(!build.contains("/work"), "{build}");
+    assert!(
+        build.contains("-I.") && build.contains("-I./include") && build.contains("-DHAVE_CONFIG_H"),
+        "{build}"
+    );
+    assert!(
+        build.contains("-Dmain="),
+        "a program's main is renamed: {build}"
+    );
+    assert!(
+        build.contains("./'parser.c'") && !build.contains("unrelated_test"),
+        "{build}"
+    );
+}

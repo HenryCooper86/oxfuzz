@@ -269,6 +269,7 @@ pub fn fuzz_command(
     duration_secs: u64,
     timeout_ms: u64,
     dictionary: bool,
+    target_args: &[String],
 ) -> Result<Vec<String>, ClassifiedError> {
     let mut extra_args = vec!["-Q".to_owned()];
     if input == BinaryInput::SocketMessages {
@@ -304,11 +305,63 @@ pub fn fuzz_command(
         &format!("/work/{CORPUS_DIR}"),
         &format!("/work/{OUTPUT_DIR}"),
     )?;
-    if input != BinaryInput::File && command.last().is_some_and(|last| last == "@@") {
+    if command.last().is_some_and(|last| last == "@@") {
         command.pop();
     }
+    command.extend(target_argv(input, target_args, "@@"));
     Ok(command)
 }
+
+/// The arguments after the target program: the operator's `target_args`,
+/// with each `@@` replaced by `input` for a file-input target (or `input`
+/// appended when none names its place). A target that reads standard input
+/// or a socket takes the arguments as given.
+#[must_use]
+pub fn target_argv(input: BinaryInput, target_args: &[String], placeholder: &str) -> Vec<String> {
+    if input != BinaryInput::File {
+        return target_args.to_vec();
+    }
+    if target_args.iter().any(|arg| arg == "@@") {
+        return target_args
+            .iter()
+            .map(|arg| {
+                if arg == "@@" {
+                    placeholder.to_owned()
+                } else {
+                    arg.clone()
+                }
+            })
+            .collect();
+    }
+    target_args
+        .iter()
+        .cloned()
+        .chain(std::iter::once(placeholder.to_owned()))
+        .collect()
+}
+
+/// Refuse target arguments the session cannot pass safely: too many, too
+/// long, or holding a NUL byte (no process argument can).
+fn validate_target_args(target_args: &[String]) -> Result<(), ClassifiedError> {
+    if target_args.len() > MAX_TARGET_ARGS {
+        return Err(invalid(format!(
+            "at most {MAX_TARGET_ARGS} target arguments are accepted"
+        )));
+    }
+    if target_args
+        .iter()
+        .any(|arg| arg.len() > MAX_TARGET_ARG_BYTES || arg.contains('\0'))
+    {
+        return Err(invalid(format!(
+            "a target argument must be at most {MAX_TARGET_ARG_BYTES} bytes without NUL"
+        )));
+    }
+    Ok(())
+}
+
+/// Most target arguments a session accepts, and the longest one.
+const MAX_TARGET_ARGS: usize = 64;
+const MAX_TARGET_ARG_BYTES: usize = 4096;
 
 /// The replay runs the emulator as a child of a shell. The emulator reports
 /// a guest signal by raising it on itself, and the first process of a
@@ -414,7 +467,12 @@ fn without_message(data: &[u8], index: usize) -> Vec<u8> {
 /// emulator the fuzzer used. The minimizer keeps an input only while it
 /// still crashes; whether it is still the same crash is checked by a replay.
 #[must_use]
-pub fn minimize_command(input: BinaryInput, finding_name: &str, timeout_ms: u64) -> Vec<String> {
+pub fn minimize_command(
+    input: BinaryInput,
+    finding_name: &str,
+    timeout_ms: u64,
+    target_args: &[String],
+) -> Vec<String> {
     let mut command = vec![
         "afl-tmin".to_owned(),
         "-Q".to_owned(),
@@ -429,9 +487,7 @@ pub fn minimize_command(input: BinaryInput, finding_name: &str, timeout_ms: u64)
         "--".to_owned(),
         format!("/work/{TARGET_NAME}"),
     ];
-    if input == BinaryInput::File {
-        command.push("@@".to_owned());
-    }
+    command.extend(target_argv(input, target_args, "@@"));
     command
 }
 
@@ -441,7 +497,7 @@ pub fn minimize_command(input: BinaryInput, finding_name: &str, timeout_ms: u64)
 /// the input through the sandbox's stdin.
 /// A replay killed by signal N exits 128 + N.
 #[must_use]
-pub fn replay_command(input: BinaryInput, saved: &str) -> Vec<String> {
+pub fn replay_command(input: BinaryInput, saved: &str, target_args: &[String]) -> Vec<String> {
     let mut command = vec![
         "sh".to_owned(),
         "-c".to_owned(),
@@ -449,9 +505,7 @@ pub fn replay_command(input: BinaryInput, saved: &str) -> Vec<String> {
         "sh".to_owned(),
         format!("/work/{TARGET_NAME}"),
     ];
-    if input == BinaryInput::File {
-        command.push(format!("/work/{saved}"));
-    }
+    command.extend(target_argv(input, target_args, &format!("/work/{saved}")));
     command
 }
 
@@ -483,6 +537,11 @@ pub struct BinaryFuzzRequest {
     /// Loop on one function instead of starting a process per input. File
     /// input only; fuzz run only.
     pub persistent: Option<BinaryPersistent>,
+    /// Arguments the target runs with, after its program name. For file
+    /// input `@@` marks where the input file goes (appended last when no
+    /// argument is `@@`), as in `-D -j @@`; real tools rarely read a bare
+    /// file argument. Used by the fuzz run, every replay and minimization.
+    pub target_args: Vec<String>,
 }
 
 /// Persistent QEMU mode: the emulator loops on `entry` for `iterations`
@@ -689,6 +748,9 @@ pub struct BinaryFuzzOutcome {
     /// The persistent-mode entry, e.g. `main (target+0x9d8)`, when used.
     #[serde(default)]
     pub persistent_entry: Option<String>,
+    /// The arguments the target ran with (`@@` marking the input file).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target_args: Vec<String>,
     /// AFL++'s bitmap stability, in percent; below about 90 a persistent
     /// entry leaks state between iterations.
     #[serde(default)]
@@ -1161,6 +1223,7 @@ struct SessionRun<'a> {
     input: BinaryInput,
     libraries: bool,
     timeout_ms: u64,
+    target_args: &'a [String],
 }
 
 /// How one replay ended: the signal it died from, and its crash report.
@@ -1177,7 +1240,7 @@ impl SessionRun<'_> {
         let result = self
             .runtime
             .run_command_opts(
-                &replay_command(self.input, saved),
+                &replay_command(self.input, saved, self.target_args),
                 self.root,
                 &limits(REPLAY_SECS, replay_env(self.libraries, self.input)?),
                 &session_sandbox(self.root, stdin),
@@ -1214,7 +1277,7 @@ impl SessionRun<'_> {
         };
         self.runtime
             .run_command_opts(
-                &minimize_command(self.input, name, self.timeout_ms),
+                &minimize_command(self.input, name, self.timeout_ms, self.target_args),
                 self.root,
                 &limits(MINIMIZE_SECS, minimize_env(self.libraries, self.input)?),
                 &sandbox,
@@ -1409,6 +1472,7 @@ fn admit(request: &BinaryFuzzRequest) -> Result<AdmittedBinary, ClassifiedError>
             "the per-input timeout must be between 1 and 3,600,000 milliseconds",
         ));
     }
+    validate_target_args(&request.target_args)?;
     let image = read_bounded(&request.binary, MAX_BINARY_BYTES, "binary")?;
     let machine = elf_machine(&image)?;
     let persistent = request
@@ -1422,6 +1486,7 @@ fn admit(request: &BinaryFuzzRequest) -> Result<AdmittedBinary, ClassifiedError>
         request.duration_secs,
         request.timeout_ms,
         !request.dictionary.is_empty(),
+        &request.target_args,
     )?;
     Ok(AdmittedBinary {
         image,
@@ -1516,6 +1581,7 @@ async fn run_session(
             input: request.input,
             libraries,
             timeout_ms: request.timeout_ms,
+            target_args: &request.target_args,
         },
         stage,
     )
@@ -1546,6 +1612,7 @@ async fn run_session(
         dictionary_tokens: request.dictionary.len(),
         compcov: request.compcov,
         stopped,
+        target_args: request.target_args.clone(),
         persistent_entry: admitted
             .persistent
             .as_ref()
@@ -1784,14 +1851,14 @@ mod tests {
 
     #[test]
     fn an_operator_dictionary_is_a_second_dictionary_beside_the_separator() {
-        let plain = fuzz_command(BinaryInput::File, 60, 1000, true).unwrap();
+        let plain = fuzz_command(BinaryInput::File, 60, 1000, true, &[]).unwrap();
         let dictionaries: Vec<_> = plain
             .windows(2)
             .filter(|pair| pair[0] == "-x")
             .map(|pair| pair[1].clone())
             .collect();
         assert_eq!(dictionaries, ["/work/dictionary.dict"]);
-        let messages = fuzz_command(BinaryInput::SocketMessages, 60, 1000, true).unwrap();
+        let messages = fuzz_command(BinaryInput::SocketMessages, 60, 1000, true, &[]).unwrap();
         let dictionaries: Vec<_> = messages
             .windows(2)
             .filter(|pair| pair[0] == "-x")
@@ -1801,7 +1868,7 @@ mod tests {
             dictionaries,
             ["/work/desock/messages.dict", "/work/dictionary.dict"]
         );
-        assert!(!fuzz_command(BinaryInput::File, 60, 1000, false)
+        assert!(!fuzz_command(BinaryInput::File, 60, 1000, false, &[])
             .unwrap()
             .contains(&"-x".to_owned()));
     }
@@ -1838,6 +1905,7 @@ mod tests {
             continue_from: None,
             compcov: false,
             persistent: None,
+            target_args: Vec::new(),
         };
         let extras = StagedExtras {
             dictionary: Some("token_0001=\"PIC1\"\n".to_owned()),
@@ -1859,8 +1927,44 @@ mod tests {
     }
 
     #[test]
+    fn target_arguments_reach_the_fuzz_minimize_and_replay_commands() {
+        // LibTIFF's tiffinfo crashes behind `-D -j` (Fuzzing101); a bare file
+        // argument never reaches that code, and there was no way to pass one.
+        let args: Vec<String> = ["-D", "-j", "@@"].map(str::to_owned).to_vec();
+        let fuzz = fuzz_command(BinaryInput::File, 60, 1000, false, &args).unwrap();
+        assert!(
+            fuzz.ends_with(&["/work/target", "-D", "-j", "@@"].map(str::to_owned)),
+            "{fuzz:?}"
+        );
+        let minimize = minimize_command(BinaryInput::File, "crash-1", 250, &args);
+        assert!(minimize.ends_with(&["/work/target", "-D", "-j", "@@"].map(str::to_owned)));
+        let replay = replay_command(BinaryInput::File, "findings/crash-1", &args);
+        assert!(replay
+            .ends_with(&["/work/target", "-D", "-j", "/work/findings/crash-1"].map(str::to_owned)));
+
+        // Without `@@` the input file goes last, as before.
+        let plain = target_argv(BinaryInput::File, &["-v".to_owned()], "@@");
+        assert_eq!(plain, ["-v", "@@"]);
+        // A stdin or socket target takes the arguments as given.
+        let stdin = fuzz_command(BinaryInput::Stdin, 60, 1000, false, &["-q".to_owned()]).unwrap();
+        assert!(
+            stdin.ends_with(&["/work/target", "-q"].map(str::to_owned)),
+            "{stdin:?}"
+        );
+        assert!(target_argv(BinaryInput::Socket, &[], "@@").is_empty());
+    }
+
+    #[test]
+    fn target_arguments_are_bounded() {
+        assert!(validate_target_args(&["-D".to_owned()]).is_ok());
+        assert!(validate_target_args(&vec!["-x".to_owned(); 65]).is_err());
+        assert!(validate_target_args(&["a\0b".to_owned()]).is_err());
+        assert!(validate_target_args(&["x".repeat(4097)]).is_err());
+    }
+
+    #[test]
     fn the_fuzz_command_is_the_afl_adapter_argv_in_qemu_mode() {
-        let file = fuzz_command(BinaryInput::File, 60, 1000, false).unwrap();
+        let file = fuzz_command(BinaryInput::File, 60, 1000, false, &[]).unwrap();
         assert_eq!(
             file,
             [
@@ -1880,12 +1984,12 @@ mod tests {
             ]
         );
         // A stdin target gets no input-file placeholder.
-        let stdin = fuzz_command(BinaryInput::Stdin, 60, 1000, false).unwrap();
+        let stdin = fuzz_command(BinaryInput::Stdin, 60, 1000, false, &[]).unwrap();
         assert_eq!(stdin.last().map(String::as_str), Some("/work/target"));
         assert!(stdin.contains(&"-Q".to_owned()));
 
         assert_eq!(
-            replay_command(BinaryInput::File, "findings/crash-0123456789abcdef"),
+            replay_command(BinaryInput::File, "findings/crash-0123456789abcdef", &[]),
             [
                 "sh",
                 "-c",
@@ -1896,7 +2000,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            replay_command(BinaryInput::Stdin, "findings/crash-0123456789abcdef"),
+            replay_command(BinaryInput::Stdin, "findings/crash-0123456789abcdef", &[]),
             [
                 "sh",
                 "-c",
@@ -1953,6 +2057,7 @@ mod tests {
             continue_from: None,
             compcov: false,
             persistent: None,
+            target_args: Vec::new(),
         };
         assert!(stage_session(
             root.path(),
@@ -2006,11 +2111,11 @@ mod tests {
     fn a_socket_session_takes_stdin_input_and_preloads_the_shim_into_the_target_only() {
         // The fuzzer delivers the input on standard input; the shim hands it
         // to the server as its first connection.
-        let command = fuzz_command(BinaryInput::Socket, 60, 1000, false).unwrap();
+        let command = fuzz_command(BinaryInput::Socket, 60, 1000, false, &[]).unwrap();
         assert_eq!(command.last().map(String::as_str), Some("/work/target"));
         assert_eq!(
-            replay_command(BinaryInput::Socket, "findings/crash-0123456789abcdef"),
-            replay_command(BinaryInput::Stdin, "findings/crash-0123456789abcdef")
+            replay_command(BinaryInput::Socket, "findings/crash-0123456789abcdef", &[]),
+            replay_command(BinaryInput::Stdin, "findings/crash-0123456789abcdef", &[])
         );
 
         // The emulator passes the preload to the emulated process only.
@@ -2042,6 +2147,7 @@ mod tests {
             continue_from: None,
             compcov: false,
             persistent: None,
+            target_args: Vec::new(),
         };
         stage_session(root.path(), b"\x7fELF", &request, &StagedExtras::default()).unwrap();
         let shim = std::fs::read_to_string(root.path().join("desock/oxfuzz_desock.c")).unwrap();
@@ -2148,6 +2254,7 @@ mod tests {
             continue_from: None,
             compcov: false,
             persistent: None,
+            target_args: Vec::new(),
         };
         stage_session(root.path(), b"\x7fELF", &request, &StagedExtras::default()).unwrap();
         let shim =
@@ -2218,7 +2325,7 @@ mod tests {
     #[test]
     fn the_minimizer_runs_in_qemu_mode_with_the_session_input_mode() {
         assert_eq!(
-            minimize_command(BinaryInput::File, "crash-0123456789abcdef", 250),
+            minimize_command(BinaryInput::File, "crash-0123456789abcdef", 250, &[]),
             [
                 "afl-tmin",
                 "-Q",
@@ -2235,11 +2342,11 @@ mod tests {
                 "@@"
             ]
         );
-        let stdin = minimize_command(BinaryInput::Stdin, "crash-0123456789abcdef", 250);
+        let stdin = minimize_command(BinaryInput::Stdin, "crash-0123456789abcdef", 250, &[]);
         assert_eq!(stdin.last().map(String::as_str), Some("/work/target"));
         assert_eq!(
             stdin,
-            minimize_command(BinaryInput::Socket, "crash-0123456789abcdef", 250)
+            minimize_command(BinaryInput::Socket, "crash-0123456789abcdef", 250, &[])
         );
         // The minimizer writes its scratch file where the session lets it.
         let env = minimize_env(false, BinaryInput::Socket).unwrap();
@@ -2253,7 +2360,7 @@ mod tests {
         );
         // A minimized input replays from its own directory.
         assert_eq!(
-            replay_command(BinaryInput::File, "minimized/crash-0123456789abcdef").last(),
+            replay_command(BinaryInput::File, "minimized/crash-0123456789abcdef", &[]).last(),
             Some(&"/work/minimized/crash-0123456789abcdef".to_owned())
         );
     }
@@ -2291,6 +2398,7 @@ mod tests {
             compcov: false,
             stopped: false,
             persistent_entry: None,
+            target_args: Vec::new(),
             stability_pct: None,
         };
         let json = serde_json::to_string(&outcome).unwrap();
@@ -2320,11 +2428,11 @@ mod tests {
 
         // The fuzzer is given the separator as a dictionary token, and the
         // input still arrives on standard input.
-        let command = fuzz_command(BinaryInput::SocketMessages, 60, 1000, false).unwrap();
+        let command = fuzz_command(BinaryInput::SocketMessages, 60, 1000, false, &[]).unwrap();
         let at = command.iter().position(|arg| arg == "-x").unwrap();
         assert_eq!(command[at + 1], "/work/desock/messages.dict");
         assert_eq!(command.last().map(String::as_str), Some("/work/target"));
-        assert!(!fuzz_command(BinaryInput::Socket, 60, 1000, false)
+        assert!(!fuzz_command(BinaryInput::Socket, 60, 1000, false, &[])
             .unwrap()
             .contains(&"-x".to_owned()));
 
@@ -2359,13 +2467,19 @@ mod tests {
         assert_eq!(
             replay_command(
                 BinaryInput::SocketMessages,
-                "findings/crash-0123456789abcdef"
+                "findings/crash-0123456789abcdef",
+                &[]
             ),
-            replay_command(BinaryInput::Stdin, "findings/crash-0123456789abcdef")
+            replay_command(BinaryInput::Stdin, "findings/crash-0123456789abcdef", &[])
         );
         assert_eq!(
-            minimize_command(BinaryInput::SocketMessages, "crash-0123456789abcdef", 250),
-            minimize_command(BinaryInput::Stdin, "crash-0123456789abcdef", 250)
+            minimize_command(
+                BinaryInput::SocketMessages,
+                "crash-0123456789abcdef",
+                250,
+                &[]
+            ),
+            minimize_command(BinaryInput::Stdin, "crash-0123456789abcdef", 250, &[])
         );
 
         let source = tempfile::tempdir().unwrap();
@@ -2382,6 +2496,7 @@ mod tests {
             continue_from: None,
             compcov: false,
             persistent: None,
+            target_args: Vec::new(),
         };
         stage_session(root.path(), b"\x7fELF", &request, &StagedExtras::default()).unwrap();
         assert!(root.path().join("desock/oxfuzz_desock.c").is_file());
@@ -2597,6 +2712,7 @@ mod tests {
             input,
             libraries: false,
             timeout_ms: 1000,
+            target_args: &[],
         };
         let finding = BinaryFinding {
             input: input_path,

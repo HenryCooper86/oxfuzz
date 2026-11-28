@@ -25,6 +25,9 @@ use crate::WebSecurityConfig;
 use hf_service::workflow_approval::{with_user_approval, ExplicitAction};
 
 mod allocation;
+#[cfg(feature = "binary-only-fuzzing")]
+mod binary_routes;
+mod parity_routes;
 
 const SSE_CHANNEL_CAPACITY: usize = 256;
 const MAX_SSE_EVENT_BYTES: usize = 64 * 1024;
@@ -232,6 +235,9 @@ pub enum SseEvent {
     /// `chat:event` -- one step of a running chat turn (reasoning, a tool
     /// call, its result), the event the desktop shell emits under this name.
     ChatEvent(hf_service::AgentEvent),
+    /// `campaign:progress` -- one progress event of a campaign or CI gate,
+    /// the `{type, data}` payload the desktop shell emits under this name.
+    CampaignProgress(serde_json::Value),
 }
 
 impl SseEvent {
@@ -248,6 +254,7 @@ impl SseEvent {
             SseEvent::PermissionRequest(_) => hf_service::approval::PERMISSION_REQUEST_EVENT,
             SseEvent::PermissionClosed(_) => hf_service::approval::PERMISSION_CLOSED_EVENT,
             SseEvent::ChatEvent(_) => "chat:event",
+            SseEvent::CampaignProgress(_) => "campaign:progress",
         }
     }
 }
@@ -501,6 +508,7 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         .route("/harness/promote", post(harness_promote))
         .route("/harness/promote-with-findings", post(harness_promote_with_findings))
         .route("/coverage/functions", post(coverage_functions))
+        .route("/coverage/summary", post(coverage_summary))
         .route("/artifacts/summary", post(artifact_summary))
         .route("/seeds/generate", post(generate_seeds))
         .route("/seeds/generate-llm", post(generate_seeds_llm))
@@ -546,6 +554,8 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         .merge(coverage_blocker_routes())
         .merge(campaign_trust_routes())
         .merge(unreached_surface_routes())
+        .merge(binary_only_routes())
+        .merge(parity_routes::routes())
         .merge(concolic_routes())
         .merge(campaign_health_routes())
         .merge(run_closeout_routes())
@@ -933,9 +943,21 @@ fn campaign_health_routes() -> Router<AppState> {
     Router::new()
 }
 
+#[cfg(feature = "binary-only-fuzzing")]
+fn binary_only_routes() -> Router<AppState> {
+    binary_routes::routes()
+}
+
+#[cfg(not(feature = "binary-only-fuzzing"))]
+fn binary_only_routes() -> Router<AppState> {
+    Router::new()
+}
+
 #[cfg(feature = "unreached-surface")]
 fn unreached_surface_routes() -> Router<AppState> {
-    Router::new().route("/coverage/unreached", post(unreached_surface))
+    Router::new()
+        .route("/coverage/unreached", post(unreached_surface))
+        .route("/coverage/attribution", post(coverage_attribution))
 }
 
 #[cfg(not(feature = "unreached-surface"))]
@@ -945,7 +967,9 @@ fn unreached_surface_routes() -> Router<AppState> {
 
 #[cfg(feature = "concolic-enrichment")]
 fn concolic_routes() -> Router<AppState> {
-    Router::new().route("/corpus/concolic", post(corpus_concolic))
+    Router::new()
+        .route("/corpus/concolic", post(corpus_concolic))
+        .route("/corpus/concolic/availability", get(concolic_availability))
 }
 
 #[cfg(not(feature = "concolic-enrichment"))]
@@ -1868,6 +1892,23 @@ async fn unreached_surface(
     Ok(Json(public_value(view)?))
 }
 
+/// Attribute every discovered target against retained coverage (the
+/// desktop's `coverage_attribution`). Reads cached measurements only.
+#[cfg(feature = "unreached-surface")]
+async fn coverage_attribution(
+    State(state): State<AppState>,
+    Json(req): Json<UnreachedSurfaceRequestBody>,
+) -> ApiResult<serde_json::Value> {
+    let project = approved_project(&state, &req.project)?;
+    let lang = parse_lang(&req.lang).map_err(map_err(StatusCode::BAD_REQUEST))?;
+    let view = state
+        .container
+        .coverage_attribution(&project, lang)
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(view)?))
+}
+
 #[cfg(feature = "concolic-enrichment")]
 #[derive(Debug, Deserialize)]
 struct ConcolicRequestBody {
@@ -1887,6 +1928,14 @@ async fn corpus_concolic(
         .await
         .map_err(classified_api_error)?;
     Ok(Json(public_value(outcome)?))
+}
+
+/// Whether the sandbox image can run a concolic pass.
+#[cfg(feature = "concolic-enrichment")]
+async fn concolic_availability(State(state): State<AppState>) -> ApiResult<serde_json::Value> {
+    Ok(Json(public_value(
+        state.container.concolic_availability().await,
+    )?))
 }
 
 #[cfg(feature = "campaign-trust")]
@@ -2142,7 +2191,7 @@ async fn approve_ranked_discovery_owner(state: &AppState, id: uuid::Uuid) -> Res
 async fn ranked_discovery_status(
     State(state): State<AppState>,
     Path(id): Path<uuid::Uuid>,
-) -> ApiResult<hf_service::RankedDiscoveryStatus> {
+) -> ApiResult<serde_json::Value> {
     approve_ranked_discovery_owner(&state, id).await?;
     let status = state
         .container
@@ -2157,14 +2206,14 @@ async fn ranked_discovery_status(
                 }),
             )
         })?;
-    Ok(Json(status))
+    Ok(Json(public_value(status)?))
 }
 
 #[cfg(feature = "ai-target-ranking")]
 async fn ranked_discovery_result(
     State(state): State<AppState>,
     Path(id): Path<uuid::Uuid>,
-) -> ApiResult<hf_service::RankedDiscoveryResult> {
+) -> ApiResult<serde_json::Value> {
     approve_ranked_discovery_owner(&state, id).await?;
     let result = state
         .container
@@ -2179,7 +2228,9 @@ async fn ranked_discovery_result(
                 }),
             )
         })?;
-    Ok(Json(result))
+    // Redacted like `/discover`: files relative to the requested project,
+    // no other host path.
+    Ok(Json(public_value(result)?))
 }
 
 #[cfg(feature = "ai-target-ranking")]
@@ -2477,6 +2528,22 @@ async fn coverage_functions(
             .container
             .coverage_functions(&project, &req.target)
             .await,
+    ))
+}
+
+/// Line, function and region coverage of a target's corpus; `null` until
+/// a coverage build has measured it.
+async fn coverage_summary(
+    State(state): State<AppState>,
+    Json(req): Json<CoverageFunctionsRequest>,
+) -> ApiResult<Option<hf_service::CoverageSummaryView>> {
+    let project = approved_project(&state, &req.project)?;
+    Ok(Json(
+        state
+            .container
+            .coverage_summary(&project, &req.target)
+            .await
+            .map(hf_service::CoverageSummaryView::from),
     ))
 }
 

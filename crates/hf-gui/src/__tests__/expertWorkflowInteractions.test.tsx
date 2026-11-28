@@ -114,7 +114,9 @@ describe("expert workflow panels", () => {
     expect(host.textContent).toContain("Skipped: nothing to minimize");
     expect(host.textContent).toContain("Failed: retained disk failure");
     expect(host.textContent).toContain("Blocked: Waits for the step \"Triage\"");
-    expect(host.textContent).toContain("Pending: Pending");
+    // A step without a record shows its label once.
+    expect(host.textContent).toContain("Record covered code edgesPending");
+    expect(host.textContent).not.toContain("Pending: Pending");
     expect(host.textContent).toContain("Analyze may triage crashes in the sandbox");
   });
 

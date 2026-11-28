@@ -259,6 +259,24 @@ impl WebSecurityConfig {
         Ok(canonical)
     }
 
+    /// Approve an existing file or directory below an approved root, such as
+    /// the executable a binary-only session fuzzes. A project must be a
+    /// directory ([`Self::approve_project`]); this admits files as well.
+    #[cfg(feature = "binary-only-fuzzing")]
+    pub(crate) fn approve_path(&self, requested: &Path) -> Result<PathBuf, PathPolicyError> {
+        let canonical = requested
+            .canonicalize()
+            .map_err(|_| PathPolicyError::Unavailable)?;
+        if !self
+            .project_roots
+            .iter()
+            .any(|root| canonical == *root || canonical.starts_with(root))
+        {
+            return Err(PathPolicyError::OutsideApprovedRoots);
+        }
+        Ok(canonical)
+    }
+
     pub(crate) fn project_roots(&self) -> &[PathBuf] {
         &self.project_roots
     }
@@ -525,6 +543,7 @@ fn redact_json_value(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Array(items) => items.iter_mut().for_each(redact_json_value),
         serde_json::Value::Object(entries) => {
+            relativize_target_location(entries);
             for (key, item) in entries {
                 if is_header_key(key) {
                     *item = serde_json::Value::Object(serde_json::Map::new());
@@ -543,6 +562,42 @@ fn redact_json_value(value: &mut serde_json::Value) {
             }
         }
         _ => {}
+    }
+}
+
+/// Rewrite a target's `location.file` relative to its own public
+/// `project_root`, before redaction sees it. The browser shows the file and
+/// builds the `file::symbol` target selector from it; inside the project the
+/// relative path discloses nothing beyond the project the request names. A
+/// file outside its project, or a project outside the approved roots, is
+/// left absolute and redacted as before.
+fn relativize_target_location(entries: &mut serde_json::Map<String, serde_json::Value>) {
+    let Some(root) = entries
+        .get("project_root")
+        .and_then(serde_json::Value::as_str)
+        .filter(|root| is_public_project_root(root))
+        .map(|root| root.trim_end_matches(['/', '\\']).to_owned())
+    else {
+        return;
+    };
+    let Some(file) = entries
+        .get_mut("location")
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|location| location.get_mut("file"))
+    else {
+        return;
+    };
+    let relative = file.as_str().and_then(|path| {
+        let rest = path.strip_prefix(&root)?;
+        let rest = rest.strip_prefix('/').or_else(|| rest.strip_prefix('\\'))?;
+        (!rest.is_empty()
+            && !Path::new(rest)
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir)))
+        .then(|| rest.to_owned())
+    });
+    if let Some(relative) = relative {
+        *file = serde_json::Value::String(relative);
     }
 }
 
@@ -650,6 +705,9 @@ fn is_path_key(key: &str) -> bool {
                 | "file"
                 | "files"
                 | "binary"
+                // A replayed crash input; an input *mode* such as "file" is
+                // not an absolute path and is kept.
+                | "input"
                 | "input_path"
                 | "source_path"
                 | "binary_path"
@@ -734,6 +792,56 @@ mod tests {
         assert_eq!(redacted["other"]["project_root"], "<redacted-path>");
         assert_eq!(redacted["escape"]["project_root"], "<redacted-path>");
         assert_eq!(redacted["sibling"]["project_root"], "<redacted-path>");
+    }
+
+    /// A target candidate's file sits inside its project. Redacting the
+    /// absolute path left the browser with `<redacted-path>:49` and a
+    /// `<redacted-path>::symbol` target selector; the project-relative path
+    /// discloses nothing the request does not already name.
+    #[tokio::test]
+    async fn a_target_file_inside_its_public_project_is_made_relative() {
+        let roots = std::sync::Arc::new(vec![std::path::PathBuf::from("/srv/projects")]);
+        let redacted = super::with_public_project_roots(roots, async {
+            redact_public_json(serde_json::json!({
+                "candidates": [
+                    {
+                        "project_root": "/srv/projects/c-ares",
+                        "symbol": "ares_parse_a_reply",
+                        "location": { "file": "/srv/projects/c-ares/ares_parse_a_reply.c", "line": 49 }
+                    },
+                    {
+                        "project_root": "/srv/projects/c-ares",
+                        "location": { "file": "/home/operator/other.c", "line": 1 }
+                    },
+                    {
+                        "project_root": "/home/operator/private",
+                        "location": { "file": "/home/operator/private/a.c", "line": 1 }
+                    }
+                ]
+            }))
+        })
+        .await;
+        let candidates = &redacted["candidates"];
+        assert_eq!(candidates[0]["location"]["file"], "ares_parse_a_reply.c");
+        assert_eq!(candidates[1]["location"]["file"], "<redacted-path>");
+        assert_eq!(candidates[2]["location"]["file"], "<redacted-path>");
+        assert_eq!(candidates[2]["project_root"], "<redacted-path>");
+    }
+
+    #[test]
+    fn a_replayed_crash_input_is_redacted_but_an_input_mode_is_kept() {
+        // A regression replay named the server's workspace path in `input`.
+        let redacted = super::redact_public_json(serde_json::json!({
+            "results": [{
+                "crash_id": "f3e5cbc0",
+                "input": "/srv/oxfuzz/workspaces/p/runs/r/triage/minimized/f3e5cbc0.min",
+                "still_crashes": true,
+            }],
+            "binary": { "input": "file" },
+        }));
+        assert_eq!(redacted["results"][0]["input"], "<redacted-path>");
+        assert_eq!(redacted["results"][0]["crash_id"], "f3e5cbc0");
+        assert_eq!(redacted["binary"]["input"], "file");
     }
 
     #[test]

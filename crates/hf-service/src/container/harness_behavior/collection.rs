@@ -67,20 +67,25 @@ fn observation(
         ));
     }
     let mut tuples = Vec::new();
+    // `afl-showmap -Z` (AFL++ 4.09c) writes each edge id followed by its
+    // three-digit hit class, e.g. `9030002` is edge 9030 with class 2.
     for line in text.lines() {
         let bytes = line.as_bytes();
-        if bytes.len() < 4
-            || !(b'1'..=b'8').contains(&bytes[0])
-            || !bytes[1..].iter().all(u8::is_ascii_digit)
-        {
+        if bytes.len() < 4 || !bytes.iter().all(u8::is_ascii_digit) {
             return Err(ClassifiedError::Validation(
                 "invalid AFL cmin map".to_owned(),
             ));
         }
-        let edge = line[1..]
+        let (edge, class) = line.split_at(line.len() - 3);
+        let class = class
+            .parse::<u8>()
+            .ok()
+            .filter(|class| *class > 0)
+            .ok_or_else(|| ClassifiedError::Validation("invalid AFL hit class".to_owned()))?;
+        let edge = edge
             .parse::<u32>()
             .map_err(|e| ClassifiedError::Validation(format!("invalid AFL edge: {e}")))?;
-        tuples.push((u64::from(edge), bytes[0] - b'0'));
+        tuples.push((u64::from(edge), class));
     }
     tuples.sort_unstable();
     tuples.dedup();
@@ -292,6 +297,7 @@ impl ServiceContainer {
                 },
             ),
         ];
+        let mut no_empty_baseline = false;
         for (batch, samples) in batches {
             if samples.is_empty() {
                 continue;
@@ -375,6 +381,7 @@ impl ServiceContainer {
                 match measurement {
                     Ok(value) => measured.push(value),
                     Err(error) => {
+                        no_empty_baseline |= batch == "empty";
                         tracing::warn!(%error, batch, "behavioral probe unavailable");
                         report.issues.push(format!("{batch}: {error}"));
                         measured.clear();
@@ -385,13 +392,43 @@ impl ServiceContainer {
             report.observations.extend(measured);
         }
         assess(&mut report, persistent);
+        if no_empty_baseline && matches!(report.entry_rejection, BehaviorCheck::Unavailable { .. })
+        {
+            report.entry_rejection = BehaviorCheck::unavailable(NO_EMPTY_BASELINE);
+        }
         Ok(report)
     }
 }
 
+/// Why entry rejection has no measurement when the empty probe left no map:
+/// AFL++'s libFuzzer driver returns before the target for a zero-length
+/// input, so there is no empty-input coverage to compare A and B against.
+const NO_EMPTY_BASELINE: &str =
+    "The empty input produced no coverage map (the AFL++ driver does not run zero-length inputs), so there is no baseline to compare A and B against";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_the_cmin_map_of_the_pinned_afl_showmap() {
+        // `afl-showmap -Z` in AFL++ 4.09c writes the edge id followed by a
+        // three-digit hit class: `9030002` is edge 9030, class 2. Reading the
+        // first digit as the class rejected every edge starting with 9 or 0,
+        // so no AFL++ harness ever got a behavioral measurement.
+        let map = observation("fresh_a", b"A", b"6001\n445001\n9030002\n").unwrap();
+        assert_eq!(map.tuples, vec![(6, 1), (445, 1), (9030, 2)]);
+        assert!(
+            observation("fresh_a", b"A", b"12\n").is_err(),
+            "too short for a class"
+        );
+        assert!(observation("fresh_a", b"A", b"9a001\n").is_err());
+        assert!(
+            observation("fresh_a", b"A", b"7000\n").is_err(),
+            "class 0 is no hit"
+        );
+    }
+
     fn sample(label: &str, map: &str) -> BehaviorObservation {
         observation(label, b"A", map.as_bytes()).unwrap()
     }

@@ -177,7 +177,11 @@ impl ServiceContainer {
             .await
             .map_err(|error| ClassifiedError::Storage(error.to_string()))?;
         #[cfg(feature = "ai-target-ranking")]
-        store.interrupt_active_ai_discoveries().await?;
+        store
+            .interrupt_active_ai_discoveries_where(|id| {
+                !crate::process_ownership::is_owned(crate::process_ownership::AI_DISCOVERY, id)
+            })
+            .await?;
         Ok(self.with_store(Arc::new(store)))
     }
 
@@ -445,7 +449,12 @@ impl ServiceContainer {
         }
         #[cfg(feature = "ai-target-ranking")]
         if let Some(store) = &store {
-            if let Err(error) = store.interrupt_active_ai_discoveries().await {
+            if let Err(error) = store
+                .interrupt_active_ai_discoveries_where(|id| {
+                    !crate::process_ownership::is_owned(crate::process_ownership::AI_DISCOVERY, id)
+                })
+                .await
+            {
                 tracing::error!(%error, "could not mark interrupted AI discovery operations");
             }
         }
@@ -510,7 +519,12 @@ impl ServiceContainer {
         // never blocks startup.
         #[cfg(feature = "patch-to-proof")]
         if let Some(store) = &store {
-            match store.recover_interrupted_remediations(Utc::now()).await {
+            match store
+                .recover_interrupted_remediations_where(Utc::now(), |id| {
+                    !crate::process_ownership::is_owned(crate::process_ownership::REMEDIATION, id)
+                })
+                .await
+            {
                 Ok(affected) if affected > 0 => {
                     tracing::info!(
                         affected,

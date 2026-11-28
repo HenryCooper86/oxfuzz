@@ -1249,14 +1249,26 @@ impl ServiceContainer {
                         &last_diagnostics,
                         lang.harness_filename(),
                     ) {
-                        return Err(ClassifiedError::Harness(format!(
-                            "the project's own sources do not compile next to the harness for \
-                             '{target}', so no harness edit can fix it: {error}. Configure the \
-                             project's build first with `oxfuzz build diagnose` and a build \
-                             profile (Build Doctor in the desktop app's Harness step); that \
-                             generates headers such as config.h and records the include \
-                             directories and defines"
-                        )));
+                        let link_failure = error.contains("undefined reference to")
+                            || error.contains("multiple definition of");
+                        return Err(ClassifiedError::Harness(if link_failure {
+                            format!(
+                                "the project's own sources do not link next to the harness for \
+                                 '{target}', so no harness edit can fix it: {error}. A library \
+                                 the project's build links is missing from the harness link, or \
+                                 two project units define the same symbol; `oxfuzz build \
+                                 history <project> --json` shows the configured build"
+                            )
+                        } else {
+                            format!(
+                                "the project's own sources do not compile next to the harness for \
+                                 '{target}', so no harness edit can fix it: {error}. Configure the \
+                                 project's build first with `oxfuzz build diagnose` and a build \
+                                 profile (Build Doctor in the desktop app's Harness step); that \
+                                 generates headers such as config.h and records the include \
+                                 directories and defines"
+                            )
+                        }));
                     }
                     if repairs_used >= max_repairs {
                         break;
@@ -2697,8 +2709,9 @@ impl ServiceContainer {
             ))
         })?;
         if harness.status != HarnessStatus::SmokePassed || !smoke.passed {
-            return Err(ClassifiedError::Validation(format!(
-                "harness '{target}' cannot be promoted until a crash-free smoke run passes"
+            return Err(ClassifiedError::Validation(crash_free_promotion_refusal(
+                target,
+                smoke.crashes,
             ))
             .into());
         }
@@ -2714,8 +2727,9 @@ impl ServiceContainer {
             ))
         })?;
         if harness.status != HarnessStatus::SmokePassed || !smoke.passed {
-            return Err(ClassifiedError::Validation(format!(
-                "harness '{target}' cannot be promoted until a crash-free smoke run passes"
+            return Err(ClassifiedError::Validation(crash_free_promotion_refusal(
+                target,
+                smoke.crashes,
             ))
             .into());
         }
@@ -2796,7 +2810,19 @@ impl ServiceContainer {
         let _workspace_operation = self.acquire_workspace_operation().await?;
         let workspace = workspace_dir(project, target);
         let corpus_dir = workspace.join("corpus");
-        let seeds = generate_target_seeds(target);
+        // One digest is recorded once per target, as on the model-seed path:
+        // a heuristic seed whose bytes the corpus already holds under another
+        // name (a model seed, an earned input) adds nothing, and writing it
+        // would make the inventory unrecordable.
+        let held = super::harness_workspace::retire_duplicate_generated_seeds(&corpus_dir)?;
+        let seeds: Vec<_> = generate_target_seeds(target)
+            .into_iter()
+            .filter(|(data, name)| {
+                use sha2::{Digest as _, Sha256};
+                let sha = format!("{:x}", Sha256::digest(data));
+                held.get(&sha).is_none_or(|holder| holder == name)
+            })
+            .collect();
         // The report covers exactly the entries this call wrote, never the
         // pre-existing inventory the relist folds in.
         let written: std::collections::HashSet<String> =
@@ -3647,6 +3673,33 @@ const MAX_CANDIDATE_ERROR_BYTES: usize = 2048;
 /// without crowding the target's own context out of the prompt budget
 /// (Engineering Protocol 2.4).
 const MAX_ACCEPTED_EXAMPLES: usize = 2;
+
+/// Why a clean promotion was refused, naming the other approval when the
+/// smoke run found crashes: those are known findings, and the revision can be
+/// approved with them kept (`--promote-with-findings`, or the Harness step).
+fn crash_free_promotion_refusal(target: &str, smoke_crashes: u32) -> String {
+    let base = format!("harness '{target}' cannot be promoted until a crash-free smoke run passes");
+    if smoke_crashes > 0 {
+        format!(
+            "{base}; its smoke run found {smoke_crashes} crash(es), so approve it with its known \
+             findings instead (`oxfuzz harness --promote-with-findings`, or Approve with Known \
+             Findings in the desktop Harness step)"
+        )
+    } else {
+        base
+    }
+}
+
+#[cfg(test)]
+mod promotion_refusal_tests {
+    #[test]
+    fn a_crashing_smoke_names_the_known_findings_approval() {
+        let message = super::crash_free_promotion_refusal("parse", 2);
+        assert!(message.contains("crash-free smoke run passes"), "{message}");
+        assert!(message.contains("--promote-with-findings"), "{message}");
+        assert!(!super::crash_free_promotion_refusal("parse", 0).contains("known findings"));
+    }
+}
 
 pub(super) fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::Digest as _;

@@ -267,11 +267,42 @@ impl Store {
     /// # Errors
     /// Returns a storage error if updating fails.
     pub async fn interrupt_active_ai_discoveries(&self) -> Result<u64, StorageError> {
-        let result = sqlx::query("UPDATE ai_discovery_operations SET state = 'interrupted', reason_code = 'process_restart', ended_at = ?1 WHERE state IN ('scanning', 'ranking')")
-            .bind(Utc::now().to_rfc3339())
-            .execute(self.pool())
-            .await?;
-        Ok(result.rows_affected())
+        self.interrupt_active_ai_discoveries_where(|_| true).await
+    }
+
+    /// Mark the active operations `lost` selects interrupted. The caller
+    /// spares operations another live process still owns: the database is
+    /// shared by every `oxfuzz` process (desktop app, server, CLI), so an
+    /// active row is not by itself evidence of a lost process.
+    ///
+    /// # Errors
+    /// Returns a storage error on query failure.
+    pub async fn interrupt_active_ai_discoveries_where(
+        &self,
+        lost: impl Fn(Uuid) -> bool,
+    ) -> Result<u64, StorageError> {
+        let rows = sqlx::query(
+            "SELECT id FROM ai_discovery_operations WHERE state IN ('scanning', 'ranking')",
+        )
+        .fetch_all(self.pool())
+        .await?;
+        let mut interrupted = 0;
+        for row in rows {
+            let raw: String = row.try_get("id")?;
+            let id = Uuid::parse_str(&raw).map_err(|error| {
+                StorageError::InvalidData(format!("discovery id {raw}: {error}"))
+            })?;
+            if !lost(id) {
+                continue;
+            }
+            let result = sqlx::query("UPDATE ai_discovery_operations SET state = 'interrupted', reason_code = 'process_restart', ended_at = ?1 WHERE id = ?2 AND state IN ('scanning', 'ranking')")
+                .bind(Utc::now().to_rfc3339())
+                .bind(raw)
+                .execute(self.pool())
+                .await?;
+            interrupted += result.rows_affected();
+        }
+        Ok(interrupted)
     }
 
     /// Read an operation by ID.

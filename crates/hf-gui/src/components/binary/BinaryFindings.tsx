@@ -253,6 +253,12 @@ export function BinaryOutcome({ project, outcome }: { project: string; outcome: 
         <p className="text-xs text-warning">{t("binary.lowStability")}</p>
       )}
       {outcome.findings_omitted > 0 && <p className="text-xs text-text-muted">{t("binary.omittedNote", { count: outcome.findings_omitted })}</p>}
+      {outcome.target_args && outcome.target_args.length > 0 && (
+        <div className="flex items-center gap-2 text-sm min-w-0">
+          <span className="text-text-muted shrink-0">{t("binary.targetArgs")}</span>
+          <span className="font-mono truncate min-w-0">{outcome.target_args.join(" ")}</span>
+        </div>
+      )}
       <div className="flex items-center gap-2 text-sm min-w-0">
         <span className="text-text-muted shrink-0">{t("binary.workspace")}</span>
         <span className="font-mono truncate min-w-0">{outcome.workspace}</span>

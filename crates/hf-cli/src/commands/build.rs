@@ -171,6 +171,8 @@ fn human_output(view: &Value) -> String {
                 };
                 if matches!(name.as_str(), "profile" | "plan" | "diagnosis" | "steps") {
                     format!("{label}:\n{}", human_output(value))
+                } else if name == "terminal" && value.is_object() {
+                    terminal_output(value)
                 } else {
                     format!("{label}: {value}")
                 }
@@ -179,6 +181,52 @@ fn human_output(view: &Value) -> String {
             .join("\n"),
         value => value.to_string(),
     }
+}
+
+/// Lines of build output shown per stream; the retained record keeps more
+/// (`oxfuzz build history --json`).
+const TERMINAL_TAIL_LINES: usize = 25;
+
+/// A build step's terminal record as an operator reads it: the outcome, then
+/// the last lines of each output stream as text, not one escaped JSON string.
+fn terminal_output(terminal: &Value) -> String {
+    let field = |key: &str| terminal.get(key).filter(|value| !value.is_null());
+    let mut lines = vec!["Last step:".to_owned()];
+    for (key, label) in [
+        ("status", "status"),
+        ("step_index", "step"),
+        ("exit_code", "exit code"),
+        ("failure_code", "failure"),
+        ("failure_message", "reason"),
+    ] {
+        if let Some(value) = field(key) {
+            let text = value
+                .as_str()
+                .map_or_else(|| value.to_string(), str::to_owned);
+            lines.push(format!("  {label}: {text}"));
+        }
+    }
+    for stream in ["stderr", "stdout"] {
+        let Some(text) = field(stream).and_then(Value::as_str) else {
+            continue;
+        };
+        let tail: Vec<&str> = text
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect();
+        if tail.is_empty() {
+            continue;
+        }
+        let start = tail.len().saturating_sub(TERMINAL_TAIL_LINES);
+        lines.push(format!("  {stream} (last {} lines):", tail.len() - start));
+        lines.extend(tail[start..].iter().map(|line| format!("    {line}")));
+    }
+    if field("output_truncated").and_then(Value::as_bool) == Some(true) {
+        lines.push(
+            "  (output was truncated; `oxfuzz build history --json` keeps the record)".to_owned(),
+        );
+    }
+    lines.join("\n")
 }
 
 #[cfg(all(test, feature = "build-doctor"))]
@@ -328,6 +376,34 @@ mod tests {
             serde_json::to_value(service.build_profile(directory.path()).await.unwrap()).unwrap(),
             saved
         );
+    }
+
+    #[test]
+    fn a_failed_step_reads_as_text_with_the_last_output_lines() {
+        let stderr = (1..=40)
+            .map(|n| format!("configure.ac:{n}: warning: obsolete macro"))
+            .chain(["configure: error: cannot guess build type; you must specify one".to_owned()])
+            .collect::<Vec<_>>()
+            .join("\n");
+        let value = serde_json::json!({"status": "step_failed", "terminal": {
+            "status": "failed", "exit_code": 1, "step_index": 1,
+            "failure_code": null, "stderr": stderr, "stdout": "", "output_truncated": true}});
+
+        let rendered = human_output(&value);
+
+        assert!(rendered.contains("  exit code: 1"), "{rendered}");
+        assert!(rendered.contains("  step: 1"), "{rendered}");
+        assert!(
+            rendered
+                .contains("    configure: error: cannot guess build type; you must specify one"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("configure.ac:1: warning"),
+            "older lines are cut: {rendered}"
+        );
+        assert!(!rendered.contains("\\n"), "no escaped JSON: {rendered}");
+        assert!(rendered.contains("build history --json"), "{rendered}");
     }
 
     #[test]

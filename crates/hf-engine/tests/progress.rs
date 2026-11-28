@@ -150,7 +150,9 @@ fn throughput_before_execs_label_does_not_read_later_counters() {
 #[test]
 fn fork_mode_status_line_reports_the_aggregate_rate() {
     // The printed exec/s is the parent's current-window rate; the cumulative
-    // counter over elapsed time is the campaign's aggregate throughput.
+    // counter over elapsed time is the campaign's aggregate throughput. The
+    // printed time is whole seconds rounded down, so the elapsed time is at
+    // most one second more: 37851418 / 19 s.
     let events = parse_progress_events(
         "#37851418: cov: 60 ft: 60 corp: 38 exec/s: 695057 oom/timeout/crash: 0/0/0 time: 18s job: 9 dft_time: 0",
     );
@@ -162,13 +164,30 @@ fn fork_mode_status_line_reports_the_aggregate_rate() {
         })
         .collect();
     assert!(
-        rates.iter().any(|rate| (*rate - 2_102_856.6).abs() < 1.0),
-        "expected the 37851418/18s aggregate among {rates:?}"
+        rates.iter().any(|rate| (*rate - 1_992_179.9).abs() < 1.0),
+        "expected the 37851418/19s aggregate among {rates:?}"
     );
     assert!(
         rates.contains(&695_057.0),
         "the window rate stays available: {rates:?}"
     );
+}
+
+#[test]
+fn an_early_fork_line_does_not_overstate_the_aggregate_rate() {
+    // A line printed 1.9 s into a run says `time: 1s`; dividing by 1 doubled
+    // the campaign's peak rate (732002/s against a 366053/s current rate).
+    let events = parse_progress_events(
+        "#732002: cov: 411 ft: 900 corp: 70 exec/s: 366001 oom/timeout/crash: 0/0/12 time: 1s job: 3 dft_time: 0",
+    );
+    let peak = events
+        .iter()
+        .filter_map(|event| match event {
+            FuzzProgress::ExecsPerSec(rate) => Some(*rate),
+            _ => None,
+        })
+        .fold(0.0_f64, f64::max);
+    assert!(peak <= 366_001.0, "{events:?}");
 }
 
 #[test]
@@ -221,8 +240,8 @@ fn fork_line_with_only_dft_time_does_not_report_an_aggregate() {
 #[test]
 fn fork_line_with_dft_time_before_time_reads_the_standalone_field() {
     // Field order is not contractual: when `dft_time:` precedes `time:`, the
-    // aggregate must still come from the standalone `time:` field (10 s),
-    // not the first `time:`-shaped substring (dft 2 s).
+    // aggregate must still come from the standalone `time:` field (10 s, so
+    // at most 11 s elapsed), not the first `time:`-shaped substring (dft 2 s).
     let events = parse_progress_events(
         "#10000: cov: 1 ft: 1 corp: 2 exec/s: 10 dft_time: 2 time: 10s job: 1",
     );
@@ -234,8 +253,8 @@ fn fork_line_with_dft_time_before_time_reads_the_standalone_field() {
         })
         .collect();
     assert!(
-        rates.contains(&1000.0),
-        "expected the 10000/10s aggregate among {rates:?}"
+        rates.iter().any(|rate| (*rate - 909.09).abs() < 0.01),
+        "expected the 10000/11s aggregate among {rates:?}"
     );
 }
 

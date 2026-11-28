@@ -99,3 +99,33 @@ async fn recovery_preserves_the_published_scan() {
     assert_eq!(retained.scan_json.as_deref(), Some("retained scan"));
     assert_eq!(retained.state, AiDiscoveryState::Interrupted);
 }
+
+/// Another process's ranked discovery is live: the startup sweep of a second
+/// `oxfuzz` command interrupted it and its ranking was lost. The sweep takes
+/// the operations to interrupt from its caller, which knows the live owners.
+#[tokio::test]
+async fn the_startup_sweep_spares_operations_its_caller_names_live() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::connect(root.path().join("ranking.db"))
+        .await
+        .unwrap();
+    let live = Uuid::new_v4();
+    let lost = Uuid::new_v4();
+    for id in [live, lost] {
+        store
+            .create_ai_discovery(id, root.path(), TargetLanguage::C)
+            .await
+            .unwrap();
+    }
+
+    let interrupted = store
+        .interrupt_active_ai_discoveries_where(|id| id != live)
+        .await
+        .unwrap();
+
+    assert_eq!(interrupted, 1);
+    let live_state = store.get_ai_discovery(live).await.unwrap().unwrap().state;
+    let lost_state = store.get_ai_discovery(lost).await.unwrap().unwrap().state;
+    assert_eq!(lost_state, AiDiscoveryState::Interrupted);
+    assert_ne!(live_state, AiDiscoveryState::Interrupted);
+}

@@ -73,7 +73,27 @@ fn gated_route_requests(outside: &std::path::Path) -> Vec<(&'static str, serde_j
             serde_json::json!({ "project": outside, "lang": "C" }),
         ),
         (
+            "/coverage/attribution",
+            serde_json::json!({ "project": outside, "lang": "C" }),
+        ),
+        (
+            "/binary/sessions",
+            serde_json::json!({ "project": outside }),
+        ),
+        ("/binary/inspect", serde_json::json!({ "binary": outside })),
+        (
+            "/binary/fuzz",
+            serde_json::json!({ "options": {
+                "project": outside, "binary": outside, "input": "file",
+                "durationSecs": 60, "timeoutMs": 1000,
+            } }),
+        ),
+        (
             "/corpus/concolic",
+            serde_json::json!({ "project": outside, "target": "parse" }),
+        ),
+        (
+            "/coverage/summary",
             serde_json::json!({ "project": outside, "target": "parse" }),
         ),
         (
@@ -87,6 +107,70 @@ fn gated_route_requests(outside: &std::path::Path) -> Vec<(&'static str, serde_j
         (
             "/automotive/lab/plan",
             serde_json::json!({ "project": outside, "protocol": "can", "mode": "virtual_can", "operations": ["read_dtc"] }),
+        ),
+        // The routes added for the browser's formerly desktop-only commands.
+        (
+            "/harness/refine",
+            serde_json::json!({ "project": outside, "target": "parse", "engine": "libfuzzer" }),
+        ),
+        (
+            "/harness/adopt-revision",
+            serde_json::json!({ "project": outside, "target": "parse", "engine": "libfuzzer",
+                                "harness_id": uuid::Uuid::nil() }),
+        ),
+        (
+            "/harness/smoke-with-options",
+            serde_json::json!({ "project": outside, "target": "parse", "engine": "libfuzzer" }),
+        ),
+        (
+            "/harness/mutator/grammar",
+            serde_json::json!({ "project": outside, "target": "parse", "engine": "libfuzzer",
+                                "expected_harness_id": uuid::Uuid::nil(), "grammar": "start: 'a'" }),
+        ),
+        (
+            "/crashes/verify-regressions",
+            serde_json::json!({ "project": outside, "target": "parse" }),
+        ),
+        (
+            "/crashes/bisect",
+            serde_json::json!({ "project": outside, "target": "parse", "crash_id": "c1", "good": "v1" }),
+        ),
+        (
+            "/campaign/run",
+            serde_json::json!({ "options": { "project": outside, "engine": "libfuzzer",
+                                             "durationSecs": 60, "iterations": 1 } }),
+        ),
+        (
+            "/ci-gate",
+            serde_json::json!({ "project": outside, "target": "parse", "engine": "libfuzzer", "duration_secs": 30 }),
+        ),
+        (
+            "/dictionary",
+            serde_json::json!({ "project": outside, "target": "parse" }),
+        ),
+        (
+            "/dictionary/set",
+            serde_json::json!({ "project": outside, "target": "parse", "text": "\"GET\"" }),
+        ),
+        (
+            "/dictionary/clear",
+            serde_json::json!({ "project": outside, "target": "parse" }),
+        ),
+        (
+            "/coverage/line-report",
+            serde_json::json!({ "project": outside, "target": "parse" }),
+        ),
+        (
+            "/notifications/latest-run",
+            serde_json::json!({ "project": outside, "target": "parse" }),
+        ),
+        (
+            "/automotive/scan-uds",
+            serde_json::json!({ "project_root": outside, "interface": "vcan0", "request_ids": [2016], "services": [62] }),
+        ),
+        (
+            "/automotive/live-monitor",
+            serde_json::json!({ "project_root": outside, "interface": "vcan0", "protocol": "can" }),
         ),
     ]
 }

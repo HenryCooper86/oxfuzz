@@ -3282,3 +3282,59 @@ async fn run_persists_the_input_timeout_and_surfaces_hangs() {
         "the resolved default per-input timeout is persisted with the run"
     );
 }
+
+/// A run that kept crashing inputs but was never triaged has no findings
+/// rows. Exporting it produced an empty SARIF document, which code scanning
+/// reads as "no findings", and the webhook alert reported nothing to send.
+#[tokio::test]
+async fn exports_of_an_untriaged_crashing_run_refuse_and_name_triage() {
+    isolate_workspace();
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("untriaged_project");
+    std::fs::create_dir_all(&project).unwrap();
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("runs.db"))
+            .await
+            .unwrap(),
+    );
+    let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None)
+        .with_store(Arc::clone(&store));
+    let target = stored_target(&project, "parse");
+    let harness = stored_harness(target.id, &target.symbol);
+    let mut run = stored_run(&project, harness.id, chrono::Utc::now());
+    run.crash_count = Some(325);
+    store
+        .upsert_target(&target, chrono::Utc::now())
+        .await
+        .unwrap();
+    store.upsert_harness(&harness).await.unwrap();
+    store.insert_run(&run).await.unwrap();
+
+    let error = container
+        .export_sarif(&project, "parse")
+        .await
+        .expect_err("an untriaged crashing run has no SARIF to export yet")
+        .to_string();
+    assert!(error.contains("325") && error.contains("triage"), "{error}");
+
+    #[cfg(feature = "crash-alerts")]
+    {
+        let error = container
+            .notify_latest_run(&project, "parse")
+            .await
+            .expect_err("an untriaged crashing run is not 'nothing to report'")
+            .to_string();
+        assert!(error.contains("triage"), "{error}");
+    }
+
+    // A clean run still exports an empty document.
+    let mut clean = stored_run(
+        &project,
+        harness.id,
+        chrono::Utc::now() + chrono::Duration::minutes(1),
+    );
+    clean.crash_count = Some(0);
+    store.insert_run(&clean).await.unwrap();
+    let sarif = container.export_sarif(&project, "parse").await.unwrap();
+    assert!(sarif.contains("\"results\": []"), "{sarif}");
+}

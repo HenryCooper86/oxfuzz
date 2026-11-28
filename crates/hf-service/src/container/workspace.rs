@@ -777,9 +777,16 @@ mod workspace_tests {
         // unwritable, so `user_app_dir` may fall back to temp; either way,
         // artifacts stay under a dedicated oxfuzz/workspaces root rather
         // than directly in the OS temp directory.
+        //
+        // An operator's `HF_APP_DIR` replaces the platform directory (tests
+        // and isolated walks set it), so the dedicated `oxfuzz` component is
+        // only asserted when it is unset.
         let root = super::workspace_root_from(None);
-        assert!(root.ends_with(std::path::Path::new("oxfuzz").join("workspaces")));
+        assert_eq!(root, crate::init::user_app_dir().join("workspaces"));
         assert_ne!(root, std::env::temp_dir());
+        if std::env::var_os("HF_APP_DIR").is_none_or(|dir| dir.is_empty()) {
+            assert!(root.ends_with(std::path::Path::new("oxfuzz").join("workspaces")));
+        }
     }
 
     #[test]

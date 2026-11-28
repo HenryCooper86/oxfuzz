@@ -278,6 +278,24 @@ function ScopedTriageView({ embedded, initialRunId, onNavigate }: { embedded: bo
 
   // The same crash seen again (same target and stack signature) is one row.
   const findingGroups = useMemo(() => groupFindings(visibleQueue), [visibleQueue]);
+
+  // Once per project, when its queue first arrives: a restored selection whose
+  // bug recurred in the latest run opens on that occurrence, the group's lead.
+  // Restoring the older one disabled the latest-run actions (Compose Report,
+  // SARIF, DefectDojo) until the newer row was found and clicked. A finding
+  // chosen afterwards, historical or not, is left as chosen.
+  const restoreCheckedFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (!activeProject || queueLoading || restoreCheckedFor.current === activeProject) return;
+    if (queue.length === 0 || queue.some((item) => item.project_root !== activeProject)) return;
+    restoreCheckedFor.current = activeProject;
+    if (!selection) return;
+    const group = findingGroups.find((candidate) => candidate.members.some((member) => member.crash.id === selection.findingId));
+    const lead = group?.representative;
+    if (lead && lead.crash.id !== selection.findingId && lead.latest_scoped_actions_allowed) {
+      selectFinding(lead.crash.id, lead.crash.run_id);
+    }
+  }, [activeProject, queueLoading, queue, selection, findingGroups, selectFinding]);
   const [expandedGroups, setExpandedGroups] = useState<ReadonlySet<string>>(() => new Set());
 
   const triage = useCallback(async () => {

@@ -154,6 +154,16 @@ pub fn build_run_args(
     // was saved thousands of times. Telling it ASLR stays on makes it name a
     // crash by its stack hash, which is what uniqueness means here.
     args.push("--linux_keep_aslr".to_owned());
+    // Keep the target's memory below the sandbox's. honggfuzz turns this into
+    // the sanitizer's `soft_rss_limit_mb`; with its default
+    // `allocator_may_return_null=1`, allocations then fail inside the target.
+    // Without it a target that grows past the sandbox gets honggfuzz itself
+    // killed (exit 137) and the run's results discarded. A quarter of the
+    // allocation is left for honggfuzz, its corpus, and the shared memory.
+    if let Some((rss, _)) = target_memory_caps_mb(cfg) {
+        args.push("--rlimit_rss".to_owned());
+        args.push(rss.to_string());
+    }
     // `cfg.env` is deliberately absent from the argument list: both callers pass
     // the same map through `ResourceLimits.env`, which the sandbox renders onto
     // the container. An `env K=V` wrapper here would be a second home for one
@@ -174,6 +184,21 @@ pub fn build_run_args(
     args.push("--".to_owned());
     args.push(binary.to_owned());
     Ok(args)
+}
+
+/// The per-target-process memory caps of a honggfuzz run, in MiB: the soft
+/// RSS limit and the largest single allocation. Each `--threads` worker runs
+/// its own target process in the one sandbox, so the sandbox allocation is
+/// split between them; three quarters of a share for RSS and half for one
+/// allocation leaves room for honggfuzz itself. `None` without a memory
+/// allocation.
+#[must_use]
+pub fn target_memory_caps_mb(cfg: &FuzzRunConfig) -> Option<(u64, u64)> {
+    if cfg.max_mem_mb == 0 {
+        return None;
+    }
+    let share = cfg.max_mem_mb / u64::from(cfg.max_cpus.max(1));
+    Some(((share * 3 / 4).max(1), (share / 2).max(1)))
 }
 
 /// Arguments that run one retained input once, unmutated, under honggfuzz.

@@ -126,21 +126,12 @@ pub async fn coverage_summary(
     state: tauri::State<'_, AppState>,
     project: PathBuf,
     target: String,
-) -> Result<Option<serde_json::Value>, String> {
-    let Some(summary) = state.container.coverage_summary(&project, &target).await else {
-        return Ok(None);
-    };
-    Ok(Some(serde_json::json!({
-        "lines_covered": summary.lines_covered,
-        "lines_total": summary.lines_total,
-        "line_percent": summary.line_percent(),
-        "functions_covered": summary.functions_covered,
-        "functions_total": summary.functions_total,
-        "function_percent": summary.function_percent(),
-        "regions_covered": summary.regions_covered,
-        "regions_total": summary.regions_total,
-        "region_percent": summary.region_percent(),
-    })))
+) -> Result<Option<hf_service::CoverageSummaryView>, String> {
+    Ok(state
+        .container
+        .coverage_summary(&project, &target)
+        .await
+        .map(hf_service::CoverageSummaryView::from))
 }
 
 fn line_report_file(target: &str, format: &str) -> Result<(String, &'static str), String> {

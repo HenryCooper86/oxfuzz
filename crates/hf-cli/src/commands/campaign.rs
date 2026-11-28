@@ -481,6 +481,7 @@ pub(crate) async fn cmd_binary(args: crate::args::BinaryArgs) -> anyhow::Result<
                 iterations: args.persistent_iterations,
                 restore_memory: args.restore_memory,
             }),
+            target_args: args.target_args,
         })
         .await?;
     if args.json {

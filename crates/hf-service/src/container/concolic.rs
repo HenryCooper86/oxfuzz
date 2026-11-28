@@ -135,7 +135,8 @@ impl ServiceContainer {
         prepare_configured_workspace_root()?;
         let workspace = workspace_dir(project, target);
         let _target_revision = self.acquire_target_revision(project, target).await?;
-        self.require_promoted_harness(project, target, &workspace)
+        let promoted = self
+            .require_promoted_harness(project, target, &workspace)
             .await?;
 
         let corpus_dir = workspace.join("corpus");
@@ -169,7 +170,12 @@ impl ServiceContainer {
         )
         .await?;
         let record = self
-            .run_concolic_pass(&workspace, &selected, &settings)
+            .run_concolic_pass(
+                &workspace,
+                &selected,
+                &settings,
+                &promoted.build_cmd.extra_flags,
+            )
             .await?;
 
         // Inputs the pass selected but never reached are skipped, whatever
@@ -238,7 +244,7 @@ impl ServiceContainer {
         project: &Path,
         target: &str,
         workspace: &Path,
-    ) -> Result<(), ClassifiedError> {
+    ) -> Result<hf_core::harness::Harness, ClassifiedError> {
         let store = self.store.as_ref().ok_or_else(|| {
             ClassifiedError::Validation(
                 "concolic enrichment requires the persistent service store to confirm that a \
@@ -257,16 +263,16 @@ impl ServiceContainer {
             .list_harnesses(target_id)
             .await
             .map_err(|error| ClassifiedError::Storage(error.to_string()))?;
-        if !harnesses
-            .iter()
-            .any(|harness| harness.status == HarnessStatus::Promoted && harness.source == source)
-        {
+        let Some(promoted) = harnesses
+            .into_iter()
+            .find(|harness| harness.status == HarnessStatus::Promoted && harness.source == source)
+        else {
             return Err(ClassifiedError::Validation(format!(
                 "concolic enrichment requires an explicitly promoted harness for '{target}'; the \
                  staged revision is not promoted, and instrumenting a draft would route around \
                  the human approval that promotion records"
             )));
-        }
+        };
         // The build compiles `harness.c`; a promoted record whose C source is
         // absent must be diagnosed here rather than surfacing as "instrumented
         // build did not complete".
@@ -278,7 +284,7 @@ impl ServiceContainer {
                 harness_c.display()
             )));
         }
-        Ok(())
+        Ok(promoted)
     }
 
     /// Build the instrumented binary and explore each selected input.
@@ -298,6 +304,7 @@ impl ServiceContainer {
         workspace: &Path,
         selected: &[PathBuf],
         settings: &crate::config::ConcolicSettings,
+        project_flags: &[String],
     ) -> Result<ExplorationRecord, ClassifiedError> {
         // One deadline for the whole pass, fixed before the build starts.
         // Spec section 5 bounds the whole pass, not only the explore loop:
@@ -323,11 +330,7 @@ impl ServiceContainer {
         let build = vec![
             "sh".to_owned(),
             "-c".to_owned(),
-            format!(
-                "{precompile}symcc -O1 harness.c symcc_driver.c {link_args} -o concolic_target",
-                precompile = project.precompile_script("symcc -O1", "/work"),
-                link_args = project.link_args("/work"),
-            ),
+            concolic_build_script(&project, project_flags),
         ];
         let build_limits = hf_core::runtime::ResourceLimits {
             max_mem_mb: 4096,
@@ -448,5 +451,60 @@ fn collect_solved(out_dir: &Path, collected: &mut HashSet<PathBuf>, solved: &mut
             solved.push(bytes);
             collected.insert(path);
         }
+    }
+}
+
+/// The `sh -c` script that builds the `SymCC`-instrumented target. The
+/// project flags of the promoted revision (include directories and defines
+/// from the compile database) come before the sources, as in the ordinary
+/// harness compile: without them a configured project (c-ares needs
+/// `-DHAVE_CONFIG_H` and its include roots) never built.
+fn concolic_build_script(
+    project: &hf_harness::project_sources::ProjectLinkInputs,
+    project_flags: &[String],
+) -> String {
+    let flags = hf_harness::project_sources::shell_quoted(project_flags);
+    let compile = if flags.is_empty() {
+        "symcc -O1".to_owned()
+    } else {
+        format!("symcc -O1 {flags}")
+    };
+    format!(
+        "{precompile}{compile} harness.c symcc_driver.c {link_args} -o concolic_target",
+        precompile = project.precompile_script(&compile, "/work"),
+        link_args = project.link_args("/work"),
+    )
+}
+
+#[cfg(test)]
+mod concolic_build_script_tests {
+    #[test]
+    fn the_promoted_revisions_project_flags_reach_every_compile() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(workspace.path().join("lib.c"), "int f;").unwrap();
+        std::fs::write(workspace.path().join("tool.c"), "int main(void){return 0;}").unwrap();
+        let project = hf_harness::project_sources::ProjectLinkInputs::collect(
+            workspace.path(),
+            &["harness.c", "symcc_driver.c"],
+        );
+        let flags = vec!["-I/work".to_owned(), "-DHAVE_CONFIG_H".to_owned()];
+
+        let script = super::concolic_build_script(&project, &flags);
+
+        assert!(
+            script.contains("symcc -O1 '-I/work' '-DHAVE_CONFIG_H' -Dmain="),
+            "the precompile gets them: {script}"
+        );
+        assert!(
+            script.contains("symcc -O1 '-I/work' '-DHAVE_CONFIG_H' harness.c symcc_driver.c"),
+            "the link compile gets them: {script}"
+        );
+        assert_eq!(
+            super::concolic_build_script(&project, &[])
+                .matches("symcc -O1 harness.c")
+                .count(),
+            1,
+            "no flags, no change"
+        );
     }
 }

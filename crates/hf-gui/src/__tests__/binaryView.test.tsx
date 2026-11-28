@@ -32,6 +32,7 @@ const SHA = "a".repeat(64);
 const outcome: BinaryFuzzOutcome = {
   session: "11111111-1111-1111-1111-111111111111",
   workspace: "/ws/session-1",
+  target_args: ["-p", "8080"],
   binary_name: "server",
   binary_sha256: "b".repeat(64),
   machine: "x86_64",
@@ -124,14 +125,17 @@ describe("BinaryView", () => {
     await click(button("Choose folder"));
     await setValue(host.querySelector("#binary-libraries") as HTMLInputElement, "/libs");
     await setValue(host.querySelector("#binary-timeout") as HTMLInputElement, "250");
+    await setValue(host.querySelector("#binary-target-args") as HTMLInputElement, " -p  8080 ");
     await click(host.querySelector('input[value="socket"]') as HTMLElement);
     await click(button("Start session"));
     expect(mocks.invoke).toHaveBeenCalledWith("binary_fuzz", { options: {
       project: "/proj", binary: "/bin/server", input: "socket", seeds: "/seeds",
       libraries: "/libs", durationSecs: 60, timeoutMs: 250, dictionary: [], continueFrom: undefined,
-      compcov: true,
+      compcov: true, targetArgs: ["-p", "8080"],
     } });
     expect(host.textContent).toContain("12,345");
+    // The arguments the session ran with are part of its result.
+    expect(host.textContent).toContain("-p 8080");
     expect(host.textContent).toContain("aaaaaaaa");
     expect(host.textContent).toContain("heap-buffer-overflow");
     expect(host.textContent).toContain("3 crash files");

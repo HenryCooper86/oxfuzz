@@ -97,5 +97,21 @@ class PcapTests(unittest.TestCase):
         self.assertTrue(result["packets"][0]["raw_hex"])
 
 
+    def test_a_text_log_is_refused_as_an_unsupported_capture(self) -> None:
+        # A candump text log made Scapy raise its own exception type, which
+        # surfaced as "sidecar operation failed unexpectedly".
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "first.log"
+            path.write_text("(1.000000) can0 100#0010\n", encoding="utf-8")
+            with self.assertRaises(SidecarError) as caught:
+                decode_pcap(
+                    path,
+                    {"max_events": 2, "max_payload_bytes": 64 * 1_024},
+                    decoder=ScapyPcapDecoder(),
+                )
+        self.assertEqual(caught.exception.code, "pcap_decode_error")
+        self.assertIn("PCAP", caught.exception.message)
+
+
 if __name__ == "__main__":
     unittest.main()

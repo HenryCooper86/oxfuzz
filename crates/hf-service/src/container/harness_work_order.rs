@@ -14,8 +14,8 @@ use hf_core::{
     error::ClassifiedError,
     harness::{Harness, HarnessStatus},
     runtime::{
-        classify_fixed_sandbox_include_path, contains_absolute_path_fragment,
-        FixedSandboxIncludePath, MAX_PORTABLE_DEFINE_BYTES,
+        classify_fixed_sandbox_include_path, portable_define_value, FixedSandboxIncludePath,
+        MAX_PORTABLE_DEFINE_BYTES,
     },
     target::{TargetCandidate, TargetLanguage},
 };
@@ -735,7 +735,10 @@ impl ServiceContainer {
             .ok_or_else(stale_work_order)?;
         if candidate.symbol != work_order.payload.target.symbol
             || candidate.language != work_order.payload.target.language
-            || candidate.signature != work_order.payload.target.signature
+            || !signature_still_matches(
+                candidate.signature.as_deref(),
+                work_order.payload.target.signature.as_deref(),
+            )
             || candidate.location.line != work_order.payload.target.line
             || candidate.rationale != work_order.payload.target.rationale
         {
@@ -1727,7 +1730,7 @@ fn portable_define(define: &str) -> Result<String, HarnessWorkOrderError> {
     }
     if value
         .split_once('=')
-        .is_some_and(|(_, value)| contains_absolute_path_fragment(value))
+        .is_some_and(|(_, value)| !portable_define_value(value))
     {
         return Err(HarnessWorkOrderError::validation(
             HarnessWorkOrderErrorCode::InvalidProjectPath,
@@ -1980,5 +1983,50 @@ mod tests {
         ] {
             assert_eq!(portable_define(define).expect("portable define"), define);
         }
+    }
+}
+
+/// Whether a target's current signature still describes the one a work order
+/// was exported with. Equal signatures match. So does a work order exported
+/// before discovery recorded C return types: its declarator-only signature
+/// (`*ares_inet_ntop(int af, ...)`) is the current one minus the leading
+/// return type and qualifiers (`const char * ares_inet_ntop(int af, ...)`).
+/// Every other difference is a different target.
+fn signature_still_matches(current: Option<&str>, ordered: Option<&str>) -> bool {
+    match (current, ordered) {
+        (Some(current), Some(ordered)) if current != ordered => current
+            .strip_suffix(ordered)
+            .is_some_and(|prefix| prefix.ends_with(' ') && !ordered.is_empty()),
+        (current, ordered) => current == ordered,
+    }
+}
+
+#[cfg(test)]
+mod signature_compatibility_tests {
+    use super::signature_still_matches;
+
+    #[test]
+    fn a_work_order_from_before_return_types_stays_valid() {
+        let current = Some("const char * ares_inet_ntop(int af, const void *src)");
+        assert!(signature_still_matches(current, current));
+        assert!(signature_still_matches(
+            current,
+            Some("* ares_inet_ntop(int af, const void *src)")
+        ));
+        assert!(signature_still_matches(
+            Some("int parse(const char *s)"),
+            Some("parse(const char *s)")
+        ));
+        // A changed parameter list, or a name that only ends the same way,
+        // is a different target.
+        assert!(!signature_still_matches(
+            Some("int parse(const char *s, int n)"),
+            Some("parse(const char *s)")
+        ));
+        assert!(!signature_still_matches(
+            Some("int my_parse(const char *s)"),
+            Some("parse(const char *s)")
+        ));
+        assert!(!signature_still_matches(current, None));
     }
 }

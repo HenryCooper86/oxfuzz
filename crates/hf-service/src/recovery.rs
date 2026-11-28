@@ -84,6 +84,39 @@ pub struct RunJournal {
     wal_lock: Arc<Mutex<()>>,
     /// Sticky replay/write failure for callers that need fail-closed startup.
     durability_error: Mutex<Option<String>>,
+    /// The owner lock of each run this process opened and has not closed.
+    /// Holding it tells every other process sharing the journal (the desktop
+    /// app, another CLI command) that the run is live; the OS releases it if
+    /// this process dies, which is what makes the run interrupted.
+    owner_locks: Mutex<HashMap<String, File>>,
+}
+
+/// Directory, beside the journal, of per-run owner lock files.
+const OWNER_LOCK_DIR: &str = "run-owners";
+
+/// Path of one run's owner lock, or `None` for an in-memory journal.
+fn owner_lock_path(wal_path: Option<&Path>, run_id: &str) -> Option<PathBuf> {
+    // Run ids are UUIDs; anything else never names a lock file.
+    Uuid::parse_str(run_id).ok()?;
+    Some(
+        wal_path?
+            .parent()?
+            .join(OWNER_LOCK_DIR)
+            .join(format!("{run_id}.lock")),
+    )
+}
+
+/// Whether another process holds the owner lock of `run_id`, i.e. the run is
+/// still live. A missing file, or one locked for another reason, is not proof
+/// of a live owner, so the run counts as lost, as before owner locks existed.
+fn run_owner_is_alive(wal_path: &Path, run_id: &str) -> bool {
+    let Some(path) = owner_lock_path(Some(wal_path), run_id) else {
+        return false;
+    };
+    let Ok(file) = OpenOptions::new().read(true).write(true).open(&path) else {
+        return false;
+    };
+    matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock))
 }
 
 fn now() -> i64 {
@@ -99,6 +132,7 @@ impl RunJournal {
             wal_path: None,
             wal_lock: Arc::new(Mutex::new(())),
             durability_error: Mutex::new(None),
+            owner_locks: Mutex::new(HashMap::new()),
         }
     }
 
@@ -112,9 +146,11 @@ impl RunJournal {
         let replay = read_wal(&wal_path);
         // run_id -> the open event, removed when a matching close/dismiss is seen.
         let open = replay_open_events(&replay.events);
-        // Runs with a still-open event were interrupted.
+        // Runs with a still-open event were interrupted, unless another
+        // process sharing this journal still owns them.
         let interrupted: Vec<InterruptedRun> = open
             .values()
+            .filter(|ev| !run_owner_is_alive(&wal_path, &ev.run_id))
             .map(|ev| InterruptedRun {
                 run_id: ev.run_id.clone(),
                 project: ev.project.clone(),
@@ -142,6 +178,7 @@ impl RunJournal {
             wal_path: Some(wal_path),
             wal_lock: Arc::clone(&wal_lock),
             durability_error: Mutex::new(durability_error),
+            owner_locks: Mutex::new(HashMap::new()),
         }
     }
 
@@ -172,6 +209,45 @@ impl RunJournal {
         };
         let _wal_guard = lock_recover(&self.wal_lock);
         self.append_locked(&event);
+        self.take_owner_lock(&run_id.to_string());
+    }
+
+    /// Hold `run_id`'s owner lock until the run is closed or dismissed.
+    /// Best-effort: without it the run is only as protected as it was before
+    /// owner locks existed.
+    fn take_owner_lock(&self, run_id: &str) {
+        let Some(path) = owner_lock_path(self.wal_path.as_deref(), run_id) else {
+            return;
+        };
+        let locked = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| {
+                OpenOptions::new()
+                    .create(true)
+                    .truncate(false)
+                    .read(true)
+                    .write(true)
+                    .open(&path)
+            })
+            .and_then(|file| file.try_lock().map(|()| file).map_err(io::Error::from));
+        match locked {
+            Ok(file) => {
+                lock_recover(&self.owner_locks).insert(run_id.to_owned(), file);
+            }
+            Err(error) => {
+                tracing::warn!(%error, run_id, "could not take the run's owner lock");
+            }
+        }
+    }
+
+    /// Release and remove `run_id`'s owner lock.
+    fn release_owner_lock(&self, run_id: &str) {
+        if lock_recover(&self.owner_locks).remove(run_id).is_some() {
+            if let Some(path) = owner_lock_path(self.wal_path.as_deref(), run_id) {
+                let _ = std::fs::remove_file(path);
+            }
+        }
     }
 
     /// Record a non-lifecycle note against a run (e.g. an auto-revert firing).
@@ -204,6 +280,7 @@ impl RunJournal {
         };
         let _wal_guard = lock_recover(&self.wal_lock);
         self.append_locked(&event);
+        self.release_owner_lock(&run_id.to_string());
     }
 
     /// Dismiss an interrupted run and remove it from the recovery list only
@@ -576,6 +653,33 @@ mod tests {
 
     fn json_line(event: &RunEvent) -> String {
         format!("{}\n", serde_json::to_string(event).unwrap())
+    }
+
+    /// The desktop app and the CLI share one journal. Starting `oxfuzz ci`
+    /// while an `oxfuzz kernel` campaign ran replayed the campaign's open
+    /// event as interrupted and marked the live run Failed. A run whose owner
+    /// still holds its lock is live, not interrupted.
+    #[test]
+    fn a_run_another_live_process_owns_is_not_interrupted() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal = dir.path().join("run_journal.jsonl");
+        let owner = RunJournal::open(wal.clone());
+        let live = Uuid::new_v4();
+        owner.open_run(live, Path::new("/p"), "kernel", EngineKind::Syzkaller);
+
+        let other_process = RunJournal::open(wal.clone());
+        assert!(
+            other_process.interrupted().is_empty(),
+            "a live run is not interrupted: {:?}",
+            other_process.interrupted()
+        );
+
+        // The owner dies without closing the run: its lock goes with it.
+        drop(owner);
+        let after_loss = RunJournal::open(wal);
+        let interrupted = after_loss.interrupted();
+        assert_eq!(interrupted.len(), 1);
+        assert_eq!(interrupted[0].run_id, live.to_string());
     }
 
     #[test]

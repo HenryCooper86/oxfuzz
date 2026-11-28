@@ -3,6 +3,26 @@
 use hf_core::crash::CrashKind;
 use sha2::{Digest, Sha256};
 
+/// The line a sandbox replay appends when the target was killed at the
+/// sandbox memory limit (exit 137) without printing a sanitizer report. A
+/// cgroup kill leaves no output of its own, so without it such inputs look
+/// like replays that showed nothing.
+pub const OOM_KILL_MARKER: &str = "oxfuzz: killed at the sandbox memory limit (out of memory)";
+
+/// The one signature every memory-limit kill shares: they carry no frames, and
+/// one finding per input would list the same resource-exhaustion class many
+/// times over.
+const OOM_KILL_SIGNATURE: &str = "out-of-memory-kill";
+
+/// Whether a log holds a sanitizer report, which outranks the kill marker.
+fn reports_sanitizer(log: &str) -> bool {
+    log.contains("ERROR: AddressSanitizer")
+        || log.contains("ERROR: MemorySanitizer")
+        || log.contains("WARNING: ThreadSanitizer")
+        || log.contains("runtime error:")
+        || log.contains("ERROR: libFuzzer")
+}
+
 /// Classify a crash log.
 ///
 /// Returns `(CrashKind, stack_signature, summary)` where `stack_signature`
@@ -14,6 +34,15 @@ use sha2::{Digest, Sha256};
 /// "no signature -> keep all" path instead.
 #[must_use]
 pub fn classify(log: &str) -> (CrashKind, String, String) {
+    if log.contains(OOM_KILL_MARKER) && !reports_sanitizer(log) {
+        return (
+            CrashKind::Other,
+            OOM_KILL_SIGNATURE.to_owned(),
+            "out of memory: the input drove the target past the sandbox memory limit and \
+             the kernel killed it before any sanitizer report"
+                .to_owned(),
+        );
+    }
     let kind = detect_kind(log);
     let frames = extract_frames(log, 3);
     let sig = if frames.is_empty() {
@@ -55,6 +84,7 @@ pub fn looks_like_crash(log: &str) -> bool {
         .join("\n")
         .to_ascii_lowercase();
     l.contains("sanitizer")
+        || log.contains(OOM_KILL_MARKER)
         || l.contains("runtime error")
         || l.contains("summary:")
         || l.contains("deadly signal")
@@ -486,6 +516,24 @@ const ATHERIS_EXCEPTION_MARK: &str = "=== Uncaught Python exception: ===";
 const HONGGFUZZ_DESCRIPTION_FIELD: &str = "DESCRIPTION:";
 
 fn extract_summary(log: &str, kind: CrashKind) -> String {
+    // libFuzzer's resource limits are reported as its own error, not a
+    // sanitizer's; name them instead of falling through to "Other".
+    if let Some(detail) = log.lines().find_map(|line| {
+        line.split_once("ERROR: libFuzzer: out-of-memory")
+            .map(|(_, rest)| {
+                let rest = rest.trim();
+                rest.strip_prefix('(')
+                    .and_then(|inner| inner.strip_suffix(')'))
+                    .unwrap_or(rest)
+                    .to_owned()
+            })
+    }) {
+        return if detail.is_empty() {
+            "out of memory".to_owned()
+        } else {
+            format!("out of memory: {detail}")
+        };
+    }
     if kind == CrashKind::Panic {
         // A Go panic leads with `panic: <message>`; a Python traceback ends with
         // the exception line (`ExcType: <message>`), which is the last non-empty
@@ -560,6 +608,32 @@ fn extract_summary(log: &str, kind: CrashKind) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_libfuzzer_out_of_memory_report_is_named_as_such() {
+        // libpng under libFuzzer: an oom- artifact replayed to "Other crash
+        // detected", which said nothing about what happened.
+        let log = "==1== ERROR: libFuzzer: out-of-memory (malloc(4294967296))\n\
+                   To change the out-of-memory limit use -rss_limit_mb=<N>\n\
+                       #0 0x5d in malloc\n\
+                       #1 0x7f in png_malloc_base /work/pngmem.c:76:11\n\
+                   SUMMARY: libFuzzer: out-of-memory\n";
+        let (_, _, summary) = super::classify(log);
+        assert_eq!(summary, "out of memory: malloc(4294967296)");
+    }
+
+    #[test]
+    fn a_replay_killed_at_the_memory_limit_is_one_out_of_memory_finding() {
+        // LibTIFF 4.0.4 under AFL++: 19 inputs allocate past the sandbox's
+        // memory and are killed with no sanitizer report. Frameless, each
+        // kept its own empty signature and became a separate finding.
+        let log = format!("\n{}\n", super::OOM_KILL_MARKER);
+        let (kind, sig, summary) = super::classify(&log);
+        assert_eq!(kind, hf_core::crash::CrashKind::Other);
+        assert_eq!(sig, "out-of-memory-kill");
+        assert!(summary.contains("out of memory"), "{summary}");
+        assert!(super::looks_like_crash(&log));
+    }
+
     use super::{classify, detect_kind, looks_like_crash};
     use hf_core::crash::CrashKind;
 

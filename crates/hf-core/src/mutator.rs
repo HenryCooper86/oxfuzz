@@ -34,4 +34,21 @@ pub struct MutatorSelfTest {
     pub trim_observed: bool,
     pub log: String,
     pub log_truncated: bool,
+    /// The report line of the crash in the target the run ended on, after
+    /// the mutation callback ran, with no mutator callback on the crash
+    /// stack. A target with known findings reaches its bug again through
+    /// mutated inputs; that is a finding about the target, not a fault of
+    /// the mutator. `None` when the run did not end that way, and on records
+    /// written before this was observed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_finding: Option<String>,
+}
+
+impl MutatorSelfTest {
+    /// Whether this self-test qualifies the mutator: its callback ran, and
+    /// the run either ended cleanly or on a target finding.
+    #[must_use]
+    pub fn passed(&self) -> bool {
+        self.mutation_observed && (self.exit_code == 0 || self.target_finding.is_some())
+    }
 }

@@ -27,6 +27,13 @@ export interface BinaryFuzzOptions {
   compcov?: boolean;
   /** Loop on one function instead of starting a process per input; file input only. */
   persistent?: BinaryPersistent;
+  /** Arguments the target runs with, in order; `@@` marks the input file. */
+  targetArgs?: string[];
+}
+
+/** Split the target-arguments field into arguments: whitespace separates them, as typed. */
+export function parseTargetArgs(text: string): string[] {
+  return text.split(/\s+/).filter((arg) => arg.length > 0);
 }
 
 /** Persistent QEMU mode (`--persistent`): the loop entry and how many inputs one process takes. */
@@ -91,6 +98,8 @@ export interface BinaryFuzzOutcome {
   /** The persistent loop entry, as resolved (for example "main (target+0x9d8)"). */
   persistent_entry?: string | null;
   stability_pct?: number | null;
+  /** The arguments the target ran with; absent when it ran with none. */
+  target_args?: string[];
 }
 
 export interface BinaryProfile {

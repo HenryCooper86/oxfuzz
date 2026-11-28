@@ -240,8 +240,10 @@ pub(crate) struct HarnessArgs {
     /// approval.
     #[arg(long)]
     pub(crate) engine: String,
-    /// Target language. Defaults to c. Only languages with a harness path
-    /// (c, cpp, rust) are accepted; go and python are discovery-only.
+    /// Target language: c (default), cpp, rust, go, python, java, or
+    /// javascript. Go, Python, Java and JavaScript use their own engines
+    /// (go-native, atheris, jazzer, jazzer-js), which the operator enables
+    /// under `[fuzzing] enabled_engines`.
     #[arg(long, default_value = "c")]
     pub(crate) lang: String,
     #[command(flatten)]
@@ -277,10 +279,8 @@ pub(crate) struct HarnessArgs {
         conflicts_with_all = ["refine", "draft_only", "persistent", "cmplog", "sanitizer"]
     )]
     pub(crate) adopt: Option<uuid::Uuid>,
-    /// Explicitly approve the revision for full campaigns after a clean
-    /// persisted smoke run.
-    #[arg(long)]
-    pub(crate) promote: bool,
+    #[command(flatten)]
+    pub(crate) promotion: HarnessPromotionArgs,
     /// Smoke-qualify WITHOUT the independent LLM pre-execution review, for
     /// offline work or hosts without a provider key. The bypass is persisted
     /// as a marked review record and a guardrail audit row, and human
@@ -291,6 +291,31 @@ pub(crate) struct HarnessArgs {
     pub(crate) no_llm_review: bool,
     #[command(flatten)]
     pub(crate) build: HarnessBuildArgs,
+}
+
+/// How `oxfuzz harness` approves a revision for full campaigns: after a clean
+/// smoke run, or with the crashes its smoke run found kept as known findings.
+#[derive(Debug, clap::Args)]
+pub(crate) struct HarnessPromotionArgs {
+    /// Explicitly approve the revision for full campaigns after a clean
+    /// persisted smoke run.
+    #[arg(long)]
+    pub(crate) promote: bool,
+    /// Approve the active revision for full campaigns while keeping the
+    /// crashes its smoke run found as known findings. Nothing is drafted,
+    /// compiled or run: it promotes the revision the last `oxfuzz harness`
+    /// smoke-qualified, after you inspected those crashes with `oxfuzz
+    /// triage`. Refused unless that smoke run crashed; a clean smoke run is
+    /// approved with `--promote`. The approval is recorded as a known-findings
+    /// approval, so the revision is never reported as crash-free.
+    #[arg(
+        long,
+        conflicts_with_all = [
+            "promote", "refine", "adopt", "draft_only", "json", "repair",
+            "no_llm_review", "persistent", "cmplog", "sanitizer"
+        ]
+    )]
+    pub(crate) promote_with_findings: bool,
 }
 
 /// The build-variant selection of `oxfuzz harness`: which sanitizer the
@@ -497,8 +522,9 @@ pub(crate) struct CampaignArgs {
     /// Fuzzing engine.
     #[arg(long, default_value = "libfuzzer")]
     pub(crate) engine: String,
-    /// Target language. Defaults to c. Only languages with a harness path
-    /// (c, cpp, rust) can run a campaign; go and python are discovery-only.
+    /// Target language: c (default), cpp, rust, go, python, java, or
+    /// javascript. Go, Python, Java and JavaScript campaigns use their own
+    /// engines, which the operator enables under `[fuzzing] enabled_engines`.
     #[arg(long, default_value = "c")]
     pub(crate) lang: String,
     /// Per-iteration fuzz duration in seconds.
@@ -969,6 +995,12 @@ pub(crate) struct BinaryArgs {
     /// In persistent mode, also restore writable memory each iteration.
     #[arg(long, requires = "persistent")]
     pub(crate) restore_memory: bool,
+    /// One argument the target runs with, after its program name; repeat it
+    /// for several, in order. For file input `@@` marks where the input file
+    /// goes, as in `--arg -D --arg -j --arg @@`; without one the file comes
+    /// last. Fuzzing, replay, and minimization all use the same arguments.
+    #[arg(long = "arg", value_name = "ARG", allow_hyphen_values = true)]
+    pub(crate) target_args: Vec<String>,
     /// Print the result as JSON.
     #[arg(long)]
     pub(crate) json: bool,
@@ -2553,6 +2585,88 @@ mod cmplog_cli_tests {
             "not-a-uuid",
         ])
         .is_err());
+    }
+
+    #[cfg(feature = "binary-only-fuzzing")]
+    #[test]
+    fn binary_takes_target_arguments_in_order_including_dashes() {
+        let parsed = Cli::try_parse_from([
+            "oxfuzz",
+            "binary",
+            "/p",
+            "--binary",
+            "/p/tiffinfo",
+            "--arg",
+            "-D",
+            "--arg",
+            "-j",
+            "--arg",
+            "@@",
+        ])
+        .unwrap();
+        let Commands::Binary(crate::args::BinaryArgs { target_args, .. }) = parsed.command else {
+            panic!("expected binary");
+        };
+        assert_eq!(target_args, ["-D", "-j", "@@"]);
+    }
+
+    #[test]
+    fn harness_promote_with_findings_acts_alone_on_the_active_revision() {
+        let parsed = Cli::try_parse_from([
+            "oxfuzz",
+            "harness",
+            "/p",
+            "--target",
+            "t",
+            "--engine",
+            "libfuzzer",
+            "--promote-with-findings",
+        ])
+        .unwrap();
+        let Commands::Harness(crate::args::HarnessArgs {
+            promotion:
+                crate::args::HarnessPromotionArgs {
+                    promote_with_findings,
+                    promote,
+                },
+            ..
+        }) = parsed.command
+        else {
+            panic!("expected harness");
+        };
+        assert!(promote_with_findings);
+        assert!(!promote);
+
+        // It drafts, compiles and runs nothing, so every flag that would
+        // shape a new revision or a smoke run is refused rather than ignored.
+        for conflicting in [
+            &["--promote"][..],
+            &["--refine"],
+            &["--adopt", "6f2c1f2e-8a0e-4c2b-9d4e-0d1f6b3a9c11"],
+            &["--draft-only"],
+            &["--json"],
+            &["--repair", "1"],
+            &["--no-llm-review"],
+            &["--persistent"],
+            &["--cmplog"],
+            &["--sanitizer", "undefined"],
+        ] {
+            let mut argv = vec![
+                "oxfuzz",
+                "harness",
+                "/p",
+                "--target",
+                "t",
+                "--engine",
+                "libfuzzer",
+                "--promote-with-findings",
+            ];
+            argv.extend_from_slice(conflicting);
+            assert!(
+                Cli::try_parse_from(&argv).is_err(),
+                "--promote-with-findings must refuse {conflicting:?}"
+            );
+        }
     }
 
     #[test]

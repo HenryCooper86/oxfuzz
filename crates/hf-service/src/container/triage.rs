@@ -177,7 +177,15 @@ impl ServiceContainer {
             if let Some(retained) = &same_input {
                 // Keep a CASR classification over a later plain-replay one:
                 // the fallback's signature is a digest of raw sanitizer text.
-                if retained.casr.is_some() && crash.casr.is_none() {
+                // Not one where CASR observed no crash: that row was never a
+                // classification, and keeping it would pin its "Undefined"
+                // class over what the replay found.
+                if retained
+                    .casr
+                    .as_ref()
+                    .is_some_and(|casr| !casr_report_is_unobserved(casr))
+                    && crash.casr.is_none()
+                {
                     crash.stack_signature.clone_from(&retained.stack_signature);
                     crash.kind = retained.kind;
                     crash.summary.clone_from(&retained.summary);
@@ -212,22 +220,26 @@ impl ServiceContainer {
         run: RunRecord,
         policy: AiPolicy,
     ) -> Result<Vec<hf_core::crash::Crash>, ClassifiedError> {
-        const TRIAGE_BUDGET: std::time::Duration = std::time::Duration::from_mins(5);
-
         if self.scan_control.is_some() {
             return self
-                .triage_run_record_inner(project, target, run, AiPolicy::Off)
+                .triage_run_record_inner(project, target, run, AiPolicy::Off, None)
                 .await;
         }
+        // The budget bounds the optional enrichment (minimization, bug
+        // reports): past it, triage returns the classified crashes it has
+        // instead of losing them. The hard limit is a backstop for the
+        // sandbox phases, which one enrichment step can overrun by its own
+        // limit.
+        let deadline = tokio::time::Instant::now() + TRIAGE_BUDGET;
         tokio::time::timeout(
-            TRIAGE_BUDGET,
-            self.triage_run_record_inner(project, target, run, policy),
+            TRIAGE_BUDGET + TRIAGE_HARD_LIMIT_GRACE,
+            self.triage_run_record_inner(project, target, run, policy, Some(deadline)),
         )
         .await
         .map_err(|_| {
             ClassifiedError::Sandbox(format!(
-                "triage exceeded its {} second end-to-end budget",
-                TRIAGE_BUDGET.as_secs()
+                "triage exceeded its {} second end-to-end limit",
+                (TRIAGE_BUDGET + TRIAGE_HARD_LIMIT_GRACE).as_secs()
             ))
         })?
     }
@@ -242,6 +254,7 @@ impl ServiceContainer {
         target: &str,
         run: RunRecord,
         policy: AiPolicy,
+        deadline: Option<tokio::time::Instant>,
     ) -> Result<Vec<hf_core::crash::Crash>, ClassifiedError> {
         /// Cap on LLM bug-report drafts per triage pass: a run may surface many
         /// distinct bugs, and one report each would fan out into hundreds of LLM
@@ -359,6 +372,7 @@ impl ServiceContainer {
         }
 
         if self.scan_control.is_some() {
+            self.retire_unobserved_casr_rows(run_id, &deduped).await?;
             self.scan_progress(|progress| progress.findings = deduped.len());
             let _ = run_binary_path(&workspace, &run, target)?;
             if self.scan_cancelled() {
@@ -378,6 +392,7 @@ impl ServiceContainer {
                 &run_binary,
                 &mut deduped,
                 &mut logs,
+                deadline,
             )
             .await?;
         }
@@ -415,7 +430,18 @@ impl ServiceContainer {
                     .await
                     .map_err(|error| ClassifiedError::Storage(error.to_string()))?;
                 let unique = deduped.len();
+                let mut skipped_for_budget = 0_usize;
                 for crash in deduped.iter_mut().take(MAX_BUG_REPORT_DRAFTS) {
+                    // A report retained from an earlier pass is kept, so a
+                    // rerun after a budget stop drafts only what is missing.
+                    if crash.bug_report.is_some() {
+                        continue;
+                    }
+                    let Some(window) = enrichment_window(deadline, tokio::time::Instant::now())
+                    else {
+                        skipped_for_budget += 1;
+                        continue;
+                    };
                     let log = logs
                         .get(&crash.input_path)
                         .filter(|l| !l.trim().is_empty())
@@ -429,10 +455,16 @@ impl ServiceContainer {
                         harness_source: source_context.as_deref(),
                         candidate: targets.iter().find(|t| t.id == crash.target_id),
                     };
-                    match self
-                        .draft_bug_report(store, Arc::clone(&pool), crash, &evidence)
-                        .await
-                    {
+                    let drafted = tokio::time::timeout(
+                        window,
+                        self.draft_bug_report(store, Arc::clone(&pool), crash, &evidence),
+                    )
+                    .await
+                    .unwrap_or_else(|_| {
+                        skipped_for_budget += 1;
+                        None
+                    });
+                    match drafted {
                         Some(report) => crash.bug_report = Some(report),
                         None if policy == AiPolicy::Require => {
                             return Err(ClassifiedError::Provider(format!(
@@ -442,6 +474,20 @@ impl ServiceContainer {
                         }
                         None => {}
                     }
+                }
+                if skipped_for_budget > 0 {
+                    if policy == AiPolicy::Require {
+                        return Err(ClassifiedError::Provider(format!(
+                            "bug-report drafting was required but {skipped_for_budget} report(s) \
+                             did not finish within the {} second triage budget; rerun triage \
+                             to draft the rest",
+                            TRIAGE_BUDGET.as_secs()
+                        )));
+                    }
+                    tracing::warn!(
+                        "triage budget reached: {skipped_for_budget} crash(es) kept without a \
+                         drafted report; rerun triage to draft them"
+                    );
                 }
                 if unique > MAX_BUG_REPORT_DRAFTS {
                     tracing::info!(
@@ -463,6 +509,7 @@ impl ServiceContainer {
                 .await
                 .map_err(|error| ClassifiedError::Storage(error.to_string()))?;
         }
+        self.retire_unobserved_casr_rows(run_id, &deduped).await?;
         // Triage completed with classified crashes: fire event-driven
         // schedules listening for `crash.found`.
         if !deduped.is_empty() {
@@ -481,6 +528,37 @@ impl ServiceContainer {
     }
 
     /// Minimize immutable run evidence while the caller owns the workspace lease.
+    /// Remove the run's rows [`unobserved_casr_rows_to_retire`] selects,
+    /// once this pass has persisted `kept`.
+    async fn retire_unobserved_casr_rows(
+        &self,
+        run_id: Uuid,
+        kept: &[hf_core::crash::Crash],
+    ) -> Result<(), ClassifiedError> {
+        let Some(store) = &self.store else {
+            return Ok(());
+        };
+        let kept: std::collections::HashSet<Uuid> = kept.iter().map(|crash| crash.id).collect();
+        let retained = store
+            .list_crashes_by_run(run_id)
+            .await
+            .map_err(|error| ClassifiedError::Storage(error.to_string()))?;
+        let retired = unobserved_casr_rows_to_retire(&retained, &kept);
+        for id in &retired {
+            store
+                .delete_crash(&id.to_string())
+                .await
+                .map_err(|error| ClassifiedError::Storage(error.to_string()))?;
+        }
+        if !retired.is_empty() {
+            tracing::info!(
+                "retired {} finding(s) built from CASR reports that observed no crash",
+                retired.len()
+            );
+        }
+        Ok(())
+    }
+
     async fn minimize_triaged_crashes_locked(
         &self,
         workspace: &Path,
@@ -489,6 +567,7 @@ impl ServiceContainer {
         binary: &Path,
         crashes: &mut [hf_core::crash::Crash],
         logs: &mut std::collections::HashMap<PathBuf, String>,
+        deadline: Option<tokio::time::Instant>,
     ) -> Result<(), ClassifiedError> {
         use crate::crash_minimization::{prepare, PreparedMinimization, MAX_CRASH_MINIMIZATIONS};
 
@@ -515,6 +594,13 @@ impl ServiceContainer {
         // under; the minimizer must judge executions by the same clock.
         let input_timeout = run.config.as_ref().and_then(|config| config.input_timeout);
         for crash in crashes.iter_mut().take(MAX_CRASH_MINIMIZATIONS) {
+            if enrichment_window(deadline, tokio::time::Instant::now()).is_none() {
+                tracing::warn!(
+                    "triage budget reached during minimization; the remaining crashes keep \
+                     their original inputs"
+                );
+                break;
+            }
             let original = crash.input_path.clone();
             let prepared = match prepare(
                 workspace,
@@ -694,12 +780,29 @@ impl ServiceContainer {
             tracing::warn!(%error, "coverage measurement refused by the approval gate");
             return None;
         }
-        let pipeline = "clang -g -O1 -fsanitize=fuzzer -fprofile-instr-generate \
-             -fcoverage-mapping *.c -o fuzz_cov 2>/dev/null \
+        // Build what the active revision's fuzzing build compiled (its
+        // project flags and linked project units), so a real project with a
+        // generated config header and several `main`s builds for coverage.
+        // A workspace without a recorded revision keeps the self-contained
+        // single-directory build.
+        let build = match self.coverage_build_for_active_revision(workspace).await {
+            Some(script) => script,
+            None => "clang -g -O1 -fsanitize=fuzzer -fprofile-instr-generate \
+                     -fcoverage-mapping *.c -o fuzz_cov"
+                .to_owned(),
+        };
+        // The export goes to a workspace file, not stdout: a real project's
+        // export runs to megabytes, past the sandbox's captured-output cap,
+        // and a truncated JSON parses as "no line data".
+        let pipeline = format!(
+            "rm -f {COVERAGE_EXPORT_FILE}; ( {build} ) >/dev/null 2>&1 \
              && LLVM_PROFILE_FILE=cov.profraw ./fuzz_cov -runs=0 corpus 2>/dev/null; \
              llvm-profdata merge -sparse cov.profraw -o cov.profdata 2>/dev/null \
-             && llvm-cov export ./fuzz_cov -instr-profile=cov.profdata 2>/dev/null";
-        let cmd = vec!["sh".to_owned(), "-c".to_owned(), pipeline.to_owned()];
+             && llvm-cov export ./fuzz_cov -instr-profile=cov.profdata \
+                > {COVERAGE_EXPORT_FILE} 2>/dev/null"
+        );
+        tracing::debug!(%pipeline, "source-coverage pipeline");
+        let cmd = vec!["sh".to_owned(), "-c".to_owned(), pipeline];
         let limits = hf_core::runtime::ResourceLimits {
             max_mem_mb: 4096,
             max_cpus: 2,
@@ -712,7 +815,7 @@ impl ServiceContainer {
                 if result.termination == hf_core::runtime::CommandTermination::Completed
                     && result.exit_code == 0 =>
             {
-                Some(result.stdout)
+                coverage_export_output(workspace, result.stdout)
             }
             Ok(result) => {
                 tracing::warn!(
@@ -727,6 +830,14 @@ impl ServiceContainer {
                 None
             }
         }
+    }
+
+    /// The coverage build script of the workspace's active harness revision,
+    /// when one is recorded and has an LLVM source-coverage build.
+    async fn coverage_build_for_active_revision(&self, workspace: &Path) -> Option<String> {
+        let id = super::harness_workspace::read_current_harness_id(workspace)?;
+        let harness = self.store.as_ref()?.get_harness(id).await.ok()??;
+        hf_harness::generator::coverage_build_script(&harness, workspace, "fuzz_cov")
     }
 
     /// Replay a single crash input through the compiled harness in the sandbox
@@ -771,7 +882,7 @@ impl ServiceContainer {
         match self.scan_command(&cmd, workspace, &limits, &sandbox).await {
             // A crashing input exits non-zero; the trace is the useful output.
             Ok(result) if result.termination == hf_core::runtime::CommandTermination::Completed => {
-                Some(format!("{}\n{}", result.stdout, result.stderr))
+                Some(replay_log(&result.stdout, &result.stderr, result.exit_code))
             }
             Ok(result) => {
                 tracing::warn!(termination = ?result.termination, "crash reproduction did not complete");
@@ -1047,6 +1158,21 @@ impl ServiceContainer {
         let reports = collect_casreps(&casr_host);
         if reports.is_empty() && !self.scan_cancelled() {
             tracing::info!("casr produced no reports; falling back to built-in triage");
+            return Ok(None);
+        }
+        // A report with no stack, crash line, or class is CASR saying it never
+        // saw the crash (an input killed at the memory limit leaves nothing to
+        // parse). Ingesting it would invent a finding per input; the built-in
+        // path replays each input and classifies what actually happens.
+        let unobserved = reports
+            .iter()
+            .filter(|(_, casr, _)| casr_report_is_unobserved(casr))
+            .count();
+        if unobserved > 0 && !self.scan_cancelled() {
+            tracing::info!(
+                "casr observed no crash for {unobserved} of {} report(s); falling back to built-in triage",
+                reports.len()
+            );
             return Ok(None);
         }
         // The actual crash inputs, including AFL++'s nested
@@ -1926,9 +2052,237 @@ impl ServiceContainer {
 /// left out of the check: honggfuzz names a crash file after the signal that
 /// ended the run (`SIGABRT.PC...`), and its standalone driver echoes the path
 /// of the input it was given.
+/// The log of one sandbox replay: its output, plus the memory-limit marker
+/// when the kernel killed it (exit 137) before any sanitizer reported, since a
+/// cgroup kill prints nothing of its own.
+fn replay_log(stdout: &str, stderr: &str, exit_code: i32) -> String {
+    let mut log = format!("{stdout}\n{stderr}");
+    if exit_code == 137 && !hf_crash::looks_like_crash(&log) {
+        log.push('\n');
+        log.push_str(hf_crash::OOM_KILL_MARKER);
+    }
+    log
+}
+
+/// Whether CASR wrote a report without observing a crash.
+fn casr_report_is_unobserved(casr: &hf_core::crash::CasrReport) -> bool {
+    casr.stack.is_empty()
+        && casr.crashline.trim().is_empty()
+        && matches!(casr.severity_short.trim(), "" | "Undefined")
+}
+
+/// The run's retained rows a full triage pass should retire: built from a
+/// CASR report that observed no crash (never a classification), not produced
+/// again by this pass, and carrying no operator work -- no control replay, no
+/// minimized input. A model report drafted for such a row describes nothing
+/// that happened, so it does not keep the row. Earlier releases ingested such
+/// reports as one bogus "Undefined" finding per input.
+fn unobserved_casr_rows_to_retire(
+    retained: &[hf_core::crash::Crash],
+    kept: &std::collections::HashSet<Uuid>,
+) -> Vec<Uuid> {
+    retained
+        .iter()
+        .filter(|row| !kept.contains(&row.id))
+        .filter(|row| row.casr.as_ref().is_some_and(casr_report_is_unobserved))
+        .filter(|row| row.control_replay.is_none() && !row.minimized)
+        .map(|row| row.id)
+        .collect()
+}
+
+#[cfg(test)]
+mod unobserved_casr_retirement_tests {
+    fn row(casr_short: Option<&str>) -> hf_core::crash::Crash {
+        hf_core::crash::Crash {
+            id: uuid::Uuid::new_v4(),
+            run_id: uuid::Uuid::nil(),
+            target_id: uuid::Uuid::nil(),
+            input_path: std::path::PathBuf::from("/w/out/default/crashes/id:000001"),
+            stack_signature: String::new(),
+            kind: hf_core::crash::CrashKind::Ubsan,
+            summary: "Undefined at ".to_owned(),
+            minimized: false,
+            reproduction: None,
+            control_replay: None,
+            bug_report: None,
+            casr: casr_short.map(|short| hf_core::crash::CasrReport {
+                severity: hf_core::crash::CrashSeverity::default(),
+                severity_short: short.to_owned(),
+                crashline: String::new(),
+                stack: Vec::new(),
+                cluster: None,
+            }),
+            origin: hf_core::crash::CrashOrigin::default(),
+        }
+    }
+
+    #[test]
+    fn only_unreviewed_rows_casr_never_observed_are_retired() {
+        let bogus = row(Some("Undefined"));
+        let mut drafted = row(Some("Undefined"));
+        drafted.bug_report = Some(hf_core::crash::BugReport {
+            title: "Undefined at ".to_owned(),
+            summary: "Undefined at ".to_owned(),
+            repro_steps: String::new(),
+            stack: String::new(),
+            severity_guess: "uncertain".to_owned(),
+            root_cause: None,
+            suggested_fix: None,
+        });
+        let kept_row = row(Some("Undefined"));
+        let mut minimized = row(Some("Undefined"));
+        minimized.minimized = true;
+        let real = row(Some("heap-buffer-overflow(write)"));
+        let plain = row(None);
+        let kept: std::collections::HashSet<_> = [kept_row.id].into_iter().collect();
+
+        let retired = super::unobserved_casr_rows_to_retire(
+            &[
+                bogus.clone(),
+                drafted.clone(),
+                kept_row,
+                minimized,
+                real,
+                plain,
+            ],
+            &kept,
+        );
+
+        assert_eq!(retired, vec![bogus.id, drafted.id]);
+    }
+}
+
+#[cfg(test)]
+mod replay_classification_tests {
+    #[test]
+    fn a_memory_limit_kill_is_marked_and_a_sanitizer_report_is_not() {
+        let killed = super::replay_log("", "", 137);
+        assert!(killed.contains(hf_crash::OOM_KILL_MARKER));
+        let (_, signature, _) = hf_crash::classify(&killed);
+        assert_eq!(signature, "out-of-memory-kill");
+
+        let asan = "==1==ERROR: AddressSanitizer: heap-buffer-overflow\nSUMMARY: AddressSanitizer";
+        assert!(!super::replay_log(asan, "", 137).contains(hf_crash::OOM_KILL_MARKER));
+        assert!(!super::replay_log("", "", 1).contains(hf_crash::OOM_KILL_MARKER));
+    }
+}
+
 fn replay_reports_a_fault(log: &str, input: &Path) -> bool {
     match input.file_name().and_then(|name| name.to_str()) {
         Some(name) if !name.is_empty() => hf_crash::looks_like_crash(&log.replace(name, "")),
         _ => hf_crash::looks_like_crash(log),
+    }
+}
+
+/// The workspace file the source-coverage pipeline writes its export to.
+const COVERAGE_EXPORT_FILE: &str = "cov.json";
+
+/// Largest coverage export read back from the workspace. A large C project's
+/// full export is tens of megabytes; past this the measurement is refused
+/// rather than read without bound.
+const MAX_COVERAGE_EXPORT_BYTES: u64 = 256 * 1024 * 1024;
+
+/// The export a finished pipeline produced: the workspace file when the
+/// sandbox wrote one (read with a size cap, then removed), else the captured
+/// stdout (a runtime that writes no files, as in tests).
+fn coverage_export_output(workspace: &Path, stdout: String) -> Option<String> {
+    let path = workspace.join(COVERAGE_EXPORT_FILE);
+    let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+        return Some(stdout);
+    };
+    let read = if !metadata.is_file() {
+        tracing::warn!(path = %path.display(), "coverage export is not a regular file");
+        None
+    } else if metadata.len() > MAX_COVERAGE_EXPORT_BYTES {
+        tracing::warn!(
+            bytes = metadata.len(),
+            "coverage export exceeds its size cap"
+        );
+        None
+    } else {
+        std::fs::read_to_string(&path).ok()
+    };
+    let _ = std::fs::remove_file(&path);
+    read
+}
+
+#[cfg(test)]
+mod coverage_export_output_tests {
+    use super::{coverage_export_output, COVERAGE_EXPORT_FILE};
+
+    #[test]
+    fn the_workspace_file_wins_over_captured_stdout_and_is_removed() {
+        let workspace = tempfile::tempdir().unwrap();
+        let big = format!("{{\"data\":[{}]}}", "0,".repeat(700_000) + "0");
+        std::fs::write(workspace.path().join(COVERAGE_EXPORT_FILE), &big).unwrap();
+        let read = coverage_export_output(workspace.path(), "{\"trunc".to_owned());
+        assert_eq!(
+            read.as_deref(),
+            Some(big.as_str()),
+            "the full export, past 1 MiB"
+        );
+        assert!(!workspace.path().join(COVERAGE_EXPORT_FILE).exists());
+    }
+
+    #[test]
+    fn without_a_file_the_captured_stdout_is_the_export() {
+        let workspace = tempfile::tempdir().unwrap();
+        assert_eq!(
+            coverage_export_output(workspace.path(), "{}".to_owned()).as_deref(),
+            Some("{}")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_export_is_refused() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        std::os::unix::fs::symlink(outside.path(), workspace.path().join(COVERAGE_EXPORT_FILE))
+            .unwrap();
+        assert!(coverage_export_output(workspace.path(), "{}".to_owned()).is_none());
+    }
+}
+
+/// The enrichment budget of one triage pass (minimization and bug reports).
+const TRIAGE_BUDGET: std::time::Duration = std::time::Duration::from_mins(5);
+
+/// How far past [`TRIAGE_BUDGET`] a pass may run before it is cut off: one
+/// minimization (two minutes in the sandbox) plus its confirmation replays.
+const TRIAGE_HARD_LIMIT_GRACE: std::time::Duration = std::time::Duration::from_mins(3);
+
+/// Time left for the next enrichment step, or `None` once the deadline has
+/// passed. No deadline means no limit.
+fn enrichment_window(
+    deadline: Option<tokio::time::Instant>,
+    now: tokio::time::Instant,
+) -> Option<std::time::Duration> {
+    match deadline {
+        None => Some(std::time::Duration::MAX),
+        Some(deadline) => {
+            let left = deadline.saturating_duration_since(now);
+            (!left.is_zero()).then_some(left)
+        }
+    }
+}
+
+#[cfg(test)]
+mod enrichment_window_tests {
+    use super::enrichment_window;
+    use std::time::Duration;
+
+    #[test]
+    fn enrichment_stops_at_the_deadline_and_never_without_one() {
+        let now = tokio::time::Instant::now();
+        assert_eq!(
+            enrichment_window(Some(now + Duration::from_secs(30)), now),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(enrichment_window(Some(now), now), None);
+        assert_eq!(
+            enrichment_window(Some(now), now + Duration::from_secs(1)),
+            None
+        );
+        assert_eq!(enrichment_window(None, now), Some(Duration::MAX));
     }
 }

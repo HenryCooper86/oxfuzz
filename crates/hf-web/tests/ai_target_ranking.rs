@@ -98,6 +98,15 @@ async fn rest_exposes_ranked_discovery_and_protects_its_project() {
         .as_array()
         .unwrap()
         .is_empty());
+    // Like `/discover`, the ranked result names files relative to the
+    // project the request names and discloses no other host path.
+    assert_eq!(
+        result["inventory"]["candidates"][0]["location"]["file"],
+        "parser.c"
+    );
+    let project_text = project.path().to_string_lossy().into_owned();
+    assert_no_host_path(&result, &project_text, "");
+    assert_no_host_path(&status, &project_text, "");
 
     let retry = app
         .clone()
@@ -149,4 +158,25 @@ async fn rest_exposes_ranked_discovery_and_protects_its_project() {
         .await
         .unwrap();
     assert_eq!(foreign_read.status(), StatusCode::FORBIDDEN);
+}
+
+/// Fail when any string under `value` other than a `project_root` names a path
+/// inside `project`.
+fn assert_no_host_path(value: &serde_json::Value, project: &str, key: &str) {
+    match value {
+        serde_json::Value::String(text) if key != "project_root" => {
+            assert!(!text.contains(project), "{key} discloses {text}");
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                assert_no_host_path(item, project, key);
+            }
+        }
+        serde_json::Value::Object(entries) => {
+            for (name, item) in entries {
+                assert_no_host_path(item, project, name);
+            }
+        }
+        _ => {}
+    }
 }

@@ -1171,6 +1171,12 @@ impl ServiceContainer {
         let store = self.store.as_ref().ok_or_else(|| {
             ClassifiedError::Validation("fuzz runs require the persistent service store".to_owned())
         })?;
+        if !historical
+            && engine == EngineKind::LibFuzzer
+            && approved_with_known_findings(store, qualified).await?
+        {
+            super::continue_past_known_findings(&mut config);
+        }
         #[cfg(feature = "proof-carrying")]
         super::function_coverage::configure(&mut config, qualified, false);
         let mut record = RunRecord::new(
@@ -3321,6 +3327,25 @@ impl ServiceContainer {
             .await
             .map_err(|error| ClassifiedError::Storage(error.to_string()))
     }
+}
+
+/// Whether the exact revision a campaign is about to run was approved with
+/// known smoke findings (`oxfuzz harness --promote-with-findings` or the
+/// desktop Harness step), as opposed to a clean promotion.
+async fn approved_with_known_findings(
+    store: &Store,
+    qualified: &Harness,
+) -> Result<bool, ClassifiedError> {
+    let Ok((_, source_sha256, binary_sha256)) = super::staging::qualification_evidence(qualified)
+    else {
+        return Ok(false);
+    };
+    Ok(store
+        .harness_approval(qualified.id, source_sha256, binary_sha256)
+        .await?
+        .is_some_and(|approval| {
+            approval.approval_kind == hf_storage::HarnessApprovalKind::KnownFindings
+        }))
 }
 
 #[cfg(test)]

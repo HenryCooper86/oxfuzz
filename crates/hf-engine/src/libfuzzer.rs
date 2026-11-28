@@ -48,13 +48,17 @@ pub fn build_run_args(
     args.push("-print_final_stats=1".to_owned());
     // An allocation above one runs libFuzzer's own multi-process mode: the
     // parent coordinates N children over the shared corpus directory,
-    // continues after a child crash (artifacts still land through
+    // continues after a child crash with `-ignore_crashes=1` (artifacts still land through
     // `-artifact_prefix`), and stops at `-max_total_time`. One CPU keeps the
     // historical single-process argv, because fork mode is a different
     // execution model even at N=1. Like the flag above, emitted before
     // `extra_args` so a caller can override it.
     if cfg.max_cpus > 1 {
         args.push(format!("-fork={}", cfg.max_cpus));
+        // Without this the fork-mode parent stops all jobs at the first child
+        // crash (libFuzzer's `-ignore_crashes` defaults to 0), so the
+        // continuation fork mode is chosen for would never happen.
+        args.push("-ignore_crashes=1".to_owned());
         // Fork children misreport leaks: after fork(2), heap chunks held only
         // by the parent's other threads are unreachable in the child, so both
         // libFuzzer's in-loop check and the exit-time LeakSanitizer report

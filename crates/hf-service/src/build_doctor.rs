@@ -72,11 +72,35 @@ pub struct BuildPlanRunOutcome {
     pub build_context: Option<hf_core::build::BuildContext>,
     pub diagnosis: ProjectBuildDiagnosis,
 }
+pub(crate) use crate::build_profiles::BUILD_STEP_CPUS;
 const MAX_SNAPSHOT_FILES: usize = 20_000;
 const MAX_SNAPSHOT_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_SNAPSHOT_BYTES: u64 = 512 * 1024 * 1024;
-const SNAPSHOT_SKIP_NAMES: [&str; 5] =
-    [".git", OXFUZZ_BUILD_DIR, "build", "node_modules", "target"];
+const SNAPSHOT_SKIP_NAMES: [&str; 3] = [".git", OXFUZZ_BUILD_DIR, "node_modules"];
+
+/// Directory names that are usually -- but not always -- build output.
+/// `LibTIFF`, for one, tracks `build/Makefile.am` and its build requires it, so
+/// these are left out only when [`is_build_output_tree`] recognizes them.
+const SNAPSHOT_BUILD_OUTPUT_NAMES: [&str; 2] = ["build", "target"];
+
+/// Files a generated build tree carries at its top: `CMake`, Ninja, Meson,
+/// Cargo (and other tools that mark caches with `CACHEDIR.TAG`), and an
+/// out-of-tree Autotools configure.
+const BUILD_OUTPUT_MARKERS: [&str; 6] = [
+    "CMakeCache.txt",
+    "build.ninja",
+    "meson-private",
+    "CACHEDIR.TAG",
+    ".rustc_info.json",
+    "config.status",
+];
+
+/// Whether `directory` is a generated build tree rather than project source.
+fn is_build_output_tree(directory: &Path) -> bool {
+    BUILD_OUTPUT_MARKERS
+        .iter()
+        .any(|marker| directory.join(marker).symlink_metadata().is_ok())
+}
 
 /// The link Bazel keeps inside a vendor directory, pointing into the output
 /// base of the machine that vendored.
@@ -160,6 +184,13 @@ fn stage_project_snapshot(
                 continue;
             }
             let source = entry.path();
+            if SNAPSHOT_BUILD_OUTPUT_NAMES
+                .iter()
+                .any(|candidate| name == std::ffi::OsStr::new(candidate))
+                && is_build_output_tree(&source)
+            {
+                continue;
+            }
             let destination = destination_dir.join(&name);
             let kind = entry.file_type().map_err(|error| {
                 ClassifiedError::Validation(format!(
@@ -416,6 +447,51 @@ mod snapshot_tests {
         stage_project_snapshot(project, staging.path())
             .map(|()| staging)
             .map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn a_build_directory_holding_project_sources_is_staged() {
+        // LibTIFF 4.0.4 tracks `build/Makefile.am`, and its top-level
+        // Makefile.am lists `build` in SUBDIRS: leaving the directory out
+        // fails `autoreconf` at its first step.
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir(project.path().join("build")).unwrap();
+        std::fs::write(
+            project.path().join("build/Makefile.am"),
+            "EXTRA_DIST = README\n",
+        )
+        .unwrap();
+        std::fs::create_dir(project.path().join("target")).unwrap();
+        std::fs::write(project.path().join("target/defs.h"), "#define X 1\n").unwrap();
+
+        let staging = staged(project.path()).unwrap();
+
+        assert!(staging.path().join("build/Makefile.am").is_file());
+        assert!(staging.path().join("target/defs.h").is_file());
+    }
+
+    #[test]
+    fn build_output_trees_are_still_left_out() {
+        let project = tempfile::tempdir().unwrap();
+        for (directory, marker) in [
+            ("build", "CMakeCache.txt"),
+            ("target", "CACHEDIR.TAG"),
+            ("out/build", "build.ninja"),
+        ] {
+            let tree = project.path().join(directory);
+            std::fs::create_dir_all(&tree).unwrap();
+            std::fs::write(tree.join(marker), "").unwrap();
+            std::fs::write(tree.join("stale.o"), "").unwrap();
+        }
+        std::fs::create_dir_all(project.path().join("node_modules/x")).unwrap();
+        std::fs::write(project.path().join("node_modules/x/i.js"), "").unwrap();
+
+        let staging = staged(project.path()).unwrap();
+
+        assert!(!staging.path().join("build").exists());
+        assert!(!staging.path().join("target").exists());
+        assert!(!staging.path().join("out/build").exists());
+        assert!(!staging.path().join("node_modules").exists());
     }
 
     #[test]

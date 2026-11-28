@@ -221,7 +221,8 @@ pub(crate) async fn cmd_fuzz(args: crate::args::FuzzArgs) -> anyhow::Result<()> 
             let Some(stop) = hf_service::smoke_crash_stop(&error) else {
                 return Err(error.into());
             };
-            return report_smoke_findings(&container, &project, &stop, ai, json).await;
+            return report_smoke_findings(&container, &project, &stop, engine.as_str(), ai, json)
+                .await;
         }
     };
     if json {
@@ -239,6 +240,7 @@ async fn report_smoke_findings(
     container: &hf_service::ServiceContainer,
     project: &Path,
     stop: &hf_service::SmokeCrashStop,
+    engine: &str,
     ai: AiOption,
     json: bool,
 ) -> anyhow::Result<()> {
@@ -264,7 +266,7 @@ async fn report_smoke_findings(
             crash.input_path.display()
         );
     }
-    for line in smoke_stop_next_steps(project, &stop.target) {
+    for line in smoke_stop_next_steps(project, &stop.target, engine) {
         println!("{line}");
     }
     Ok(())
@@ -273,20 +275,24 @@ async fn report_smoke_findings(
 fn smoke_stop_headline(target: &str, crashes: u32) -> String {
     let noun = if crashes == 1 { "crash" } else { "crashes" };
     format!(
-        "--- smoke test of '{target}' already found {crashes} {noun}: likely a real bug; triaging instead of promoting ---"
+        "--- smoke test of '{target}' already found {crashes} {noun}; triaging instead of promoting ---"
     )
 }
 
 /// What the operator can do after a crash-bearing smoke test. No campaign
 /// ran: this pipeline never promotes a crash-bearing harness by itself.
-fn smoke_stop_next_steps(project: &Path, target: &str) -> Vec<String> {
+fn smoke_stop_next_steps(project: &Path, target: &str, engine: &str) -> Vec<String> {
     vec![
         "[fuzz] no campaign ran: a harness whose smoke test crashes is never promoted automatically.".to_owned(),
         format!(
             "[fuzz] details:  oxfuzz triage {} --target {target}",
             project.display()
         ),
-        "[fuzz] to keep fuzzing past this bug, fix it and rerun, or approve the harness with known findings in the desktop app's Harness step.".to_owned(),
+        format!(
+            "[fuzz] to keep fuzzing past it, fix it and rerun, or approve the harness with its known findings: \
+             oxfuzz harness {} --target {target} --engine {engine} --promote-with-findings",
+            project.display()
+        ),
     ]
 }
 
@@ -304,17 +310,23 @@ mod tests {
         // test to find.
         let headline = smoke_stop_headline("decode_utf8", 1);
         assert!(
-            headline.contains("'decode_utf8' already found 1 crash:"),
+            headline.contains("'decode_utf8' already found 1 crash;"),
             "{headline}"
         );
         assert!(smoke_stop_headline("t", 3).contains("3 crashes"));
-        let steps = smoke_stop_next_steps(std::path::Path::new("/proj"), "decode_utf8").join("\n");
+        let steps =
+            smoke_stop_next_steps(std::path::Path::new("/proj"), "decode_utf8", "afl++").join("\n");
         assert!(
             steps.contains("oxfuzz triage /proj --target decode_utf8"),
             "{steps}"
         );
         assert!(steps.contains("never promoted automatically"), "{steps}");
-        assert!(steps.contains("known findings"), "{steps}");
+        assert!(
+            steps.contains(
+                "oxfuzz harness /proj --target decode_utf8 --engine afl++ --promote-with-findings"
+            ),
+            "{steps}"
+        );
     }
 
     #[test]

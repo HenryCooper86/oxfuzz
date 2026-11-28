@@ -26,6 +26,7 @@ import {
   binarySession,
   binarySessions,
   binaryStop,
+  parseTargetArgs,
   sessionBinary,
   type BinaryFuzzOutcome,
   type BinaryInputMode,
@@ -86,6 +87,7 @@ export function BinaryView() {
   const [useDictionary, setUseDictionary] = useState(false);
   const [continueFrom, setContinueFrom] = useState<BinarySessionSummary | null>(null);
   const [compcov, setCompcov] = useState(true);
+  const [targetArgs, setTargetArgs] = useState("");
   const [persistent, setPersistent] = useState(false);
   const [entry, setEntry] = useState("");
   const [iterations, setIterations] = useState(String(DEFAULT_PERSISTENT_ITERATIONS));
@@ -178,6 +180,7 @@ export function BinaryView() {
         dictionary: useDictionary ? tokens : [],
         continueFrom: continueFrom?.session,
         compcov,
+        targetArgs: parseTargetArgs(targetArgs),
         persistent: persistentActive
           ? { entry: entry.trim(), iterations: iterationCount, restore_memory: restoreMemory }
           : undefined,
@@ -288,6 +291,11 @@ export function BinaryView() {
               <Input id="binary-timeout" type="number" min={1} className="h-8" value={timeoutMs} onChange={(e) => setTimeoutMs(e.target.value)} aria-invalid={!validTimeout} />
               {!validTimeout && <p role="alert" className="text-xs text-error">{t("binary.invalidTimeout")}</p>}
             </div>
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="binary-target-args">{t("binary.targetArgs")}</Label>
+            <Input id="binary-target-args" className="h-8 font-mono" placeholder="-D -j @@" value={targetArgs} onChange={(e) => setTargetArgs(e.target.value)} />
+            <p className="text-xs text-text-muted">{t("binary.targetArgsHint")}</p>
           </div>
           <div className="flex flex-col gap-1">
             <Switch checked={compcov} onChange={setCompcov} label={t("binary.compcov")} />

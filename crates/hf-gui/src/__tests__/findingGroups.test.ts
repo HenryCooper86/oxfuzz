@@ -40,3 +40,20 @@ it("groups by the service's bug key when present, across differing signatures", 
   expect(groups.map(g => g.members.length)).toEqual([3, 1]);
   expect(groups[0].runCount).toBe(3);
 });
+
+it("leads a group with the occurrence from the latest run, where report actions work", () => {
+  // A bug reproduced in every run: led by its oldest occurrence, the group's
+  // Compose Report, reproduction and DefectDojo actions were all disabled.
+  const scoped = (id: string, run: string, latest: boolean) =>
+    ({ ...item(id, run, "/work/ares_create_query.c:201:7"), bug_key: "t1:c1", latest_scoped_actions_allowed: latest });
+  const groups = groupFindings([
+    scoped("c1", "r1", false),
+    scoped("c2", "r2", false),
+    scoped("c4", "r4", true),
+    scoped("c3", "r3", false),
+  ]);
+  expect(groups).toHaveLength(1);
+  expect(groups[0].representative.crash.id).toBe("c4");
+  expect(groups[0].members.map(m => m.crash.id)).toEqual(["c4", "c1", "c2", "c3"]);
+  expect(groups[0].runCount).toBe(4);
+});

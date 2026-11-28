@@ -42,6 +42,11 @@ pub struct SaveBuildProfileRequest {
 }
 
 const MAX_MARKER_BYTES: u64 = 64 * 1024 * 1024;
+
+/// CPUs each build step's sandbox gets; a parallel Make, `CMake` or Meson
+/// step runs this many jobs. Shared with the Build Doctor's execution, and
+/// defined here so the plans compile without the `build-doctor` feature.
+pub(crate) const BUILD_STEP_CPUS: u32 = 2;
 /// The Bzlmod module file: the marker of a Bazel profile, and what makes a
 /// detected Bazel project buildable offline from a vendor directory.
 pub(crate) const BAZEL_MODULE_FILE: &str = "MODULE.bazel";

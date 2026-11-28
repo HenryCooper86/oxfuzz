@@ -12,6 +12,9 @@ import { filterRuns, saveWorkOrderPacket } from "../lib/parityDiscovery";
 
 const invoke = vi.hoisted(() => vi.fn());
 vi.mock("../lib", async () => ({ ...await vi.importActual("../lib"), getTransport: () => ({ invoke }) }));
+// These panels' controls exist in the desktop app; the browser shows a note
+// instead (desktopOnlyPanels.test.tsx).
+vi.mock("../lib/transport", async () => ({ ...await vi.importActual("../lib/transport"), isTauriEnvironment: () => true }));
 
 let cleanup = async () => {};
 beforeEach(() => {

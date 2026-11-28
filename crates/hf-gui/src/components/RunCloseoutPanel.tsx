@@ -18,7 +18,7 @@ const TRUST_VERDICTS = new Set(["Trusted", "Qualified", "Unqualified", "Untrustw
 
 function detail(report: RunCloseoutReport, step: CloseoutStep, t: (key: string, params?: Record<string, string | number>) => string): string {
   const outcome = report.steps.find((item) => item.step === step)?.outcome;
-  if (!outcome) return t("runCloseout.pending");
+  if (!outcome) return "";
   if (outcome.outcome === "completed") {
     // The trust step records the service's verdict name; show what it means.
     if (step === "trust_report" && TRUST_VERDICTS.has(outcome.detail)) return t(`runCloseout.trust.${outcome.detail}`);
@@ -115,7 +115,9 @@ function RunCloseoutPanelSession({
               <li key={step} className="flex gap-2 text-xs">
                 <strong className="w-28">{t(`runCloseout.step.${step}`)}</strong>
                 <span data-closeout-outcome={record?.outcome.outcome ?? "pending"}>
-                  <strong>{outcomeLabel(record?.outcome.outcome ?? "pending", t)}</strong>: {detail(report, step, t)}
+                  <strong>{outcomeLabel(record?.outcome.outcome ?? "pending", t)}</strong>
+                  {/* A step that has not run has no detail beyond its label. */}
+                  {record && <>: {detail(report, step, t)}</>}
                 </span>
               </li>
             );

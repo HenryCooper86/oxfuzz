@@ -17,15 +17,17 @@ use super::project_identity::retained_run_target_selector;
 use super::project_identity::{canonical_project_root, defectdojo_project_name};
 use super::workspace::workspace_dir;
 use super::AiPolicy;
-/// How many project translation units one reproduction bundle carries.
+/// How many project files (translation units and headers) one reproduction
+/// bundle carries.
 ///
-/// A bundle is meant to be small enough to attach to a bug report. Past this the
-/// manifest names the shortfall instead of shipping a build line that cannot
-/// link (see `sources_note`).
-const MAX_BUNDLE_SOURCES: usize = 64;
+/// A real library needs all of them to build: c-ares links 51 units and
+/// includes 26 headers, and a 64-file cap left out the header its first unit
+/// includes. Past this the manifest names the shortfall instead of shipping a
+/// build line that cannot link (see `sources_note`).
+const MAX_BUNDLE_SOURCES: usize = 4_000;
 
 /// Total bytes of project sources one bundle carries.
-const MAX_BUNDLE_SOURCE_BYTES: u64 = 4 * 1_024 * 1_024;
+const MAX_BUNDLE_SOURCE_BYTES: u64 = 64 * 1_024 * 1_024;
 
 /// Whether a bundled path is a header rather than a translation unit.
 fn is_header_path(path: &str) -> bool {
@@ -54,7 +56,33 @@ fn collect_bundle_sources(
     let mut found = Vec::new();
     collect_bundle_sources_in(workspace, workspace, harness_filename, &mut found);
     found.sort_by(|a, b| a.0.cmp(&b.0));
+    read_bundle_sources(found)
+}
 
+/// The files a C or C++ harness build reads: the project units it links (in
+/// build order) and the project headers its include directories reach.
+/// Anything else in the staged tree -- tests, other programs, other
+/// platforms' sources -- stays out, as it stayed out of the build.
+fn collect_linked_bundle_sources(
+    workspace: &Path,
+    harness_filename: &str,
+) -> (Vec<crate::repro::BundledSource>, usize) {
+    let inputs =
+        hf_harness::project_sources::ProjectLinkInputs::collect(workspace, &[harness_filename]);
+    let found = inputs
+        .linked_units()
+        .map(str::to_owned)
+        .chain(hf_harness::project_sources::project_headers(workspace))
+        .map(|relative| (PathBuf::from(&relative), workspace.join(relative)))
+        .filter(|(_, absolute)| is_regular_file(absolute))
+        .collect();
+    read_bundle_sources(found)
+}
+
+/// Copy `found` (relative, absolute) by value, within the bundle caps.
+fn read_bundle_sources(
+    found: Vec<(PathBuf, PathBuf)>,
+) -> (Vec<crate::repro::BundledSource>, usize) {
     let mut sources = Vec::new();
     let mut bytes = 0u64;
     let mut omitted = 0usize;
@@ -186,6 +214,33 @@ impl ServiceContainer {
             Some(r) => hf_crash::dedup(store.list_crashes_by_run(r.id).await?),
             None => Vec::new(),
         })
+    }
+
+    /// Refuse to publish "no findings" for a latest run that kept crashing
+    /// inputs nobody has triaged yet: its findings rows do not exist, so an
+    /// export would claim a clean result. Names the step that creates them.
+    async fn refuse_untriaged_latest_run(
+        &self,
+        project: &Path,
+        target: &str,
+        crashes: &[hf_core::crash::Crash],
+    ) -> Result<(), ClassifiedError> {
+        if !crashes.is_empty() {
+            return Ok(());
+        }
+        let kept = self
+            .latest_run_record(project, Some(target))
+            .await?
+            .and_then(|run| run.crash_count)
+            .unwrap_or(0);
+        if kept == 0 {
+            return Ok(());
+        }
+        Err(ClassifiedError::Validation(format!(
+            "the latest run of '{target}' kept {kept} crashing input(s) that are not triaged \
+             yet, so there are no findings to export; triage them first (Scan for Crashes, \
+             or `oxfuzz triage <project> --target {target}`)"
+        )))
     }
 
     /// Compose the narrative report with the LLM, grounded in the fact-sheet.
@@ -321,7 +376,25 @@ impl ServiceContainer {
         // the project's own translation units or the documented build command
         // fails to link on the very function the finding is about. The staged
         // workspace holds exactly what the sandbox compiled.
-        let (sources, omitted_sources) = collect_bundle_sources(&workspace, &harness_filename);
+        // A C or C++ bundle carries what the harness build compiled and
+        // documents that build, rooted at the bundle; other languages keep the
+        // staged tree and the engine's compiler line.
+        let run_harness = match self.run_record(crash.run_id).await?.config {
+            Some(config) => match &self.store {
+                Some(store) => store.get_harness(config.harness_id).await?,
+                None => None,
+            },
+            None => None,
+        };
+        let project_flags = run_harness
+            .map(|harness| harness.build_cmd.extra_flags)
+            .unwrap_or_default();
+        let linked_build = matches!(lang, TargetLanguage::C | TargetLanguage::Cpp);
+        let (sources, omitted_sources) = if linked_build {
+            collect_linked_bundle_sources(&workspace, &harness_filename)
+        } else {
+            collect_bundle_sources(&workspace, &harness_filename)
+        };
         let bundled_sources: Vec<String> = sources
             .iter()
             .map(|source| source.relative_path.to_string_lossy().replace('\\', "/"))
@@ -334,18 +407,34 @@ impl ServiceContainer {
             .filter(|path| !is_header_path(path))
             .collect();
         let build = hf_harness::build_command(engine, lang, "fuzz_bin", sanitizer)?;
-        let build_command = format!(
-            "{} {} {} {} -o {}",
-            build.compiler,
-            build.args.join(" "),
-            harness_filename,
-            compiled_sources
-                .iter()
-                .map(|path| path.as_str())
-                .collect::<Vec<_>>()
-                .join(" "),
-            build.output.display()
-        );
+        let linked_command = linked_build
+            .then(|| {
+                hf_harness::repro_build_script(
+                    lang,
+                    &project_flags,
+                    &workspace,
+                    &build.compiler,
+                    &build.args,
+                    "fuzz_bin",
+                )
+            })
+            .flatten();
+        let build_command = if let Some(command) = linked_command {
+            command
+        } else {
+            format!(
+                "{} {} {} {} -o {}",
+                build.compiler,
+                build.args.join(" "),
+                harness_filename,
+                compiled_sources
+                    .iter()
+                    .map(|path| path.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                build.output.display()
+            )
+        };
         let manifest = crate::repro::ReproManifest {
             project: project_root.to_string_lossy().into_owned(),
             target: target.to_owned(),
@@ -452,6 +541,8 @@ impl ServiceContainer {
     ) -> Result<String, ClassifiedError> {
         let project_root = canonical_project_root(project)?;
         let crashes = self.crashes_for_latest_run(project, Some(target)).await?;
+        self.refuse_untriaged_latest_run(project, target, &crashes)
+            .await?;
         let sarif =
             crate::sarif::crashes_to_sarif(&crashes, env!("CARGO_PKG_VERSION"), &project_root);
         serde_json::to_string_pretty(&sarif)
@@ -869,8 +960,10 @@ impl ServiceContainer {
     ) -> Result<usize, ClassifiedError> {
         let crashes = self
             .crashes_for_latest_run_matching(project, Some(target), None)
-            .await?
-            .len();
+            .await?;
+        self.refuse_untriaged_latest_run(project, target, &crashes)
+            .await?;
+        let crashes = crashes.len();
         if crashes > 0 {
             self.notify_crashes(project, target, crashes, None).await?;
         }
@@ -945,6 +1038,10 @@ impl ServiceContainer {
             .await?;
         let cfg = crate::defectdojo::load_config()?;
         let token = crate::defectdojo::resolve_token(&cfg)?;
+        if let Some(target) = target {
+            self.refuse_untriaged_latest_run(project, target, &crashes)
+                .await?;
+        }
         if crashes.is_empty() {
             return Err(ClassifiedError::Validation(
                 "no triaged crashes to push to DefectDojo".to_owned(),

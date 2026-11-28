@@ -313,17 +313,47 @@ impl Store {
         &self,
         now: DateTime<Utc>,
     ) -> Result<u64, StorageError> {
-        let result = sqlx::query(
-            "UPDATE remediation_operations
-             SET status = 'inconclusive', current_stage = 'complete', ended_at = ?1,
-                 updated_at = ?1, failure_code = 'interrupted_after_restart',
-                 failure_message = 'The application restarted before sandbox verification completed.'
-             WHERE status = 'running'",
-        )
-        .bind(now.to_rfc3339())
-        .execute(self.pool())
-        .await?;
-        Ok(result.rows_affected())
+        self.recover_interrupted_remediations_where(now, |_| true)
+            .await
+    }
+
+    /// Fail closed the running operations `lost` selects. The caller spares
+    /// operations another live process still owns, since every `oxfuzz`
+    /// process shares the database.
+    ///
+    /// # Errors
+    /// Returns a storage error on query failure.
+    pub async fn recover_interrupted_remediations_where(
+        &self,
+        now: DateTime<Utc>,
+        lost: impl Fn(Uuid) -> bool,
+    ) -> Result<u64, StorageError> {
+        let rows = sqlx::query("SELECT id FROM remediation_operations WHERE status = 'running'")
+            .fetch_all(self.pool())
+            .await?;
+        let mut recovered = 0;
+        for row in rows {
+            let raw: String = row.try_get("id")?;
+            let id = Uuid::parse_str(&raw).map_err(|error| {
+                StorageError::InvalidData(format!("remediation id {raw}: {error}"))
+            })?;
+            if !lost(id) {
+                continue;
+            }
+            let result = sqlx::query(
+                "UPDATE remediation_operations
+                 SET status = 'inconclusive', current_stage = 'complete', ended_at = ?1,
+                     updated_at = ?1, failure_code = 'interrupted_after_restart',
+                     failure_message = 'The application restarted before sandbox verification completed.'
+                 WHERE id = ?2 AND status = 'running'",
+            )
+            .bind(now.to_rfc3339())
+            .bind(raw)
+            .execute(self.pool())
+            .await?;
+            recovered += result.rows_affected();
+        }
+        Ok(recovered)
     }
 }
 

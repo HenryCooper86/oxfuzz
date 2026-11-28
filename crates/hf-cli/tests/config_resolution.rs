@@ -73,6 +73,9 @@ impl Fixture {
             .env("APPDATA", self.path("appdata"))
             .env("HF_USE_DOCKER", "0")
             .env_remove("HF_CONFIG_DIR")
+            // The per-user config lives under the app dir; an inherited
+            // `HF_APP_DIR` would move it out of this private HOME.
+            .env_remove("HF_APP_DIR")
             .env_remove("HF_PROVIDER_API_KEY");
         command
     }

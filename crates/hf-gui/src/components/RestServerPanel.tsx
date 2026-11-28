@@ -3,10 +3,28 @@ import { useEffect, useState } from "react";
 import { useI18n } from "../i18nContext";
 import { formatInvokeError } from "../lib/invokeError";
 import { DEFAULT_REST_PORT, restServerApi, type RestServerInfo } from "../lib/parityDiscovery";
+import { isTauriEnvironment } from "../lib/transport";
 import { Button, Input } from "./ui";
 
 /** Start and stop the REST API from the app (`oxfuzz serve`), loopback only. */
 export function RestServerPanel({ project }: { project: string }) {
+  // The browser interface is itself served by a REST server; only the desktop
+  // app hosts one.
+  return isTauriEnvironment() ? <DesktopRestServerPanel project={project} /> : <DesktopOnlyNotice title="parityDiscovery.rest.title" />;
+}
+
+/** A panel's title and a note that the desktop app provides it. */
+export function DesktopOnlyNotice({ title }: { title: string }) {
+  const { t } = useI18n();
+  return (
+    <section className="surface-card flex flex-col gap-1" style={{ padding: "var(--space-md)" }} aria-label={t(title)}>
+      <span className="text-sm font-semibold">{t(title)}</span>
+      <span className="text-xs text-text-muted">{t("parityDiscovery.desktopOnly")}</span>
+    </section>
+  );
+}
+
+function DesktopRestServerPanel({ project }: { project: string }) {
   const { t } = useI18n();
   const [port, setPort] = useState(String(DEFAULT_REST_PORT));
   const [info, setInfo] = useState<RestServerInfo | null>(null);
@@ -17,8 +35,8 @@ export function RestServerPanel({ project }: { project: string }) {
 
   useEffect(() => {
     let live = true;
-    // Browser mode and a build without the server have no such command: the
-    // panel then shows the stopped state and reports the error on Start.
+    // A build without the server has no such command: the panel then shows
+    // the stopped state and reports the error on Start.
     restServerApi.status().then((current) => { if (live) setInfo(current); }).catch(() => undefined);
     return () => { live = false; };
   }, []);
