@@ -188,7 +188,7 @@ pub(crate) struct BuildArgs {
 pub(crate) struct DiscoverArgs {
     /// Project root path.
     pub(crate) project: PathBuf,
-    /// Target language (c, cpp, rust, go, python).
+    /// Target language (c, cpp, rust, go, python, java, javascript).
     #[arg(long)]
     pub(crate) lang: String,
     /// Assess target candidates with a configured AI provider when available.
@@ -371,7 +371,7 @@ pub(crate) struct RunArgs {
     /// Fuzzing engine. Required unless `--replay` is given.
     #[arg(long, required_unless_present = "replay")]
     pub(crate) engine: Option<String>,
-    /// Target language (c, cpp, rust, go, python). Defaults to c. An explicit
+    /// Target language (c, cpp, rust, go, python, java, javascript). Defaults to c. An explicit
     /// value cannot combine with `--replay`: the recorded run carries its own
     /// language.
     #[arg(long, default_value = "c", conflicts_with = "replay")]
@@ -604,7 +604,7 @@ pub(crate) struct FuzzArgs {
     /// Fuzzing engine.
     #[arg(long, default_value = "libfuzzer")]
     pub(crate) engine: String,
-    /// Target language (c, cpp, rust, go, python). Omit to scan every
+    /// Target language (c, cpp, rust, go, python, java, javascript). Omit to scan every
     /// discoverable language and let the picked candidate carry its own.
     #[arg(long)]
     pub(crate) lang: Option<String>,
@@ -725,7 +725,7 @@ pub(crate) struct CorpusArgs {
     #[arg(long)]
     pub(crate) op: String,
     /// Target language the target was discovered under (c, cpp, rust, go,
-    /// python). Defaults to c. The LLM seed and regeneration paths discover
+    /// python, java, javascript). Defaults to c. The LLM seed and regeneration paths discover
     /// and resolve the target in this language.
     #[arg(long, default_value = "c")]
     pub(crate) lang: String,
@@ -868,7 +868,7 @@ pub(crate) struct ReproArgs {
     /// Fuzzing engine. Defaults to libfuzzer.
     #[arg(long, default_value = "libfuzzer")]
     pub(crate) engine: String,
-    /// Target language (c, cpp, rust, go, python). Defaults to c.
+    /// Target language (c, cpp, rust, go, python, java, javascript). Defaults to c.
     #[arg(long, default_value = "c")]
     pub(crate) lang: String,
     /// Crash id (or unique prefix) to bundle; defaults to the first crash.

@@ -3358,6 +3358,7 @@ async fn a_coverage_read_for_a_target_without_a_harness_creates_no_workspace() {
     assert!(container
         .coverage_summary(&project, "parse")
         .await
+        .unwrap()
         .is_none());
 
     assert!(

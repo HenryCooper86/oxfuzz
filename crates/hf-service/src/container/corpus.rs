@@ -1098,6 +1098,15 @@ impl ServiceContainer {
             .await
     }
 
+    /// Why the active harness in `workspace` cannot be minimized: `Some`
+    /// for a Go, Python, Java or JavaScript harness, whose engine has no
+    /// libFuzzer merge pass to run ([`minimize_unsupported`]).
+    async fn minimize_unsupported_reason(&self, workspace: &Path) -> Option<String> {
+        let id = super::harness_workspace::read_current_harness_id(workspace)?;
+        let harness = self.store.as_deref()?.get_harness(id).await.ok()??;
+        minimize_unsupported(harness.engine)
+    }
+
     /// Coverage-guided corpus minimization.
     ///
     /// Runs libFuzzer's canonical `-merge=1` pass with the exact promoted and
@@ -1132,6 +1141,9 @@ impl ServiceContainer {
         }
 
         let _target_revision = self.acquire_target_revision(project, target).await?;
+        if let Some(reason) = self.minimize_unsupported_reason(&workspace).await {
+            return Err(ClassifiedError::Validation(reason));
+        }
         let qualified = self
             .active_harness_locked(project, target, EngineKind::LibFuzzer)
             .await?;
@@ -1329,5 +1341,50 @@ mod resource_exhaustion_tests {
                 "{name}"
             );
         }
+    }
+}
+
+/// Why corpus minimization cannot run for a harness of `engine`, or `None`
+/// when it can. Minimization is libFuzzer's `-merge=1` pass, which re-runs
+/// the harness binary it was started as: a Go test binary has no such pass,
+/// and the Atheris, Jazzer and Jazzer.js launchers are not that binary.
+fn minimize_unsupported(engine: EngineKind) -> Option<String> {
+    matches!(
+        engine,
+        EngineKind::GoNative | EngineKind::Atheris | EngineKind::Jazzer | EngineKind::JazzerJs
+    )
+    .then(|| {
+        format!(
+            "corpus minimization is libFuzzer's merge pass over a C, C++ or Rust harness; this \
+             harness runs under {engine}, which has no merge pass. Use `--op prune` to drop \
+             byte-identical inputs",
+            engine = engine.as_str()
+        )
+    })
+}
+
+#[cfg(test)]
+mod minimize_unsupported_tests {
+    use hf_core::engine::EngineKind;
+
+    #[test]
+    fn a_managed_engine_harness_is_told_minimization_does_not_apply() {
+        // BurntSushi/toml under go-native: `corpus --op minimize` said to
+        // "build a libfuzzer harness", which a Go target cannot have.
+        let reason = super::minimize_unsupported(EngineKind::GoNative).unwrap();
+        assert!(
+            reason.contains("runs under go-native, which has no merge pass"),
+            "{reason}"
+        );
+        assert!(reason.contains("--op prune"), "{reason}");
+        for engine in [
+            EngineKind::Atheris,
+            EngineKind::Jazzer,
+            EngineKind::JazzerJs,
+        ] {
+            assert!(super::minimize_unsupported(engine).is_some());
+        }
+        assert!(super::minimize_unsupported(EngineKind::LibFuzzer).is_none());
+        assert!(super::minimize_unsupported(EngineKind::AflPlusPlus).is_none());
     }
 }

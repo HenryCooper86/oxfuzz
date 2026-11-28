@@ -131,6 +131,7 @@ pub async fn coverage_summary(
         .container
         .coverage_summary(&project, &target)
         .await
+        .map_err(|error| error.to_string())?
         .map(hf_service::CoverageSummaryView::from))
 }
 
