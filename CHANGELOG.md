@@ -53,6 +53,25 @@ retain only the current release; older entries remain here as the record.
   folders for targets that have no harness.
 - The REST API redacts host paths in ranked discovery and regression replay
   responses.
+- Build Doctor's Make step passes `-j2`. A project that picks its own job
+  count from `nproc` (lz4) counted every host CPU, and its compile wrappers
+  exhausted the sandbox's process limit and hung.
+- On macOS, a build marker is recorded under its own spelling (`Makefile`,
+  not `makefile`).
+- Harness build context comes from the library's own compiles: test,
+  example and benchmark programs no longer add their settings or their
+  units, and a macro defined with different values is left out (Meson
+  projects such as inih).
+- A C harness links a project whose C++ units carry their own `-std=`: those
+  units compile on their own with that standard, and a C++ harness compiles
+  the project's C units as C.
+- The model-free C template passes a NUL-terminated copy of the input to a C
+  string with no length, stubs callback parameters, and gives each output
+  buffer real storage and its own capacity (lz4's `LZ4_decompress_safe` no
+  longer reports false overflows). Attribute macros defined in the source
+  file no longer reach its forward declaration.
+- A libFuzzer `oom-` input that does not reproduce alone is reported as out
+  of memory instead of "Other crash detected".
 
 ## 0.9.13 - 2026-11-27
 

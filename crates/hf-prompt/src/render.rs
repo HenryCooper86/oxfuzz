@@ -555,7 +555,13 @@ pub fn render_build_context_section(ctx: &BuildContext, project_root: &Path) -> 
         lines.push(format!("- preprocessor defines: {}", defines.join(", ")));
     }
     if let Some(standard) = standard {
-        lines.push(format!("- language standard: {standard}"));
+        if standard.contains("++") {
+            lines.push(format!(
+                "- language standard: {standard} (the project's C++ sources)"
+            ));
+        } else {
+            lines.push(format!("- language standard: {standard}"));
+        }
     }
     if lines.is_empty() {
         return String::new();
@@ -1163,6 +1169,22 @@ mod tests {
         // A host absolute path tells the model nothing useful and invites it to
         // write an include path that does not exist inside the sandbox.
         assert!(!section.contains("/proj/include"), "{section}");
+    }
+
+    #[test]
+    fn a_cpp_standard_is_named_as_the_cpp_sources_standard() {
+        // inih records `-std=c++11` from its C++ wrapper; the C harness
+        // compiles without it, and the model must not read it as the
+        // harness's own language.
+        let ctx = hf_core::build::BuildContext {
+            std_flag: Some("-std=c++11".to_owned()),
+            ..hf_core::build::BuildContext::default()
+        };
+        let section = render_build_context_section(&ctx, std::path::Path::new("/proj"));
+        assert!(
+            section.contains("- language standard: c++11 (the project's C++ sources)"),
+            "{section}"
+        );
     }
 
     #[test]

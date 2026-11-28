@@ -2419,22 +2419,33 @@ fn compile_script(
     output_name: &str,
     project: &ProjectLinkInputs,
 ) -> String {
-    let quoted_flags = extra_flags
-        .iter()
-        .map(|flag| sh_quote(flag))
-        .collect::<Vec<_>>()
-        .join(" ");
+    let prefix = |flags: &[String]| {
+        format!(
+            "{compiler} {args} {quoted_flags} -I{container_ws}",
+            args = args.join(" "),
+            quoted_flags = flags
+                .iter()
+                .map(|flag| sh_quote(flag))
+                .collect::<Vec<_>>()
+                .join(" "),
+        )
+    };
     let source_q = sh_quote(source_name);
     let output_q = sh_quote(output_name);
-    let compile_prefix = format!(
-        "{compiler} {args} {quoted_flags} -I{container_ws}",
-        args = args.join(" ")
-    );
+    let harness_cpp = crate::project_sources::is_cpp_source(source_name);
+    let split = project.language_split(extra_flags, harness_cpp);
+    let (compile_prefix, foreign_prefix) = match &split {
+        Some((own, foreign)) => (prefix(own), Some(prefix(foreign))),
+        None => (prefix(extra_flags), None),
+    };
+    let foreign = foreign_prefix
+        .as_deref()
+        .map(|foreign| (foreign, harness_cpp));
     format!(
         "{precompile}{compile_prefix} {container_ws}/{source_q} {link_args} -o /tmp/{output_q} \
          && cp /tmp/{output_q} {container_ws}/{output_q} && chmod +x {container_ws}/{output_q}",
-        precompile = project.precompile_script(&compile_prefix, container_ws),
-        link_args = project.link_args(container_ws),
+        precompile = project.precompile_script_with(&compile_prefix, foreign, container_ws),
+        link_args = project.link_args_with(container_ws, split.as_ref().map(|_| harness_cpp)),
     )
 }
 
@@ -2919,6 +2930,119 @@ mod tests {
                  clang -fsanitize=fuzzer '-DA=1' -I/work /work/'harness.c' /work/'lib.c' \
                  /tmp/oxfuzz_project_programs.a -o /tmp/'fuzz_p'"
             ),
+            "{script}"
+        );
+    }
+
+    #[test]
+    fn a_cpp_standard_reaches_only_the_cpp_unit_of_a_c_harness() {
+        // inih: `cpp/INIReader.cpp` compiles with `-std=c++11` next to the C
+        // library `ini.c`. One `clang -std=c++11 harness.c ...` command
+        // failed: "invalid argument '-std=c++11' not allowed with 'C'".
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("ini.c"), "int ini_parse(void){return 0;}").unwrap();
+        std::fs::create_dir(dir.path().join("cpp")).unwrap();
+        std::fs::write(
+            dir.path().join("cpp/INIReader.cpp"),
+            "int reader(){return 0;}",
+        )
+        .unwrap();
+        let project = ProjectLinkInputs::collect(dir.path(), &["harness.c"]);
+
+        let script = compile_script(
+            "clang",
+            &["-fsanitize=fuzzer".to_owned()],
+            &["-DA=1".to_owned(), "-std=c++11".to_owned()],
+            "/work",
+            "harness.c",
+            "fuzz_p",
+            &project,
+        );
+
+        assert!(
+            script.starts_with(
+                "clang -fsanitize=fuzzer '-DA=1' '-std=c++11' -I/work \
+                 -c /work/'cpp/INIReader.cpp' -o /tmp/oxfuzz_project_unit_0.o && \
+                 clang -fsanitize=fuzzer '-DA=1' -I/work /work/'harness.c' \
+                 /tmp/oxfuzz_project_unit_0.o /work/'ini.c' -Wl,--as-needed -lstdc++ \
+                 -o /tmp/'fuzz_p'"
+            ),
+            "{script}"
+        );
+    }
+
+    #[test]
+    fn a_c_standard_is_kept_from_the_cpp_unit_of_a_c_harness() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("lib.c"), "int lib(void){return 0;}").unwrap();
+        std::fs::write(dir.path().join("stream.cxx"), "int s(){return 0;}").unwrap();
+        let project = ProjectLinkInputs::collect(dir.path(), &["harness.c"]);
+
+        let script = compile_script(
+            "clang",
+            &[],
+            &["-std=c99".to_owned()],
+            "/work",
+            "harness.c",
+            "fuzz_p",
+            &project,
+        );
+
+        assert!(
+            script.starts_with(
+                "clang   -I/work -c /work/'stream.cxx' -o /tmp/oxfuzz_project_unit_0.o && \
+                 clang  '-std=c99' -I/work /work/'harness.c' /work/'lib.c' \
+                 /tmp/oxfuzz_project_unit_0.o"
+            ),
+            "{script}"
+        );
+    }
+
+    #[test]
+    fn a_c_unit_of_a_cpp_harness_compiles_as_c() {
+        // `clang++` compiles a `.c` input as C++ (deprecated, and C code
+        // such as an implicit `void *` conversion does not compile as C++).
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("lib.c"), "int lib(void){return 0;}").unwrap();
+        std::fs::write(dir.path().join("wrap.cpp"), "int w(){return 0;}").unwrap();
+        let project = ProjectLinkInputs::collect(dir.path(), &["harness.cc"]);
+
+        let script = compile_script(
+            "clang++",
+            &[],
+            &["-std=c++17".to_owned()],
+            "/work",
+            "harness.cc",
+            "fuzz_p",
+            &project,
+        );
+
+        assert!(
+            script.starts_with(
+                "clang++   -I/work -x c -c /work/'lib.c' -o /tmp/oxfuzz_project_unit_0.o && \
+                 clang++  '-std=c++17' -I/work /work/'harness.cc' \
+                 /tmp/oxfuzz_project_unit_0.o /work/'wrap.cpp'"
+            ),
+            "{script}"
+        );
+    }
+
+    #[test]
+    fn a_single_language_link_keeps_one_command() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("lib.c"), "int lib(void){return 0;}").unwrap();
+        let project = ProjectLinkInputs::collect(dir.path(), &["harness.c"]);
+        let script = compile_script(
+            "clang",
+            &[],
+            &["-std=c11".to_owned()],
+            "/work",
+            "harness.c",
+            "fuzz_p",
+            &project,
+        );
+        assert!(
+            script.starts_with("clang  '-std=c11' -I/work /work/'harness.c' /work/'lib.c' -o"),
             "{script}"
         );
     }

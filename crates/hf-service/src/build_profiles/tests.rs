@@ -119,6 +119,18 @@ fn missing_component_marker_and_non_directory_output_parent_are_rejected() {
 }
 
 #[test]
+fn a_marker_is_recorded_under_its_own_spelling() {
+    // lz4 ships `Makefile`. On a case-insensitive filesystem (macOS) the
+    // `makefile` candidate also resolved, and the profile staged a
+    // `makefile` the project does not have.
+    let (project, mut request) = fixture();
+    request.component_root = ".".to_owned();
+    request.build_system = ProfileBuildSystem::Make;
+    std::fs::write(project.path().join("Makefile"), "all:\n").unwrap();
+    assert_eq!(normalize(&request).unwrap().marker_path, "Makefile");
+}
+
+#[test]
 fn make_uses_gnu_marker_precedence_and_rejects_higher_level_systems() {
     let (project, mut request) = fixture();
     request.component_root = ".".to_owned();
@@ -541,7 +553,8 @@ fn nested_cmake_and_make_plans_derive_output_from_selected_database() {
             "../../build/parser/compile_commands.json",
             "--",
             "make",
-            "-B"
+            "-B",
+            "-j2"
         ]
     );
 }

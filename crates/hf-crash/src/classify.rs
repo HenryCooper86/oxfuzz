@@ -12,7 +12,7 @@ pub const OOM_KILL_MARKER: &str = "oxfuzz: killed at the sandbox memory limit (o
 /// The one signature every memory-limit kill shares: they carry no frames, and
 /// one finding per input would list the same resource-exhaustion class many
 /// times over.
-const OOM_KILL_SIGNATURE: &str = "out-of-memory-kill";
+pub(crate) const OOM_KILL_SIGNATURE: &str = "out-of-memory-kill";
 
 /// Whether a log holds a sanitizer report, which outranks the kill marker.
 fn reports_sanitizer(log: &str) -> bool {

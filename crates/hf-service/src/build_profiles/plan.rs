@@ -100,6 +100,11 @@ pub(crate) fn profile_build_plan(profile: &BuildProfileView) -> BuildPlanEvidenc
                     "--".to_owned(),
                     "make".to_owned(),
                     "-B".to_owned(),
+                    // As many jobs as the step has CPUs. Without `-j`, lz4
+                    // runs `-j$(nproc)`, which counts every host CPU; each
+                    // job's bear wrapper is multi-threaded, and the jobs
+                    // exhausted the sandbox's task limit and deadlocked.
+                    format!("-j{}", crate::build_profiles::BUILD_STEP_CPUS),
                 ],
                 "Record the forced Make build in the selected compile database",
             ),

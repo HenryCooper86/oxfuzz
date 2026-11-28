@@ -15,6 +15,16 @@ fn project(files: &[&str]) -> tempfile::TempDir {
 }
 
 #[test]
+fn a_marker_is_reported_under_its_own_spelling() {
+    // On a case-insensitive filesystem (macOS) `makefile` also resolved for
+    // lz4's `Makefile`, and the diagnosis listed both.
+    let dir = project(&["Makefile"]);
+    let found = detect_build_systems(dir.path());
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].markers, vec!["Makefile".to_owned()]);
+}
+
+#[test]
 fn every_marker_file_identifies_its_build_system() {
     for (marker, expected) in [
         ("CMakeLists.txt", BuildSystem::CMake),
