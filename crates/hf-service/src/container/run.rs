@@ -407,6 +407,26 @@ fn report_syzkaller_launch(
     }
 }
 
+/// What to do about a syz-manager failure whose cause the bare line does not
+/// say, appended to it. `None` for a line with no known remedy.
+fn syzkaller_failure_hint(detail: &str) -> Option<&'static str> {
+    detail.contains("coverage is not supported").then_some(
+        "the guest did not answer syz-manager's coverage check. Either the kernel lacks \
+         KCOV (build it with CONFIG_KCOV=y and debugfs) or, under TCG emulation without \
+         KVM, the VMs were too slow to answer in time: run the campaign while the host is \
+         otherwise idle, or with fewer VMs (--vms 1)",
+    )
+}
+
+/// The error a failed syz-manager run reports: its exit code, its last
+/// stderr line and, when one is known, what to do about it.
+fn syzkaller_failure_message(exit_code: i32, detail: &str) -> String {
+    match syzkaller_failure_hint(detail) {
+        Some(hint) => format!("syz-manager exited with {exit_code}: {detail} ({hint})"),
+        None => format!("syz-manager exited with {exit_code}: {detail}"),
+    }
+}
+
 fn syzkaller_terminal_status(termination: hf_core::runtime::CommandTermination) -> RunStatus {
     if termination == hf_core::runtime::CommandTermination::Cancelled {
         RunStatus::Cancelled
@@ -3152,7 +3172,7 @@ impl ServiceContainer {
                 if result.exit_code != 0 && result.exit_code != 124 =>
             {
                 let detail = result.stderr.lines().last().unwrap_or("no error output");
-                let message = format!("syz-manager exited with {}: {detail}", result.exit_code);
+                let message = syzkaller_failure_message(result.exit_code, detail);
                 let status_update = self.finish_syzkaller_run(run_id, RunStatus::Failed).await;
                 if status_update.is_ok() {
                     match close_run_journal(&self.run_journal, run_id) {
@@ -3346,6 +3366,28 @@ async fn approved_with_known_findings(
         .is_some_and(|approval| {
             approval.approval_kind == hf_storage::HarnessApprovalKind::KnownFindings
         }))
+}
+
+#[cfg(test)]
+mod syzkaller_failure_hint_tests {
+    #[test]
+    fn a_failed_coverage_check_names_both_causes() {
+        // A 6.12 arm64 KCOV kernel failed this check under TCG while the host
+        // was loaded, and passed it with the same command on an idle host.
+        let hint = super::syzkaller_failure_hint(
+            "2026/11/28 01:19:48 [FATAL] coverage is not supported: call 0 failed with errno 998",
+        )
+        .expect("a hint");
+        assert!(
+            hint.contains("CONFIG_KCOV") && hint.contains("--vms 1"),
+            "{hint}"
+        );
+        assert_eq!(super::syzkaller_failure_hint("some other failure"), None);
+        assert_eq!(
+            super::syzkaller_failure_message(1, "some other failure"),
+            "syz-manager exited with 1: some other failure"
+        );
+    }
 }
 
 #[cfg(test)]
