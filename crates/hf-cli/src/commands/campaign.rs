@@ -159,7 +159,7 @@ pub(crate) async fn cmd_coverage(args: crate::args::CoverageArgs) -> anyhow::Res
             );
         }
     }
-    match container.coverage_summary(&project, target).await {
+    match container.coverage_summary(&project, target).await? {
         Some(s) => {
             println!("Coverage for {target}:");
             println!(

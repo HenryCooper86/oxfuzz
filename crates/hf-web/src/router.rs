@@ -2543,6 +2543,7 @@ async fn coverage_summary(
             .container
             .coverage_summary(&project, &req.target)
             .await
+            .map_err(classified_api_error)?
             .map(hf_service::CoverageSummaryView::from),
     ))
 }

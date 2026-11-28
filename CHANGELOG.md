@@ -99,6 +99,11 @@ retain only the current release; older entries remain here as the record.
     first parameter instead of being refused.
   - Go runs record their total execution count.
   - `oxfuzz harness --help` names every harness engine.
+  - `oxfuzz coverage` (and the Coverage panel) says that source coverage
+    is measured for C, C++ and Rust harnesses instead of advising clang
+    for a Go, Python, Java or JavaScript one, and `corpus --op minimize`
+    says the engine has no merge pass and points to `--op prune`.
+  - Every `--lang` help lists `java` and `javascript`.
 
 ## 0.9.13 - 2026-11-27
 

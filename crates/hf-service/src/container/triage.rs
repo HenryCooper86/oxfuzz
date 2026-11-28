@@ -1881,13 +1881,31 @@ impl ServiceContainer {
     /// corpus, and parses the `llvm-cov export` totals. Returns `None` when no
     /// harness was built or the coverage tooling is unavailable. Cached per
     /// target by the corpus+harness signature, like the covered-function set.
+    ///
+    /// # Errors
+    /// Returns [`ClassifiedError::Validation`] naming the reason when the
+    /// active harness is in a language source coverage does not measure.
     pub async fn coverage_summary(
         &self,
         project: &Path,
         target: &str,
-    ) -> Option<hf_coverage::CoverageSummary> {
-        let json = self.coverage_export_json_cached(project, target).await?;
-        hf_coverage::parse_llvm_cov_summary(&json)
+    ) -> Result<Option<hf_coverage::CoverageSummary>, ClassifiedError> {
+        if let Some(reason) = self.coverage_unmeasured_reason(project, target).await {
+            return Err(ClassifiedError::Validation(reason));
+        }
+        Ok(self
+            .coverage_export_json_cached(project, target)
+            .await
+            .and_then(|json| hf_coverage::parse_llvm_cov_summary(&json)))
+    }
+
+    /// Why the active harness of `target` has no source coverage: `Some` for
+    /// a language whose engine is not an LLVM build ([`coverage_unmeasured`]).
+    async fn coverage_unmeasured_reason(&self, project: &Path, target: &str) -> Option<String> {
+        let workspace = workspace_dir(project, target);
+        let id = super::harness_workspace::read_current_harness_id(&workspace)?;
+        let harness = self.store.as_deref()?.get_harness(id).await.ok()??;
+        coverage_unmeasured(harness.language, harness.engine)
     }
 
     /// The line-by-line coverage of `target` as an lcov tracefile and one
@@ -1904,6 +1922,9 @@ impl ServiceContainer {
         project: &Path,
         target: &str,
     ) -> Result<super::CoverageLineReport, ClassifiedError> {
+        if let Some(reason) = self.coverage_unmeasured_reason(project, target).await {
+            return Err(ClassifiedError::Validation(reason));
+        }
         let json = self
             .coverage_export_json_cached(project, target)
             .await
@@ -2359,5 +2380,56 @@ mod replay_command_tests {
             super::libfuzzer_replay_command("/work/fuzz_p", "/work/out/crash-1a2b"),
             vec!["/work/fuzz_p", "/work/out/crash-1a2b"]
         );
+    }
+}
+
+/// Why a harness of `language` built for `engine` has no source coverage
+/// report, or `None` when one is measured (C, C++ and Rust build with LLVM's
+/// source-based coverage). The run summary still reports the engine's own
+/// coverage counter.
+fn coverage_unmeasured(
+    language: hf_core::target::TargetLanguage,
+    engine: hf_core::engine::EngineKind,
+) -> Option<String> {
+    use hf_core::target::TargetLanguage;
+    let name = match language {
+        TargetLanguage::Go => "Go",
+        TargetLanguage::Python => "Python",
+        TargetLanguage::Java => "Java",
+        TargetLanguage::JavaScript => "JavaScript",
+        TargetLanguage::C | TargetLanguage::Cpp | TargetLanguage::Rust => return None,
+    };
+    Some(format!(
+        "source coverage is measured for C, C++ and Rust harnesses, built with LLVM; this {name} \
+         harness runs under {engine}, whose own coverage counter is the edge count in each run \
+         summary",
+        engine = engine.as_str()
+    ))
+}
+
+#[cfg(test)]
+mod coverage_unmeasured_tests {
+    use hf_core::engine::EngineKind;
+    use hf_core::target::TargetLanguage;
+
+    #[test]
+    fn managed_language_harnesses_say_why_they_have_no_source_coverage() {
+        // BurntSushi/toml under go-native: `oxfuzz coverage` said to "ensure
+        // the sandbox has clang/llvm-cov", which no Go harness can use.
+        let reason = super::coverage_unmeasured(TargetLanguage::Go, EngineKind::GoNative).unwrap();
+        assert!(reason.contains("C, C++ and Rust"), "{reason}");
+        assert!(
+            reason.contains("Go harness runs under go-native"),
+            "{reason}"
+        );
+        for (language, engine) in [
+            (TargetLanguage::Python, EngineKind::Atheris),
+            (TargetLanguage::Java, EngineKind::Jazzer),
+            (TargetLanguage::JavaScript, EngineKind::JazzerJs),
+        ] {
+            assert!(super::coverage_unmeasured(language, engine).is_some());
+        }
+        assert!(super::coverage_unmeasured(TargetLanguage::C, EngineKind::LibFuzzer).is_none());
+        assert!(super::coverage_unmeasured(TargetLanguage::Rust, EngineKind::LibFuzzer).is_none());
     }
 }
