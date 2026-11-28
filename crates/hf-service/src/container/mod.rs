@@ -111,6 +111,7 @@ mod python_atheris_tests;
 mod run;
 #[cfg(test)]
 mod rust_vendor_tests;
+mod template_params;
 mod template_release;
 #[cfg(test)]
 mod template_release_tests;
@@ -3045,7 +3046,16 @@ fn heuristic_draft(
     }
     let includes = generate_includes(candidate);
     let forward_decl = generate_forward_decl(&candidate.symbol, candidate.signature.as_deref());
-    let mut body = generate_harness_body(&candidate.symbol, candidate.signature.as_deref());
+    let (support, mut body) = generate_harness_parts(
+        &candidate.symbol,
+        candidate.signature.as_deref(),
+        Some(&candidate.project_root),
+    );
+    let forward_decl = if support.is_empty() {
+        forward_decl
+    } else {
+        format!("{forward_decl}\n{}", support.trim_end())
+    };
     if let Some(release) = template_release::release_for(candidate) {
         body = template_release::keep_and_release(&body, &candidate.symbol, &release);
     }
@@ -3346,9 +3356,39 @@ fn generate_forward_decl(symbol: &str, signature: Option<&str>) -> String {
         !first_word.starts_with(symbol) && first_word != symbol
     });
     if has_return_type {
-        format!("{trimmed};")
+        format!("{};", without_leading_attribute_macros(trimmed, symbol))
     } else {
         format!("int {trimmed};")
+    }
+}
+
+/// `declaration` without the capitalised attribute macros ahead of its return
+/// type (lz4's `LZ4_FORCE_O2 int LZ4_decompress_safe(...)`): such a macro is
+/// defined in the source file, not the header, and is unknown to the harness.
+/// A capitalised word that is the whole return type (`BOOL parse(...)`) is a
+/// type and stays.
+fn without_leading_attribute_macros<'a>(declaration: &'a str, symbol: &str) -> &'a str {
+    let Some(at) = declaration
+        .find(&format!("{symbol}("))
+        .or_else(|| declaration.find(&format!("{symbol} (")))
+    else {
+        return declaration;
+    };
+    let mut rest = declaration;
+    loop {
+        let prefix = &rest[..rest.len() - (declaration.len() - at)];
+        let words: Vec<&str> = prefix.split_whitespace().collect();
+        let Some(first) = words.first() else {
+            return rest;
+        };
+        let macro_like = first.chars().any(|c| c.is_ascii_uppercase())
+            && first
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+        if words.len() < 2 || !macro_like {
+            return rest;
+        }
+        rest = rest.trim_start()[first.len()..].trim_start();
     }
 }
 
@@ -3373,8 +3413,174 @@ fn pointer_cast_type(param: &str) -> String {
     format!("{base} *")
 }
 
+/// Bytes of each output buffer the template allocates, and the capacity it
+/// passes for it.
+const OUTPUT_CAPACITY: usize = 65_536;
+
+/// What the template passes for one parameter.
+enum TemplateParam {
+    /// The fuzzer input, cast to the parameter's type.
+    Input,
+    /// A NUL-terminated copy of the input, for a C string with no length.
+    Text,
+    /// The input's length.
+    InputLength,
+    /// A zeroed heap buffer of [`OUTPUT_CAPACITY`] bytes of this element type.
+    Output(String),
+    /// The capacity of the output buffer before it.
+    OutputCapacity,
+    Null,
+    /// A zeroed local of this type, passed by address.
+    Local(String),
+    Callback(template_params::CallbackStub),
+}
+
+/// Which buffer a length parameter's name says it measures.
+enum LengthOf {
+    Input,
+    Output,
+}
+
+/// The buffer `param`'s name refers to, by the words it is made of
+/// (`dstCapacity`, `max_out`, `outlen` -> output; `srcSize`, `inlen`,
+/// `compressedSize` -> input).
+fn length_hint(param: &str) -> Option<LengthOf> {
+    let name = param.split_whitespace().last()?;
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return None;
+    }
+    let mut words: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for c in name.chars() {
+        if c == '_' || (c.is_ascii_uppercase() && !current.is_empty()) {
+            if !current.is_empty() {
+                words.push(std::mem::take(&mut current));
+            }
+            if c == '_' {
+                continue;
+            }
+        }
+        current.push(c.to_ascii_lowercase());
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    let starts = |prefixes: &[&str]| {
+        words
+            .iter()
+            .any(|word| prefixes.iter().any(|prefix| word.starts_with(prefix)))
+    };
+    if starts(&["out", "dst", "dest", "cap", "max", "avail"]) {
+        Some(LengthOf::Output)
+    } else if starts(&["in", "src", "source", "data", "compressed"]) {
+        Some(LengthOf::Input)
+    } else {
+        None
+    }
+}
+
+/// The role of each parameter: the input is the first `const` byte pointer
+/// (or the first byte pointer, when none is `const`), other writable byte
+/// pointers are output buffers, and each integer is the length of the
+/// earliest buffer before it that has none yet -- `size` for the input, the
+/// allocated capacity for an output -- or `size` when no buffer precedes it.
+fn parameter_roles(params: &[&str], project_root: Option<&Path>) -> Vec<TemplateParam> {
+    let byte_pointer = |param: &str| {
+        param.matches('*').count() == 1
+            && (param.contains("char") || param.contains("uint8") || param.contains("void"))
+    };
+    let base_of = |param: &str| -> String {
+        param[..param.find('*').unwrap_or(param.len())]
+            .trim()
+            .trim_start_matches("const ")
+            .trim()
+            .to_owned()
+    };
+    let input = params
+        .iter()
+        .position(|param| byte_pointer(param) && param.contains("const"))
+        .or_else(|| params.iter().position(|param| byte_pointer(param)));
+    let mut roles = Vec::with_capacity(params.len());
+    // Buffers still waiting for a length, earliest first.
+    let mut awaiting_length: std::collections::VecDeque<bool> = std::collections::VecDeque::new();
+    let mut input_sized = false;
+    for (i, param) in params.iter().enumerate() {
+        let base = base_of(param);
+        let role = if Some(i) == input {
+            awaiting_length.push_back(true);
+            TemplateParam::Input
+        } else if param.contains('*') && base == "void" {
+            TemplateParam::Null
+        } else if byte_pointer(param) && !param.contains("const") {
+            awaiting_length.push_back(false);
+            TemplateParam::Output(base)
+        } else if param.contains('*') {
+            TemplateParam::Local(if base.is_empty() {
+                "char".to_owned()
+            } else {
+                base
+            })
+        } else if let Some(stub) = project_root.and_then(|root| {
+            template_params::callback_stub(root, &template_params::param_type(param))
+        }) {
+            TemplateParam::Callback(stub)
+        } else {
+            // The name settles a length the order cannot: lz4's
+            // `(src, dst, srcSize, dstCapacity)` and `(text, out, outlen)`
+            // put the lengths in different orders.
+            let hint = length_hint(param);
+            let pick = match hint {
+                Some(LengthOf::Output) => awaiting_length.iter().position(|is_input| !is_input),
+                Some(LengthOf::Input) => awaiting_length.iter().position(|is_input| *is_input),
+                None => None,
+            }
+            .or(if awaiting_length.is_empty() {
+                None
+            } else {
+                Some(0)
+            });
+            match pick.and_then(|at| awaiting_length.remove(at)) {
+                Some(false) => TemplateParam::OutputCapacity,
+                Some(true) => {
+                    input_sized = true;
+                    TemplateParam::InputLength
+                }
+                None => TemplateParam::InputLength,
+            }
+        };
+        roles.push(role);
+    }
+    if let Some(input) = input {
+        if !input_sized && template_params::is_c_string(params[input]) {
+            roles[input] = TemplateParam::Text;
+        }
+    }
+    roles
+}
+
+#[cfg(test)]
 fn generate_harness_body(symbol: &str, signature: Option<&str>) -> String {
-    let fallback = format!("    {symbol}((const char *)data, size);");
+    generate_harness_parts(symbol, signature, None).1
+}
+
+/// The template's call to `symbol` and the code it needs ahead of the entry
+/// point: `(support, body)`.
+///
+/// Arguments follow the signature: the first byte-like pointer gets the input
+/// (as a NUL-terminated copy when it is a `char` string with no length after
+/// it, so the target never reads past the buffer), further `void` pointers get
+/// `NULL`, other pointers a zeroed local, a callback typedef the project
+/// declares a stub that returns "continue", and integers the input size.
+/// `project_root` is where callback typedefs are looked up.
+fn generate_harness_parts(
+    symbol: &str,
+    signature: Option<&str>,
+    project_root: Option<&Path>,
+) -> (String, String) {
+    let fallback = (
+        String::new(),
+        format!("    {symbol}((const char *)data, size);"),
+    );
     let Some(sig) = signature else {
         return fallback;
     };
@@ -3397,43 +3603,71 @@ fn generate_harness_body(symbol: &str, signature: Option<&str>) -> String {
         return fallback;
     }
 
+    let roles = parameter_roles(&params, project_root);
+    let mut support = String::new();
+    let mut prologue = String::new();
+    let mut frees: Vec<String> = Vec::new();
     let mut decls: Vec<String> = Vec::new();
     let mut args: Vec<String> = Vec::new();
-    let mut buffer_used = false;
-
-    for (i, param) in params.iter().enumerate() {
-        let star_count = param.matches('*').count();
-        let is_char_like =
-            param.contains("char") || param.contains("uint8") || param.contains("void");
-        if star_count == 1 && is_char_like && !buffer_used {
+    for (i, role) in roles.into_iter().enumerate() {
+        match role {
+            TemplateParam::Text => {
+                // A C string with no length is read up to its NUL.
+                let _ = writeln!(support, "#include <stdlib.h>\n#include <string.h>");
+                prologue.push_str(
+                    "    char *_text = (char *)malloc(size + 1);\n    if (_text == NULL) {\n        return 0;\n    }\n    memcpy(_text, data, size);\n    _text[size] = '\\0';\n",
+                );
+                frees.push("_text".to_owned());
+                args.push("_text".to_owned());
+            }
             // Cast to the parameter's own declared type. Hardcoding
             // `const char *` here is an incompatible-pointer warning in C (it
             // still links, which is why it went unnoticed) and a hard error in
             // C++, where harnesses build with `clang++` -- so a C++ target
             // taking `const uint8_t *`, the commonest fuzzing signature there
-            // is, would not compile at all on this no-LLM path.
-            args.push(format!("({})data", pointer_cast_type(param)));
-            buffer_used = true;
-        } else if star_count >= 1 {
-            let base = param[..param.find('*').unwrap_or(param.len())]
-                .trim()
-                .trim_start_matches("const ")
-                .trim();
-            let base = if base.is_empty() { "char" } else { base };
-            decls.push(format!("    {base} _arg{i} = {{0}};"));
-            args.push(format!("&_arg{i}"));
-        } else {
-            args.push("size".to_string());
+            // is, would not compile on this no-LLM path.
+            TemplateParam::Input => args.push(format!("({})data", pointer_cast_type(params[i]))),
+            TemplateParam::Output(base) => {
+                if !support.contains("#include <stdlib.h>") {
+                    let _ = writeln!(support, "#include <stdlib.h>");
+                }
+                let name = format!("_out{i}");
+                let _ = write!(
+                    prologue,
+                    "    {base} *{name} = ({base} *)calloc({OUTPUT_CAPACITY}, 1);\n    if ({name} == NULL) {{\n"
+                );
+                for earlier in frees.iter().rev() {
+                    let _ = writeln!(prologue, "        free({earlier});");
+                }
+                prologue.push_str("        return 0;\n    }\n");
+                frees.push(name.clone());
+                args.push(name);
+            }
+            TemplateParam::Null => args.push("NULL".to_owned()),
+            TemplateParam::Local(base) => {
+                decls.push(format!("    {base} _arg{i} = {{0}};"));
+                args.push(format!("&_arg{i}"));
+            }
+            TemplateParam::Callback(stub) => {
+                let _ = writeln!(support, "{}", stub.definition);
+                args.push(stub.name);
+            }
+            TemplateParam::InputLength => args.push("size".to_owned()),
+            TemplateParam::OutputCapacity => args.push(OUTPUT_CAPACITY.to_string()),
         }
     }
+    let mut epilogue = String::new();
+    for name in frees.iter().rev() {
+        let _ = write!(epilogue, "\n    free({name});");
+    }
 
-    let mut body = String::new();
+    let mut body = prologue;
     for d in &decls {
         body.push_str(d);
         body.push('\n');
     }
-    let _ = write!(body, "    {symbol}({});", args.join(", "));
-    body
+    let _ = write!(body, "    {symbol}({});{epilogue}", args.join(", "));
+    (support, body)
 }
 
 #[cfg(test)]
@@ -3543,6 +3777,66 @@ mod heuristic_harness_tests {
     /// `fatal error: '<stem>.h' file not found` for any target whose
     /// declarations are not in a same-named header. The forward declaration
     /// already declares the target, so an absent header costs nothing.
+    /// lz4: `LZ4_decompress_safe(const char* src, char* dst, int
+    /// compressedSize, int dstCapacity)`. The template passed a one-byte
+    /// local as `dst` and the input size as its capacity, so any input that
+    /// decompressed to two bytes was a false overflow.
+    #[test]
+    fn an_output_buffer_gets_real_storage_and_its_own_capacity() {
+        let body = generate_harness_body(
+            "LZ4_decompress_safe",
+            Some("int LZ4_decompress_safe(const char* source, char* dest, int compressedSize, int maxDecompressedSize)"),
+        );
+        assert!(
+            body.contains("char *_out1 = (char *)calloc(65536, 1);"),
+            "{body}"
+        );
+        assert!(
+            body.contains("LZ4_decompress_safe((const char *)data, _out1, size, 65536);"),
+            "{body}"
+        );
+        assert!(body.contains("free(_out1);"), "{body}");
+        assert!(!body.contains("_text"), "{body}");
+    }
+
+    #[test]
+    fn a_length_named_for_the_output_is_its_capacity() {
+        let body = generate_harness_body(
+            "escape",
+            Some("int escape(const char *text, char *out, size_t outlen)"),
+        );
+        assert!(body.contains("escape(_text, _out1, 65536);"), "{body}");
+        assert!(body.contains("free(_out1);\n    free(_text);"), "{body}");
+    }
+
+    #[test]
+    fn each_length_follows_its_own_buffer() {
+        let body = generate_harness_body(
+            "encode",
+            Some("size_t encode(unsigned char *out, size_t outlen, const unsigned char *in, size_t inlen)"),
+        );
+        assert!(
+            body.contains("encode(_out0, 65536, (const unsigned char *)data, size);"),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn a_leading_attribute_macro_is_not_part_of_the_forward_declaration() {
+        assert_eq!(
+            super::generate_forward_decl(
+                "LZ4_decompress_safe",
+                Some("LZ4_FORCE_O2 int LZ4_decompress_safe(const char* source, char* dest, int a, int b)")
+            ),
+            "int LZ4_decompress_safe(const char* source, char* dest, int a, int b);"
+        );
+        // A one-word return type in capitals is a type, not an attribute.
+        assert_eq!(
+            super::generate_forward_decl("parse", Some("BOOL parse(const char *s)")),
+            "BOOL parse(const char *s);"
+        );
+    }
+
     #[test]
     fn a_header_is_included_only_when_it_exists() {
         let dir = tempfile::tempdir().unwrap();

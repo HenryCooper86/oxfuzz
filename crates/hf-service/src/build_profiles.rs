@@ -248,8 +248,13 @@ fn component_path(component: &str, file: &str) -> String {
     }
 }
 
+/// Whether the marker `relative` exists under exactly that name. A
+/// case-insensitive filesystem (macOS) resolves `makefile` to a `Makefile`,
+/// so the name is also looked up among its directory's entries.
 fn marker_present(project: &Path, relative: &str) -> Result<bool, ClassifiedError> {
-    match std::fs::symlink_metadata(project.join(relative)) {
+    let path = project.join(relative);
+    match std::fs::symlink_metadata(&path) {
+        Ok(_) if !spelled_exactly(&path)? => Ok(false),
         Ok(_) => {
             validate_project_path(project, relative, false, false)?;
             Ok(true)
@@ -257,6 +262,19 @@ fn marker_present(project: &Path, relative: &str) -> Result<bool, ClassifiedErro
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(invalid(&format!("inspect build marker: {error}"))),
     }
+}
+
+/// Whether `path`'s file name is one of its directory's entries, spelled
+/// exactly.
+pub(crate) fn spelled_exactly(path: &Path) -> Result<bool, ClassifiedError> {
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return Ok(false);
+    };
+    let entries = std::fs::read_dir(parent)
+        .map_err(|error| invalid(&format!("list build marker directory: {error}")))?;
+    Ok(entries
+        .flatten()
+        .any(|entry| entry.file_name().as_os_str() == name))
 }
 
 fn select_marker(

@@ -98,3 +98,54 @@ fn nothing_is_released_without_a_declared_release_function_or_for_a_string() {
     );
     assert!(!draft(&string).contains("_result"));
 }
+
+#[test]
+fn a_string_input_is_terminated_and_a_callback_gets_a_project_typed_stub() {
+    // inih: `int ini_parse_string(const char* string, ini_handler handler,
+    // void* user)`. The template passed the raw bytes as an unterminated
+    // string (a read past the buffer on every input), `size` as the handler,
+    // and declared `void _arg2`, which is not C.
+    let project = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(project.path().join("libexif")).unwrap();
+    std::fs::write(
+        project.path().join("libexif/exif-data.h"),
+        "typedef int (*ini_handler)(void* user, const char* section,\n\
+                                    const char* name, const char* value);\n",
+    )
+    .unwrap();
+    let target = c_target(
+        project.path(),
+        "ini_parse_string",
+        "int ini_parse_string(const char* string, ini_handler handler, void* user)",
+    );
+
+    let source = draft(&target);
+
+    assert!(source.contains("_text[size] = '\\0';"), "{source}");
+    assert!(
+        source.contains("static int oxfuzz_ini_handler_stub(void* p0, const char* p1, const char* p2, const char* p3)"),
+        "{source}"
+    );
+    assert!(
+        source.contains("ini_parse_string(_text, (ini_handler)oxfuzz_ini_handler_stub, NULL);"),
+        "{source}"
+    );
+    assert!(source.contains("free(_text);"), "{source}");
+    assert!(!source.contains("void _arg"), "{source}");
+}
+
+#[test]
+fn a_byte_buffer_with_a_length_is_passed_unchanged() {
+    let project = tempfile::tempdir().unwrap();
+    let target = c_target(
+        project.path(),
+        "parse_text",
+        "int parse_text(const char *buf, size_t len)",
+    );
+    let source = draft(&target);
+    assert!(
+        source.contains("parse_text((const char *)data, size);"),
+        "{source}"
+    );
+    assert!(!source.contains("char *_text"), "{source}");
+}

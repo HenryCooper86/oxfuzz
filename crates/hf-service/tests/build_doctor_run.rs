@@ -363,7 +363,8 @@ async fn make_creates_output_directory_then_runs_bear_and_stops_on_first_failure
                     "../../build/parser/compile_commands.json",
                     "--",
                     "make",
-                    "-B"
+                    "-B",
+                    "-j2"
                 ]
             );
             assert_eq!(result.status, BuildTerminalStatus::Succeeded);

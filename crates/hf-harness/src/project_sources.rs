@@ -258,12 +258,7 @@ impl ProjectLinkInputs {
                 .library
                 .iter()
                 .chain(&inputs.entry_programs)
-                .any(|path| {
-                    Path::new(path)
-                        .extension()
-                        .and_then(|extension| extension.to_str())
-                        .is_some_and(|extension| matches!(extension, "cc" | "cpp" | "cxx"))
-                });
+                .any(|path| is_cpp_source(path));
             if has_cpp_unit {
                 inputs.system_libraries.push("stdc++");
             }
@@ -293,12 +288,93 @@ impl ProjectLinkInputs {
     /// prepended to the link command; empty when there is no entry program.
     #[must_use]
     pub fn precompile_script(&self, compile_prefix: &str, container_ws: &str) -> String {
+        self.precompile_script_with(compile_prefix, None, container_ws)
+    }
+
+    /// Split a harness build's project `flags` by language, when its units
+    /// mix C and C++ in a way one compile command cannot build: a `-std=`
+    /// standard of one language is rejected for a source of the other, and
+    /// the C++ driver compiles a `.c` input as C++.
+    ///
+    /// `None` when one command compiles every unit. Otherwise the flags of
+    /// the harness's own command (and of units in its language) and those of
+    /// the units in the other language, which
+    /// [`precompile_script_with`](Self::precompile_script_with) compiles
+    /// apart. The `-std=` standard goes to whichever side shares its
+    /// language; every other flag goes to both.
+    #[must_use]
+    pub fn language_split(
+        &self,
+        flags: &[String],
+        harness_cpp: bool,
+    ) -> Option<(Vec<String>, Vec<String>)> {
+        let standard = flags.iter().find(|flag| flag.starts_with("-std="));
+        let foreign = self
+            .linked_units()
+            .any(|path| is_cpp_source(path) != harness_cpp);
+        if !foreign || (standard.is_none() && !harness_cpp) {
+            return None;
+        }
+        let standard_cpp = standard.is_some_and(|flag| flag.contains("++"));
+        let side = |cpp: bool| -> Vec<String> {
+            flags
+                .iter()
+                .filter(|flag| !flag.starts_with("-std=") || standard_cpp == cpp)
+                .cloned()
+                .collect()
+        };
+        Some((side(harness_cpp), side(!harness_cpp)))
+    }
+
+    /// [`precompile_script`](Self::precompile_script), and with
+    /// `foreign = Some((prefix, harness_cpp))` also the units in the other
+    /// language than the harness, each compiled alone with `prefix` (from the
+    /// second half of [`language_split`](Self::language_split)) into `/tmp`.
+    /// A C unit under the C++ driver is compiled as C. Pass the same
+    /// `harness_cpp` to [`link_args_with`](Self::link_args_with).
+    #[must_use]
+    pub fn precompile_script_with(
+        &self,
+        compile_prefix: &str,
+        foreign: Option<(&str, bool)>,
+        container_ws: &str,
+    ) -> String {
+        let prefix_for = |path: &str| -> String {
+            match foreign {
+                Some((prefix, harness_cpp)) if is_cpp_source(path) != harness_cpp => {
+                    if harness_cpp {
+                        format!("{prefix} -x c")
+                    } else {
+                        prefix.to_owned()
+                    }
+                }
+                _ => compile_prefix.to_owned(),
+            }
+        };
         let mut script = String::new();
+        if let Some((_, harness_cpp)) = foreign {
+            for (index, path) in self
+                .library
+                .iter()
+                .filter(|path| is_cpp_source(path) != harness_cpp)
+                .enumerate()
+            {
+                // Writing to a String cannot fail.
+                let _ = write!(
+                    script,
+                    "{prefix} -c {container_ws}/{source} -o {object} && ",
+                    prefix = prefix_for(path),
+                    source = sh_quote(path),
+                    object = unit_object(index),
+                );
+            }
+        }
         for (index, path) in self.entry_programs.iter().enumerate() {
             // Writing to a String cannot fail.
             let _ = write!(
                 script,
-                "{compile_prefix} -Dmain={symbol} -c {container_ws}/{source} -o {object} && ",
+                "{prefix} -Dmain={symbol} -c {container_ws}/{source} -o {object} && ",
+                prefix = prefix_for(path),
                 symbol = renamed_main(index),
                 source = sh_quote(path),
                 object = entry_object(index),
@@ -324,6 +400,15 @@ impl ProjectLinkInputs {
     /// Every path from the project is shell-quoted.
     #[must_use]
     pub fn link_args(&self, container_ws: &str) -> String {
+        self.link_args_with(container_ws, None)
+    }
+
+    /// [`link_args`](Self::link_args), with the units
+    /// [`precompile_script_with`](Self::precompile_script_with) compiled apart
+    /// for a harness of `foreign_from` (`Some(harness_cpp)`) linked as their
+    /// objects, in place.
+    #[must_use]
+    pub fn link_args_with(&self, container_ws: &str, foreign_from: Option<bool>) -> String {
         // System libraries come last, after every object that may need them,
         // and `--as-needed` drops any the link does not use (an include under
         // a disabled `#ifdef` still names one).
@@ -333,9 +418,16 @@ impl ProjectLinkInputs {
                 .collect::<Vec<_>>()
                 .join(" ")
         });
+        let mut foreign_index = 0usize;
         self.library
             .iter()
-            .map(|path| format!("{container_ws}/{}", sh_quote(path)))
+            .map(|path| match foreign_from {
+                Some(harness_cpp) if is_cpp_source(path) != harness_cpp => {
+                    foreign_index += 1;
+                    unit_object(foreign_index - 1)
+                }
+                _ => format!("{container_ws}/{}", sh_quote(path)),
+            })
             .chain((!self.entry_programs.is_empty()).then(|| ENTRY_PROGRAM_ARCHIVE.to_owned()))
             .chain(libraries)
             .collect::<Vec<_>>()
@@ -349,6 +441,20 @@ const ENTRY_PROGRAM_ARCHIVE: &str = "/tmp/oxfuzz_project_programs.a";
 /// The symbol an entry program's `main` is renamed to.
 fn renamed_main(index: usize) -> String {
     format!("oxfuzz_project_main_{index}")
+}
+
+/// Container path of the object of a library unit compiled apart.
+fn unit_object(index: usize) -> String {
+    format!("/tmp/oxfuzz_project_unit_{index}.o")
+}
+
+/// Whether a translation unit is C++ source, by its extension.
+#[must_use]
+pub fn is_cpp_source(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| matches!(extension, "cc" | "cpp" | "cxx"))
 }
 
 /// Container path of an entry program's renamed object.

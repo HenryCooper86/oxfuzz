@@ -116,10 +116,100 @@ pub fn parse_compile_database(json: &str) -> Result<Vec<CompileEntry>, BuildCont
         .collect()
 }
 
+/// Directories whose sources build programs around a library -- its tests,
+/// examples, benchmarks, fuzzers, demos -- rather than the library itself.
+const AUXILIARY_DIRS: [&str; 17] = [
+    "test",
+    "tests",
+    "testing",
+    "unittest",
+    "unittests",
+    "example",
+    "examples",
+    "bench",
+    "benches",
+    "benchmark",
+    "benchmarks",
+    "fuzz",
+    "fuzzing",
+    "demo",
+    "demos",
+    "sample",
+    "samples",
+];
+
+/// Whether `entry` compiles for one of the project's auxiliary programs: its
+/// source, or the object it writes, lies under a directory such as `tests`,
+/// `examples`, `bench` or `fuzz`. The object path counts because build systems compile library
+/// sources again for each test program (Meson writes inih's
+/// `tests/unittest_heap.p/.._ini.c.o` from `ini.c` with that test's settings).
+#[must_use]
+pub fn is_auxiliary_entry(entry: &CompileEntry, project_root: &Path) -> bool {
+    let auxiliary = |path: &Path| {
+        path.components().any(|component| match component {
+            Component::Normal(name) => name
+                .to_str()
+                .is_some_and(|name| AUXILIARY_DIRS.contains(&name.to_ascii_lowercase().as_str())),
+            _ => false,
+        })
+    };
+    let source = lexically_normal(&entry.directory.join(&entry.file));
+    if source.strip_prefix(project_root).is_ok_and(&auxiliary) {
+        return true;
+    }
+    let mut arguments = entry.arguments.iter();
+    let output = loop {
+        let Some(token) = arguments.next() else {
+            break None;
+        };
+        if token == "-o" {
+            break arguments.next().map(PathBuf::from);
+        }
+        if let Some(path) = token.strip_prefix("-o").filter(|rest| !rest.is_empty()) {
+            break Some(PathBuf::from(path));
+        }
+    };
+    output.is_some_and(|output| {
+        let relative_to_build = if output.is_absolute() {
+            lexically_normal(&output)
+                .strip_prefix(&entry.directory)
+                .map(Path::to_path_buf)
+                .unwrap_or_default()
+        } else {
+            output
+        };
+        auxiliary(&relative_to_build)
+    })
+}
+
+/// `path` with `.` and `..` components resolved lexically, without touching
+/// the filesystem.
+#[must_use]
+pub fn lexically_normal(path: &Path) -> PathBuf {
+    let mut normal = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normal.pop();
+            }
+            other => normal.push(other.as_os_str()),
+        }
+    }
+    normal
+}
+
 /// Extract the portable, validated compile context from parsed entries.
 ///
 /// Values are deduplicated in first-seen order, so the same project always
 /// yields the same context and the same compile command.
+///
+/// Only the library's own compiles shape the context when it has any: the
+/// entries of tests, examples and other auxiliary programs
+/// ([`is_auxiliary_entry`]) carry their own settings, and a harness built
+/// with them fuzzes a configuration the library never ships. A macro that
+/// the remaining entries still define with different values is dropped, as
+/// one harness cannot honour them all.
 #[must_use]
 pub fn extract_build_context(entries: &[CompileEntry], project_root: &Path) -> BuildContext {
     let mut context = BuildContext {
@@ -131,7 +221,17 @@ pub fn extract_build_context(entries: &[CompileEntry], project_root: &Path) -> B
     let mut seen_flags = HashSet::new();
     let mut seen_dropped = HashSet::new();
 
-    for entry in entries {
+    let library: Vec<&CompileEntry> = entries
+        .iter()
+        .filter(|entry| !is_auxiliary_entry(entry, project_root))
+        .collect();
+    let considered: Vec<&CompileEntry> = if library.is_empty() {
+        entries.iter().collect()
+    } else {
+        library
+    };
+
+    for entry in considered {
         // Skip the compiler driver itself: it is argv[0], never a flag.
         let mut arguments = entry.arguments.iter().skip(1).peekable();
         while let Some(token) = arguments.next() {
@@ -191,7 +291,32 @@ pub fn extract_build_context(entries: &[CompileEntry], project_root: &Path) -> B
             }
         }
     }
+    drop_conflicting_defines(&mut context, &mut seen_dropped);
     context
+}
+
+/// Drop every value of a macro the library's entries define more than one
+/// way (`-DMODE=1` in one unit, `-DMODE=2` in another).
+fn drop_conflicting_defines(context: &mut BuildContext, seen_dropped: &mut HashSet<String>) {
+    let name = |define: &str| {
+        define
+            .trim_start_matches("-D")
+            .split('=')
+            .next()
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let mut values: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for define in &context.defines {
+        *values.entry(name(define)).or_default() += 1;
+    }
+    let (kept, conflicting): (Vec<String>, Vec<String>) = std::mem::take(&mut context.defines)
+        .into_iter()
+        .partition(|define| values.get(&name(define)).copied().unwrap_or(0) <= 1);
+    context.defines = kept;
+    for define in conflicting {
+        record_dropped(context, seen_dropped, &define);
+    }
 }
 
 /// Record a rejected flag once, up to [`MAX_DROPPED_FLAGS`].
@@ -630,6 +755,46 @@ mod tests {
         assert!(context
             .dropped
             .contains(&"-DPREFIX=prefix:/Users/alice/project".to_owned()));
+    }
+
+    #[test]
+    fn test_program_variants_do_not_shape_the_library_context() {
+        // inih compiles `ini.c` once for the library with no `INI_*` settings
+        // and again for each unit-test program with that test's settings.
+        // The union gave the harness `INI_INITIAL_ALLOC` three values and the
+        // test-only `INI_CUSTOM_ALLOCATOR=1`.
+        let database = serde_json::json!([
+            {"directory": "/proj/build", "file": "../ini.c",
+             "arguments": ["cc", "-I.", "-I..", "-D_FILE_OFFSET_BITS=64", "-o", "libinih.so.0.p/.._ini.c.o", "-c", "../ini.c"]},
+            {"directory": "/proj/build", "file": "../ini.c",
+             "arguments": ["cc", "-D_FILE_OFFSET_BITS=64", "-DINI_MAX_LINE=20", "-DINI_INITIAL_ALLOC=20",
+                           "-o", "tests/unittest_heap.p/.._ini.c.o", "-c", "../ini.c"]},
+            {"directory": "/proj/build", "file": "../tests/unittest_alloc.c",
+             "arguments": ["cc", "-I../tests", "-DINI_CUSTOM_ALLOCATOR=1", "-DINI_INITIAL_ALLOC=12",
+                           "-o", "tests/unittest_alloc.p/unittest_alloc.c.o", "-c", "../tests/unittest_alloc.c"]},
+            {"directory": "/proj/build", "file": "../src/a.c",
+             "arguments": ["cc", "-DMODE=1", "-o", "a.o", "-c", "../src/a.c"]},
+            {"directory": "/proj/build", "file": "../src/b.c",
+             "arguments": ["cc", "-DMODE=2", "-o", "b.o", "-c", "../src/b.c"]}
+        ])
+        .to_string();
+        let entries = parse_compile_database(&database).expect("parse compile database");
+
+        let context = extract_build_context(&entries, &PathBuf::from("/proj"));
+
+        assert_eq!(context.defines, vec!["-D_FILE_OFFSET_BITS=64"]);
+        assert!(
+            context.dropped.contains(&"-DMODE=1".to_owned()),
+            "{:?}",
+            context.dropped
+        );
+        assert!(!context
+            .include_dirs
+            .iter()
+            .any(|dir| dir.ends_with("tests")));
+        assert!(is_auxiliary_entry(&entries[1], Path::new("/proj")));
+        assert!(is_auxiliary_entry(&entries[2], Path::new("/proj")));
+        assert!(!is_auxiliary_entry(&entries[0], Path::new("/proj")));
     }
 
     #[test]

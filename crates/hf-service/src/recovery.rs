@@ -698,7 +698,7 @@ mod tests {
             .write(true)
             .open(&path)
             .unwrap();
-        transient.try_lock().unwrap();
+        lock_within_a_second(&transient);
         let release = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(20));
             drop(transient);
@@ -713,8 +713,22 @@ mod tests {
             .write(true)
             .open(&path)
             .unwrap();
-        live.try_lock().unwrap();
+        lock_within_a_second(&live);
         assert!(run_owner_is_alive(&wal, &run));
+    }
+
+    /// Take `file`'s lock, retrying for up to a second. A process another
+    /// test in this binary forks holds a copy of every open file description,
+    /// lock included, until it execs; one `try_lock` lost that race on the
+    /// slower coverage build (GitLab job 3169).
+    fn lock_within_a_second(file: &File) {
+        for _ in 0..100 {
+            if file.try_lock().is_ok() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("the owner lock stayed busy for a second");
     }
 
     /// The desktop app and the CLI share one journal. Starting `oxfuzz ci`

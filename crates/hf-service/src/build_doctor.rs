@@ -40,11 +40,12 @@ pub fn detect_build_systems(project: &Path) -> Vec<BuildSystemDiagnosis> {
 }
 
 /// Whether a regular file with this exact name sits at the project root.
+/// The name must match a directory entry exactly: a case-insensitive
+/// filesystem (macOS) also resolves `makefile` for a `Makefile`.
 fn is_root_file(project: &Path, name: &str) -> bool {
-    project
-        .join(name)
-        .symlink_metadata()
-        .is_ok_and(|meta| meta.is_file())
+    let path = project.join(name);
+    path.symlink_metadata().is_ok_and(|meta| meta.is_file())
+        && crate::build_profiles::spelled_exactly(&path).unwrap_or(false)
 }
 
 /// Whether the first compile database selected by the service resolves into

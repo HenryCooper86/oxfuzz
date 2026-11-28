@@ -1450,3 +1450,75 @@ async fn a_honggfuzz_replay_that_cannot_run_is_inconclusive() {
     assert!(!result.verified);
     assert!(!result.still_crashes);
 }
+
+/// Counts the CASR commands it is asked to run; every command succeeds.
+struct CountsCasrRuntime {
+    casr_runs: AtomicUsize,
+}
+
+#[async_trait]
+impl RuntimeAdapter for CountsCasrRuntime {
+    async fn resolve_image_reference(
+        &self,
+        _image: &str,
+    ) -> Result<Option<hf_core::runtime::ImmutableImageReference>, ClassifiedError> {
+        Ok(Some(hf_test_utils::immutable_test_image()?))
+    }
+
+    async fn run_command(
+        &self,
+        cmd: &[String],
+        cwd: &Path,
+        limits: &ResourceLimits,
+    ) -> Result<CommandResult, ClassifiedError> {
+        self.run_command_opts(cmd, cwd, limits, &SandboxOptions::default())
+            .await
+    }
+
+    async fn write_file(&self, _path: &Path, _content: &str) -> Result<(), ClassifiedError> {
+        Ok(())
+    }
+
+    async fn read_file(&self, _path: &Path) -> Result<String, ClassifiedError> {
+        Ok(String::new())
+    }
+
+    async fn run_command_opts(
+        &self,
+        cmd: &[String],
+        cwd: &Path,
+        _limits: &ResourceLimits,
+        _opts: &SandboxOptions,
+    ) -> Result<CommandResult, ClassifiedError> {
+        if is_casr(cmd) {
+            self.casr_runs.fetch_add(1, Ordering::SeqCst);
+            return Ok(completed(1, "", "Error: No crashes found", cwd));
+        }
+        Ok(completed(0, "", "", cwd))
+    }
+}
+
+#[tokio::test]
+async fn an_afl_run_without_crashes_does_not_start_casr() {
+    // inih and lz4 under AFL++: every clean run's triage started casr-afl,
+    // which exited 1 with "No crashes found" and logged a warning.
+    let fixture = triage_fixture_for("afl-clean", EngineKind::AflPlusPlus, &[]).await;
+    let runtime = Arc::new(CountsCasrRuntime {
+        casr_runs: AtomicUsize::new(0),
+    });
+    let container = ServiceContainer::new(Arc::clone(&runtime) as Arc<dyn RuntimeAdapter>, None)
+        .with_store(Arc::clone(&fixture.store));
+
+    let crashes = container
+        .triage_run(
+            &fixture.project,
+            &fixture.symbol,
+            fixture.run_id,
+            hf_service::AiPolicy::Off,
+        )
+        .await
+        .expect("a run without crashes triages to nothing");
+
+    assert!(crashes.is_empty(), "{crashes:?}");
+    assert_eq!(runtime.casr_runs.load(Ordering::SeqCst), 0);
+}

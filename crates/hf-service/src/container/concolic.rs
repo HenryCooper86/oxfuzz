@@ -463,16 +463,28 @@ fn concolic_build_script(
     project: &hf_harness::project_sources::ProjectLinkInputs,
     project_flags: &[String],
 ) -> String {
-    let flags = hf_harness::project_sources::shell_quoted(project_flags);
-    let compile = if flags.is_empty() {
-        "symcc -O1".to_owned()
-    } else {
-        format!("symcc -O1 {flags}")
+    let prefix = |flags: &[String]| {
+        let flags = hf_harness::project_sources::shell_quoted(flags);
+        if flags.is_empty() {
+            "symcc -O1".to_owned()
+        } else {
+            format!("symcc -O1 {flags}")
+        }
+    };
+    // The harness is C; a C++ unit with its own `-std=` compiles apart.
+    let split = project.language_split(project_flags, false);
+    let (compile, foreign) = match &split {
+        Some((own, foreign)) => (prefix(own), Some(prefix(foreign))),
+        None => (prefix(project_flags), None),
     };
     format!(
         "{precompile}{compile} harness.c symcc_driver.c {link_args} -o concolic_target",
-        precompile = project.precompile_script(&compile, "/work"),
-        link_args = project.link_args("/work"),
+        precompile = project.precompile_script_with(
+            &compile,
+            foreign.as_deref().map(|foreign| (foreign, false)),
+            "/work"
+        ),
+        link_args = project.link_args_with("/work", split.as_ref().map(|_| false)),
     )
 }
 

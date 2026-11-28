@@ -131,7 +131,7 @@ fn ingest_with_mode(
         let log = find_sanitizer_log_bounded(path, run_dir, &name, &artifact_paths, &mut reports);
         let (kind, sig, summary) = log
             .as_deref()
-            .map_or((CrashKind::Other, String::new(), String::new()), classify);
+            .map_or_else(|| unreported_artifact(&name), classify);
         // Same report text, one read: the layer the fault lies in comes from
         // the stack the classifier already looked at.
         let origin = log
@@ -470,6 +470,22 @@ fn is_regular_file(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file())
 }
 
+/// What an artifact with no report beside it is, by the name the engine gave
+/// it. libFuzzer names an input that was running when its memory limit was
+/// hit `oom-<sha1>`; the limit is often reached across many inputs, so the
+/// input replays cleanly alone and leaves nothing better to go on.
+fn unreported_artifact(name: &str) -> (CrashKind, String, String) {
+    if name.starts_with("oom-") {
+        (
+            CrashKind::Other,
+            crate::classify::OOM_KILL_SIGNATURE.to_owned(),
+            "out of memory: libFuzzer reached its memory limit while running this input".to_owned(),
+        )
+    } else {
+        (CrashKind::Other, String::new(), String::new())
+    }
+}
+
 fn is_libfuzzer_crash(name: &str) -> bool {
     name.starts_with("crash-")
         || name.starts_with("leak-")
@@ -794,6 +810,27 @@ mod tests {
         std::fs::remove_dir_all(&base).ok();
         std::fs::create_dir_all(&base).unwrap();
         base
+    }
+
+    #[test]
+    fn a_libfuzzer_oom_artifact_without_a_report_is_named_out_of_memory() {
+        // libpng: libFuzzer hit its RSS limit across slow iterations and
+        // saved the running input as `oom-<sha1>`; no report sits beside it,
+        // the input replays cleanly alone, and triage called it "Other crash
+        // detected" with nothing else to go on.
+        let dir = tmp();
+        std::fs::write(dir.join("oom-f4ac9ff4"), b"x").unwrap();
+
+        let result =
+            ingest_for_engine(&dir, EngineKind::LibFuzzer, Uuid::nil(), Uuid::nil()).unwrap();
+
+        let crash = &result.crashes[0];
+        assert_eq!(crash.stack_signature, "out-of-memory-kill");
+        assert!(
+            crash.summary.starts_with("out of memory"),
+            "{}",
+            crash.summary
+        );
     }
 
     #[test]

@@ -241,6 +241,17 @@ and `oxfuzz kernel` says that it tested nothing. The
 [acceptance record](../acceptance/kernel-emulated-2026-11-22.md) has the
 numbers.
 
+Keep the host idle and awake for the whole campaign. Emulation has no spare
+time: with other heavy work on the same Mac (a CI runner, other VMs, a large
+build), the machine check ran past its timeouts and the campaign recorded no
+coverage, and a Mac that sleeps (a closed lid) suspends the guest mid-run. On
+an idle host, a 40-minute campaign on 2026-11-28 reached 10,036 edges. On
+macOS, keep the Mac awake for the run:
+
+```bash
+caffeinate -dimsu oxfuzz kernel <project> --kernel-image <Image> --rootfs <rootfs.img> --ssh-key <key> --duration 40m
+```
+
 syzkaller lengthens its timeouts for an emulated guest when the `vm` section
 contains the text `-accel tcg`. oxfuzz does not write that spelling: in the
 recorded comparison it produced no coverage in a 30-minute campaign. If you

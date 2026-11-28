@@ -37,30 +37,10 @@ impl CapturedBuildInputs {
     }
 
     fn database_units(&self) -> Option<Vec<String>> {
-        let entries =
-            hf_discovery::build_context::parse_compile_database(self.database.as_deref()?).ok()?;
-        let root = Path::new(&self.record.project_root);
-        let mut units: Vec<String> = entries
-            .iter()
-            .filter_map(|entry| {
-                let file = if entry.file.is_absolute() {
-                    entry.file.clone()
-                } else {
-                    entry.directory.join(&entry.file)
-                };
-                let relative = file
-                    .strip_prefix(root)
-                    .or_else(|_| file.strip_prefix("/work"))
-                    .ok()?;
-                relative
-                    .components()
-                    .all(|component| matches!(component, std::path::Component::Normal(_)))
-                    .then(|| hf_core::runtime::posix_relative(relative))
-            })
-            .collect();
-        units.sort();
-        units.dedup();
-        (!units.is_empty()).then_some(units)
+        database_units(
+            self.database.as_deref()?,
+            Path::new(&self.record.project_root),
+        )
     }
 
     pub fn stage_marker(&self, workspace: &Path) -> Result<(), ClassifiedError> {
@@ -542,5 +522,83 @@ pub(super) fn corpus_input_error(operation: &str, error: ClassifiedError) -> Cla
             ClassifiedError::Validation(format!("{operation}: {message}"))
         }
         error => error,
+    }
+}
+
+/// The translation units a compile database names under `root` (or under
+/// `/work` for a build that ran in the sandbox), as workspace-relative paths.
+///
+/// When the database compiles the library itself, the units of its tests,
+/// examples and other auxiliary programs are left out: linking several test
+/// programs into one harness fuzzes code the library does not contain and
+/// can collide on their shared symbols.
+fn database_units(database: &str, root: &Path) -> Option<Vec<String>> {
+    let entries = hf_discovery::build_context::parse_compile_database(database).ok()?;
+    let has_library = entries
+        .iter()
+        .any(|entry| !hf_discovery::build_context::is_auxiliary_entry(entry, root));
+    let mut units: Vec<String> = entries
+        .iter()
+        .filter(|entry| {
+            !has_library || !hf_discovery::build_context::is_auxiliary_entry(entry, root)
+        })
+        .filter_map(|entry| {
+            // Meson names sources relative to its build directory
+            // (`../ini.c`); resolve that before confining the path.
+            let file =
+                hf_discovery::build_context::lexically_normal(&if entry.file.is_absolute() {
+                    entry.file.clone()
+                } else {
+                    entry.directory.join(&entry.file)
+                });
+            let relative = file
+                .strip_prefix(root)
+                .or_else(|_| file.strip_prefix("/work"))
+                .ok()?;
+            relative
+                .components()
+                .all(|component| matches!(component, std::path::Component::Normal(_)))
+                .then(|| hf_core::runtime::posix_relative(relative))
+        })
+        .collect();
+    units.sort();
+    units.dedup();
+    (!units.is_empty()).then_some(units)
+}
+
+#[cfg(test)]
+mod database_unit_tests {
+    #[test]
+    fn test_programs_are_not_linked_when_the_library_is_compiled() {
+        // inih: the library compiles `ini.c`; each unit-test program compiles
+        // its own file and `ini.c` again into `tests/<name>.p/`.
+        let database = serde_json::json!([
+            {"directory": "/proj/build", "file": "../ini.c",
+             "arguments": ["cc", "-o", "libinih.so.0.p/.._ini.c.o", "-c", "../ini.c"]},
+            {"directory": "/proj/build", "file": "../ini.c",
+             "arguments": ["cc", "-o", "tests/unittest_heap.p/.._ini.c.o", "-c", "../ini.c"]},
+            {"directory": "/proj/build", "file": "../tests/unittest_alloc.c",
+             "arguments": ["cc", "-o", "tests/unittest_alloc.p/unittest_alloc.c.o", "-c", "../tests/unittest_alloc.c"]},
+            {"directory": "/proj/build", "file": "../examples/ini_dump.c",
+             "arguments": ["cc", "-o", "examples/ini_dump.p/ini_dump.c.o", "-c", "../examples/ini_dump.c"]}
+        ])
+        .to_string();
+        assert_eq!(
+            super::database_units(&database, std::path::Path::new("/proj")),
+            Some(vec!["ini.c".to_owned()])
+        );
+    }
+
+    #[test]
+    fn a_database_of_test_programs_only_still_links_them() {
+        let database = serde_json::json!([
+            {"directory": "/proj", "file": "tests/check.c",
+             "arguments": ["cc", "-o", "tests/check.o", "-c", "tests/check.c"]}
+        ])
+        .to_string();
+        assert_eq!(
+            super::database_units(&database, std::path::Path::new("/proj")),
+            Some(vec!["tests/check.c".to_owned()])
+        );
     }
 }

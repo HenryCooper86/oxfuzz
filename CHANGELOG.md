@@ -53,6 +53,36 @@ retain only the current release; older entries remain here as the record.
   folders for targets that have no harness.
 - The REST API redacts host paths in ranked discovery and regression replay
   responses.
+- Build Doctor's Make step passes `-j2`. A project that picks its own job
+  count from `nproc` (lz4) counted every host CPU, and its compile wrappers
+  exhausted the sandbox's process limit and hung.
+- On macOS, a build marker is recorded under its own spelling (`Makefile`,
+  not `makefile`).
+- Harness build context comes from the library's own compiles: test,
+  example and benchmark programs no longer add their settings or their
+  units, and a macro defined with different values is left out (Meson
+  projects such as inih).
+- A C harness links a project whose C++ units carry their own `-std=`: those
+  units compile on their own with that standard, and a C++ harness compiles
+  the project's C units as C.
+- The model-free C template passes a NUL-terminated copy of the input to a C
+  string with no length, stubs callback parameters, and gives each output
+  buffer real storage and its own capacity (lz4's `LZ4_decompress_safe` no
+  longer reports false overflows). Attribute macros defined in the source
+  file no longer reach its forward declaration.
+- A libFuzzer `oom-` input is replayed under a 1 GiB per-allocation limit,
+  so triage reports the allocation and its stack (libpng 1.6.44 allocates a
+  `tEXt` chunk's declared length whole) instead of "Other crash detected";
+  an input that still shows nothing is reported as out of memory.
+- C and C++ harness drafts bound allocations the input sizes (libpng's
+  `png_set_user_limits`) and declare locals read after `longjmp` `volatile`.
+  The libpng harness drafted under these rules runs at about 13,700 exec/s,
+  up from about 500.
+- The syzkaller guide says an emulated kernel campaign needs an idle host
+  that stays awake (`caffeinate` on macOS).
+- Triage of an AFL++ run that saved no crash input no longer starts CASR
+  and warns "No crashes found", and the expected empty-input gap of the
+  AFL++ behavioral probe is no longer logged as a warning.
 
 ## 0.9.13 - 2026-11-27
 
