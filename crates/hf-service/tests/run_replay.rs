@@ -18,6 +18,11 @@ use hf_core::runtime::{
 };
 use hf_core::target::TargetLanguage;
 use hf_service::ServiceContainer;
+
+/// The `-seed=` argument a libFuzzer run receives for a recorded seed.
+fn seed_arg(seed: u64) -> String {
+    format!("-seed={}", hf_engine::seed::engine_seed(seed))
+}
 use hf_storage::RunStatus;
 use uuid::Uuid;
 
@@ -452,7 +457,7 @@ async fn run_records_a_seed_and_replay_reexecutes_with_it() {
     assert_eq!(config.replay_of, None);
     let run_args = runtime.campaign_args(summary.run_id);
     assert!(
-        run_args.iter().any(|arg| arg == &format!("-seed={seed}")),
+        run_args.iter().any(|arg| arg == &seed_arg(seed)),
         "the adapter must receive the recorded seed: {}",
         run_args.join(" ")
     );
@@ -587,9 +592,7 @@ async fn run_records_a_seed_and_replay_reexecutes_with_it() {
     );
     let replay_args = runtime.campaign_args(replay.run_id);
     assert!(
-        replay_args
-            .iter()
-            .any(|arg| arg == &format!("-seed={seed}")),
+        replay_args.iter().any(|arg| arg == &seed_arg(seed)),
         "the replayed run must dispatch the original seed: {}",
         replay_args.join(" ")
     );

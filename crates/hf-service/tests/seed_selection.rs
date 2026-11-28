@@ -21,6 +21,11 @@ use hf_core::runtime::{
 use hf_core::target::TargetLanguage;
 use hf_service::ServiceContainer;
 
+/// The `-seed=` argument a libFuzzer run receives for a recorded seed.
+fn seed_arg(seed: u64) -> String {
+    format!("-seed={}", hf_engine::seed::engine_seed(seed))
+}
+
 /// 2^63 + 1: above the JavaScript safe-integer range *and* above `i64::MAX`,
 /// so a wire client that rounds through a float or a signed integer cannot
 /// carry it. Persistence and the engine argv must keep every bit.
@@ -291,9 +296,7 @@ async fn an_explicit_seed_is_persisted_dispatched_and_kept_by_replay() {
     assert_eq!(config.replay_of, None);
     let run_args = fixture.runtime.campaign_args(summary.run_id);
     assert!(
-        run_args
-            .iter()
-            .any(|arg| arg == &format!("-seed={WIDE_SEED}")),
+        run_args.iter().any(|arg| arg == &seed_arg(WIDE_SEED)),
         "libFuzzer's fixed-seed knob must receive the explicit seed: {}",
         run_args.join(" ")
     );
@@ -316,9 +319,7 @@ async fn an_explicit_seed_is_persisted_dispatched_and_kept_by_replay() {
     assert_eq!(replayed.replay_of, Some(summary.run_id));
     let replay_args = fixture.runtime.campaign_args(replay.run_id);
     assert!(
-        replay_args
-            .iter()
-            .any(|arg| arg == &format!("-seed={WIDE_SEED}")),
+        replay_args.iter().any(|arg| arg == &seed_arg(WIDE_SEED)),
         "the replay dispatches the original seed: {}",
         replay_args.join(" ")
     );
@@ -399,8 +400,7 @@ async fn a_campaign_seed_reaches_every_iteration_but_not_the_smoke_seed() {
             campaign_rows += 1;
             let args = fixture.runtime.campaign_args(record.id);
             assert!(
-                args.iter()
-                    .any(|arg| arg == &format!("-seed={campaign_seed}")),
+                args.iter().any(|arg| arg == &seed_arg(campaign_seed)),
                 "run {} dispatches the campaign seed: {}",
                 record.id,
                 args.join(" ")

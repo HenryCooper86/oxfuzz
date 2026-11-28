@@ -232,8 +232,9 @@ pub(crate) struct HarnessArgs {
     /// Target symbol.
     #[arg(long)]
     pub(crate) target: String,
-    /// Generated function harnesses support AFL++, honggfuzz, and
-    /// libFuzzer only.
+    /// The fuzzing engine: libfuzzer, afl++ or honggfuzz for C, C++ and
+    /// Rust targets; go-native, atheris, jazzer or jazzer-js for Go, Python,
+    /// Java and JavaScript targets (see `--lang`).
     ///
     /// Syzkaller kernel campaigns have no harness: start one with
     /// `oxfuzz kernel` or the desktop application, each behind operator
@@ -1557,10 +1558,13 @@ mod harness_help_tests {
             .expect("harness subcommand");
         let help = harness.render_long_help().to_string();
 
-        assert!(
-            help.contains("AFL++, honggfuzz, and libFuzzer only"),
-            "{help}"
-        );
+        // Every harness engine is named, syzkaller is not one of them.
+        for engine in [
+            "libfuzzer, afl++ or honggfuzz",
+            "go-native, atheris, jazzer or jazzer-js",
+        ] {
+            assert!(help.contains(engine), "{help}");
+        }
         assert!(!help.contains("libfuzzer, syzkaller"), "{help}");
         assert!(!help.contains("run_syzkaller"), "{help}");
         assert!(help.contains("oxfuzz kernel"), "{help}");

@@ -51,7 +51,14 @@ selected module explicitly and retains a smoke check that rejects Atheris's
 arbitrary file writes, uncontrolled `eval`/`exec`, hidden imports, replacing
 input with constants, and exception handlers that swallow target failures.
 A reviewed predicate may classify documented input-rejection exceptions as
-nonbugs; broad `except Exception` is not accepted.
+nonbugs; broad `except Exception` is not accepted. The template derives that
+predicate from the target module itself: the exception classes it defines at
+top level (tomli's `TOMLDecodeError`), and the `ValueError`,
+`RecursionError`, `OverflowError`, `UnicodeError`, `UnicodeDecodeError` or
+`EOFError` it raises with an explicit `raise` (tomli's nesting limit). The
+directive records the list, the `except` names exactly those, and every
+other exception, `TypeError`, `KeyError` and `AssertionError` among them,
+stays a finding.
 
 Compile and bounded repair retain attempt-specific source/dependency/image
 digests. Independent model review examines the exact persisted script after

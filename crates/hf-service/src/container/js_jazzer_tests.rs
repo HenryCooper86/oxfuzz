@@ -189,23 +189,32 @@ async fn a_javascript_draft_is_the_fixed_module_for_the_jazzer_js_engine_only() 
         super::heuristic_draft(&candidate, EngineKind::JazzerJs, Sanitizer::Address, true);
     assert!(persistent.is_err(), "persistent mode is AFL++ C/C++ only");
 
-    // A function whose parameter has no documented type is refused with the
-    // line to add, not guessed at.
+    // A function with no `@param` line at all (js-yaml's `load(input,
+    // options)`) takes the input as text in its first parameter; the
+    // directive records that choice for the reviewer.
     write(
         project.path(),
         "lib/plain.js",
-        "function scan(input) {\n  return input.length;\n}\nmodule.exports = { scan };\n",
+        "function scan(input, options) {\n  return input.length;\n}\nmodule.exports = { scan };\n",
     );
     let undocumented = discovered(project.path(), "scan").await;
-    let refused = super::heuristic_draft(
+    let drafted = super::heuristic_draft(
         &undocumented,
         EngineKind::JazzerJs,
         Sanitizer::Address,
         false,
     )
-    .unwrap_err()
-    .to_string();
-    assert!(refused.contains("@param {type} input"), "{refused}");
+    .unwrap();
+    assert!(
+        drafted
+            .source
+            .contains("// oxfuzz:js-target lib/plain.js scan string\n"),
+        "{}",
+        drafted.source
+    );
+    assert!(drafted
+        .source
+        .contains("  return target.scan(data.toString('utf-8'));\n"));
 }
 
 #[tokio::test]

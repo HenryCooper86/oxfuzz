@@ -1177,7 +1177,7 @@ async fn stage_follow_up_fuzz(
     let cmd = vec![
         path_string(&context.patched_binary()),
         format!("-max_total_time={}", spec.follow_up_fuzz_seconds),
-        format!("-seed={}", spec.seed),
+        format!("-seed={}", hf_engine::seed::engine_seed(spec.seed)),
         path_string(&context.corpus_dir),
     ];
     match runtime

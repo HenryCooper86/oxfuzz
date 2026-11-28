@@ -31,11 +31,23 @@ exported under its own name, each of whose required parameters is documented
 in the JSDoc block directly above the function as `Buffer`, `Uint8Array`,
 `string`, `number` or `boolean`.
 
-- **Why documentation is required.** JavaScript has no types to read. Handing
+- **Why documentation is read.** JavaScript has no types to read. Handing
   a `Buffer` to a function that expects a string makes the first input throw
   a `TypeError` that the harness caused, and reporting that as a finding
-  would be wrong. An undocumented required parameter is therefore refused,
-  and the refusal names the `@param {type} name` line to add.
+  would be wrong. A function that documents some parameters but not a
+  required one is refused, and the refusal names the `@param {type} name`
+  line to add. A function with no `@param` line at all (most real
+  JavaScript, such as js-yaml 4.1.0's `load(input, options)`) takes the input
+  as a string in its first parameter, the commonest input of an
+  undocumented parser, and its other parameters are left out; the directive
+  records `string`, so the reviewer sees the choice before anything runs.
+- **Expected errors.** The error classes the module defines or binds
+  (`class ParseError extends Error`, `const YAMLException =
+  require('./exception')`), named with a capital and ending in `Error` or
+  `Exception`, are its rejections of an input: the harness lets a throw or
+  rejection of one pass, by constructor name, and reports every other. The
+  directive records them (`expects:YAMLException`). A built-in such as
+  `RangeError` stays a finding even when the module throws it.
 - **Optional parameters.** A parameter with a default value, a parameter
   JSDoc marks optional (`[name]` or `{type=}`), and a rest parameter are left
   out of the call. A required parameter after an optional one is refused,

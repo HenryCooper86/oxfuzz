@@ -239,6 +239,13 @@ pub struct JavaTarget {
     pub method: String,
     /// What each of the method's parameters takes, in order.
     pub inputs: Vec<JavaInputKind>,
+    /// The method's `throws` clause: `None` without one; otherwise the
+    /// qualified exception types it declares, which the harness catches as
+    /// the method's rejection of an input. Broad types (`Exception`,
+    /// `Throwable`, `RuntimeException`, `Error`) are left out: they would
+    /// hide every finding. Any clause makes the entry point `throws
+    /// Throwable`, so a checked exception compiles.
+    pub throws: Option<Vec<String>>,
 }
 
 impl JavaTarget {
@@ -417,11 +424,84 @@ pub fn target_of(
     } else {
         format!("{package}.{class}")
     };
+    let throws = declared_throws(signature, &package, target_source);
     Ok(JavaTarget {
         class,
         method: method.to_owned(),
         inputs,
+        throws,
     })
+}
+
+/// Exception types too broad to treat as a rejection.
+const BROAD_EXCEPTIONS: [&str; 4] = ["Exception", "Throwable", "RuntimeException", "Error"];
+
+/// `java.lang` exception types, which a `throws` clause names unqualified.
+const JAVA_LANG_EXCEPTIONS: [&str; 16] = [
+    "ArithmeticException",
+    "ArrayIndexOutOfBoundsException",
+    "ClassCastException",
+    "ClassNotFoundException",
+    "CloneNotSupportedException",
+    "IllegalArgumentException",
+    "IllegalStateException",
+    "IndexOutOfBoundsException",
+    "InterruptedException",
+    "NegativeArraySizeException",
+    "NullPointerException",
+    "NumberFormatException",
+    "ReflectiveOperationException",
+    "SecurityException",
+    "StringIndexOutOfBoundsException",
+    "UnsupportedOperationException",
+];
+
+/// The `throws` clause of `signature`, each type qualified: as written when
+/// it has a package, through an `import` of `target_source`, as `java.lang`,
+/// or else in the class's own `package`. `None` without a clause.
+fn declared_throws(signature: &str, package: &str, target_source: &str) -> Option<Vec<String>> {
+    let close = signature.rfind(')')?;
+    let tail = signature[close + 1..].trim_start();
+    let clause = tail.strip_prefix("throws")?;
+    if !clause.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let clause = clause.split('{').next().unwrap_or_default();
+    let mut names = Vec::new();
+    for name in clause
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        let simple = name.rsplit('.').next().unwrap_or(name);
+        if BROAD_EXCEPTIONS.contains(&simple)
+            && (name == simple || name == format!("java.lang.{simple}"))
+        {
+            continue;
+        }
+        let qualified = if name.contains('.') {
+            name.to_owned()
+        } else if let Some(imported) = target_source.lines().find_map(|line| {
+            let path = line
+                .trim()
+                .strip_prefix("import ")?
+                .strip_suffix(';')?
+                .trim();
+            (path.rsplit('.').next() == Some(name)).then(|| path.to_owned())
+        }) {
+            imported
+        } else if JAVA_LANG_EXCEPTIONS.contains(&name) {
+            format!("java.lang.{name}")
+        } else if package.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{package}.{name}")
+        };
+        if qualified.split('.').all(is_identifier) && !names.contains(&qualified) {
+            names.push(qualified);
+        }
+    }
+    Some(names)
 }
 
 /// Render the harness class of one target. The text is a pure function of
@@ -438,8 +518,13 @@ pub fn render(target: &JavaTarget) -> String {
         .map(|kind| kind.as_str())
         .collect::<Vec<_>>()
         .join(",");
+    let throws = target
+        .throws
+        .as_ref()
+        .map(|names| format!(" throws:{}", names.join(",")))
+        .unwrap_or_default();
     let header = format!(
-        "{TARGET_DIRECTIVE}{class}#{method} {kinds}\n\
+        "{TARGET_DIRECTIVE}{class}#{method} {kinds}{throws}\n\
          public final class {harness} {{\n\
          \x20   private {harness}() {{}}\n\
          \n",
@@ -452,16 +537,25 @@ pub fn render(target: &JavaTarget) -> String {
         [JavaInputKind::Text] => Some("new String(data, java.nio.charset.StandardCharsets.UTF_8)"),
         _ => None,
     };
+    let declares = if target.throws.is_some() {
+        " throws Throwable"
+    } else {
+        ""
+    };
     let body = if let Some(argument) = raw {
-        format!(
-            "\x20   public static void fuzzerTestOneInput(byte[] data) {{\n\
-             \x20       {class}.{method}({argument});\n",
+        let call = format!(
+            "{class}.{method}({argument});",
             class = target.class,
             method = target.method,
+        );
+        format!(
+            "\x20   public static void fuzzerTestOneInput(byte[] data){declares} {{\n{}",
+            guarded_call(&call, target.throws.as_deref())
         )
     } else {
-        let mut body =
-            format!("\x20   public static void fuzzerTestOneInput({DATA_PROVIDER} data) {{\n");
+        let mut body = format!(
+            "\x20   public static void fuzzerTestOneInput({DATA_PROVIDER} data){declares} {{\n"
+        );
         let last = target.inputs.len().saturating_sub(1);
         for (index, kind) in target.inputs.iter().enumerate() {
             let _ = writeln!(
@@ -475,15 +569,39 @@ pub fn render(target: &JavaTarget) -> String {
             .map(|index| format!("a{index}"))
             .collect::<Vec<_>>()
             .join(", ");
-        let _ = writeln!(
-            body,
-            "\x20       {class}.{method}({arguments});",
+        let call = format!(
+            "{class}.{method}({arguments});",
             class = target.class,
             method = target.method,
         );
+        body.push_str(&guarded_call(&call, target.throws.as_deref()));
         body
     };
     format!("{header}{body}\x20   }}\n}}\n")
+}
+
+/// The target call inside the entry point: alone, or, with declared
+/// exceptions, wrapped so those are caught and anything else is rethrown.
+fn guarded_call(call: &str, throws: Option<&[String]>) -> String {
+    match throws {
+        Some(names) if !names.is_empty() => {
+            let test = names
+                .iter()
+                .map(|name| format!("e instanceof {name}"))
+                .collect::<Vec<_>>()
+                .join(" || ");
+            format!(
+                "\x20       try {{\n\
+                 \x20           {call}\n\
+                 \x20       }} catch (Throwable e) {{\n\
+                 \x20           if (!({test})) {{\n\
+                 \x20               throw e;\n\
+                 \x20           }}\n\
+                 \x20       }}\n"
+            )
+        }
+        _ => format!("\x20       {call}\n"),
+    }
 }
 
 /// The harness for a discovered candidate.
@@ -513,15 +631,36 @@ pub fn recorded_target(source: &str) -> Result<JavaTarget, ClassifiedError> {
         .lines()
         .find_map(|line| line.strip_prefix(TARGET_DIRECTIVE))
         .ok_or_else(malformed)?;
-    let (target, input) = line.split_once(' ').ok_or_else(malformed)?;
+    let fields: Vec<&str> = line.split(' ').collect();
+    let (target, input, throws) = match fields.as_slice() {
+        [target, input] => (*target, *input, None),
+        [target, input, throws] => (*target, *input, Some(*throws)),
+        _ => return Err(malformed()),
+    };
     let (class, method) = target.split_once('#').ok_or_else(malformed)?;
     if !class.split('.').all(is_identifier) || !is_identifier(method) {
         return Err(malformed());
     }
+    let throws = match throws {
+        None => None,
+        Some(field) => {
+            let list = field.strip_prefix("throws:").ok_or_else(malformed)?;
+            let names: Vec<String> = list
+                .split(',')
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+                .collect();
+            if !names.iter().all(|name| name.split('.').all(is_identifier)) {
+                return Err(malformed());
+            }
+            Some(names)
+        }
+    };
     Ok(JavaTarget {
         class: class.to_owned(),
         method: method.to_owned(),
         inputs: recorded_inputs(input).ok_or_else(malformed)?,
+        throws,
     })
 }
 
@@ -709,6 +848,75 @@ mod tests {
     }
 
     const FRAMES: &str = "// Frame reader.\npackage com.example;\n\nimport java.util.List;\n\npublic final class Frames {\n}\n";
+
+    #[test]
+    fn the_declared_exceptions_are_the_targets_rejections() {
+        // JSON-java: `XML.toJSONObject(String) throws JSONException` throws
+        // for every malformed document, and the template let it propagate,
+        // so the first smoke input was a finding. A checked `throws` did not
+        // compile at all: nothing caught it.
+        let target = candidate(
+            "src/main/java/org/json/XML.java",
+            "XML.toJSONObject",
+            "public static JSONObject toJSONObject(String string) throws JSONException",
+        );
+        let source = template(&target, "package org.json;\nimport java.util.Map;\n").unwrap();
+        assert_eq!(
+            source,
+            "// oxfuzz:java-target org.json.XML#toJSONObject string throws:org.json.JSONException\n\
+             public final class OxfuzzFuzzTarget {\n\
+             \x20   private OxfuzzFuzzTarget() {}\n\
+             \n\
+             \x20   public static void fuzzerTestOneInput(byte[] data) throws Throwable {\n\
+             \x20       try {\n\
+             \x20           org.json.XML.toJSONObject(new String(data, java.nio.charset.StandardCharsets.UTF_8));\n\
+             \x20       } catch (Throwable e) {\n\
+             \x20           if (!(e instanceof org.json.JSONException)) {\n\
+             \x20               throw e;\n\
+             \x20           }\n\
+             \x20       }\n\
+             \x20   }\n\
+             }\n"
+        );
+        assert_eq!(render(&recorded_target(&source).unwrap()), source);
+        assert!(lint(&source, "XML.toJSONObject").is_empty());
+
+        // Names resolve through imports and java.lang; a broad type is not a
+        // rejection, but still needs the `throws` to compile.
+        let io = template(
+            &candidate(
+                "src/main/java/com/example/Codec.java",
+                "Codec.read",
+                "public static void read(byte[] data) throws java.io.IOException, ParseError, Exception",
+            ),
+            "package com.example;\nimport com.other.ParseError;\n",
+        )
+        .unwrap();
+        assert!(
+            io.contains("throws:java.io.IOException,com.other.ParseError\n"),
+            "{io}"
+        );
+        assert!(
+            io.contains("!(e instanceof java.io.IOException || e instanceof com.other.ParseError)"),
+            "{io}"
+        );
+        let broad = template(
+            &candidate(
+                "Codec.java",
+                "Codec.run",
+                "public static void run(String text) throws Exception",
+            ),
+            "package com.example;\n",
+        )
+        .unwrap();
+        assert!(broad.contains(" throws:\n"), "{broad}");
+        assert!(
+            broad.contains("fuzzerTestOneInput(byte[] data) throws Throwable {\n"),
+            "{broad}"
+        );
+        assert!(!broad.contains("catch"), "{broad}");
+        assert_eq!(render(&recorded_target(&broad).unwrap()), broad);
+    }
 
     #[test]
     fn the_package_clause_is_read_before_any_type() {

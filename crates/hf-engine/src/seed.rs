@@ -26,6 +26,26 @@ pub fn derive_run_seed(run_id: Uuid) -> u64 {
     }
 }
 
+/// The `-seed=` value a libFuzzer-driven engine runs with for the recorded
+/// `seed`: its low 32 bits, or 1 when those are zero.
+///
+/// libFuzzer parses `-seed` as an unsigned long and keeps it in a 32-bit
+/// `unsigned int` (a recorded `2^63 + 1` runs as `Seed: 1`, checked in the
+/// pinned image), so this is the seed native libFuzzer, Atheris and Jazzer.js
+/// already used. Jazzer refuses a wider value outright ("exceeds range of
+/// unsigned int") and never started. Zero reads as "pick a random seed",
+/// which would break the replay contract. The full recorded seed is kept in
+/// the run config.
+#[must_use]
+pub fn engine_seed(seed: u64) -> u32 {
+    let low = u32::try_from(seed & u64::from(u32::MAX)).unwrap_or(u32::MAX);
+    if low == 0 {
+        1
+    } else {
+        low
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::derive_run_seed;
