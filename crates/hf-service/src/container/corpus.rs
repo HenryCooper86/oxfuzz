@@ -123,6 +123,24 @@ impl ServiceContainer {
                     "retained target '{target}' was not found; run discovery first"
                 ))
             })?;
+        // A target never prepared has no harness, so no corpus operation is
+        // available. Answer without the target lease, which creates the
+        // workspace directory: opening the Corpus view must not write one.
+        if !workspace_dir(project, target).exists() {
+            let missing = |engine: EngineKind| match settings.require_engine(engine) {
+                Err(reason) => unavailable_capability("engine_disabled", reason),
+                Ok(()) => unavailable_capability(
+                    "active_harness_missing",
+                    format!("no active harness for '{target}' yet; build one first"),
+                ),
+            };
+            let afl = missing(EngineKind::AflPlusPlus);
+            return Ok(CorpusCapabilities {
+                seed_survival: afl.clone(),
+                coverage_prune: afl,
+                minimize: missing(EngineKind::LibFuzzer),
+            });
+        }
         let _target_revision = self.acquire_target_revision(project, target).await?;
 
         let afl = self

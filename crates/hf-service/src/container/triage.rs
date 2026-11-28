@@ -708,6 +708,13 @@ impl ServiceContainer {
     /// accessor. `None` when no C harness was built or the pipeline did not
     /// complete cleanly (a transient failure is not cached, so it retries).
     async fn coverage_export_json_cached(&self, project: &Path, target: &str) -> Option<String> {
+        // A target without a harness has nothing to measure. Answer before
+        // taking the target lease, which creates the workspace directory: a
+        // view reading coverage for every discovered target otherwise leaves
+        // one empty workspace per target. The locked path checks again.
+        if !workspace_dir(project, target).join("harness.c").exists() {
+            return None;
+        }
         let _workspace_operation = match self.acquire_workspace_operation().await {
             Ok(lease) => lease,
             Err(error) => {

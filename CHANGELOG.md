@@ -10,6 +10,50 @@ retain only the current release; older entries remain here as the record.
 
 ## Unreleased
 
+### Added
+
+- `oxfuzz binary --arg` (and an Arguments field in the desktop Binary view)
+  passes command-line arguments to the binary under test; `@@` marks the
+  input file. Session reports record them.
+- The browser interface (`npm run dev:web` against `oxfuzz serve`) now
+  reaches 30 more features through REST routes, among them campaigns, the CI
+  gate, bisection, dictionaries, run detail, regression replay, Clang
+  analysis and the read-only UDS scan. Features that only the desktop app can
+  offer (native dialogs, the embedded DefectDojo view, hosting the REST
+  server) say so instead of failing.
+- `oxfuzz harness --promote-with-findings` approves a harness whose smoke run
+  found a real bug, from the command line.
+
+### Changed
+
+- Autotools builds delete leftover object files instead of running the
+  project's own `make clean`, which some projects ship broken (libexif
+  0.6.14); Make, CMake and Meson builds run two jobs in parallel.
+- Reproduction bundles carry exactly the units and headers the harness build
+  compiled and document that build, so they build and reproduce on a clean
+  machine.
+- Triage lists a bug found in several runs under its latest occurrence, and
+  reopens there, so Compose Report, SARIF and DefectDojo stay available.
+
+### Fixed
+
+- libFuzzer campaigns record their total execution count; the fork-mode
+  peak rate is no longer overstated.
+- SARIF export and crash alerts refuse a latest run whose crashing inputs
+  are not triaged yet, instead of reporting it clean.
+- A compiler definition naming a standard system path (such as
+  `-DLOCALEDIR="/usr/local/share/locale"`) reaches the harness build.
+- The model-free C harness template releases the object a constructor-style
+  target returns, so smoke runs no longer stop on a false leak.
+- honggfuzz runs with AddressSanitizer keep honggfuzz's sanitizer defaults
+  and cap memory per worker; out-of-memory kills are classified as such.
+- An automotive capture that is not PCAP gets a clear error from the
+  sidecar instead of "failed unexpectedly".
+- Opening the Discover or Corpus view no longer creates empty workspace
+  folders for targets that have no harness.
+- The REST API redacts host paths in ranked discovery and regression replay
+  responses.
+
 ## 0.9.13 - 2026-11-27
 
 ### Fixed
