@@ -109,6 +109,9 @@ retain only the current release; older entries remain here as the record.
     Jazzer.js, and one of those engines alone makes the setup ready.
 - `oxfuzz fuzz --ai off` no longer reports drafting "with the model" or an
   auto-repair budget it cannot use.
+- `oxfuzz arm` (and the desktop remote-arm panel) report a refused token
+  as such and name `HF_WEB_TOKEN`, instead of "internal: ... returned 401
+  Unauthorized".
 - The model-free C template gives a second output length (lz4's
   `targetOutputSize, dstCapacity`) the output buffer's capacity instead of
   the input size; `LZ4_decompress_safe_partial` reaches 1,140 edges in 30
