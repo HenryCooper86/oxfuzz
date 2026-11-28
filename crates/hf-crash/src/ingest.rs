@@ -34,6 +34,11 @@ pub struct CrashIngestResult {
     pub report_limit_reached: bool,
     /// Total sanitizer report bytes retained for classification.
     pub report_bytes_read: usize,
+    /// Syzkaller crash records skipped because they hold no kernel report,
+    /// by their syz-manager description (such as "lost connection to test
+    /// machine", a VM failure rather than a kernel bug). The campaign counted
+    /// them as crashes, so triage names them instead of finding nothing.
+    pub skipped_without_kernel_report: Vec<String>,
 }
 
 impl CrashIngestResult {
@@ -154,6 +159,7 @@ fn ingest_with_mode(
         artifact_limit_reached,
         report_limit_reached: reports.limit_reached,
         report_bytes_read: reports.bytes_read,
+        skipped_without_kernel_report: Vec::new(),
     })
 }
 
@@ -200,6 +206,7 @@ pub fn ingest_syzkaller(
         artifact_limit_reached: false,
         report_limit_reached: false,
         report_bytes_read: 0,
+        skipped_without_kernel_report: Vec::new(),
     };
     if !crashes_root.is_dir() {
         return Ok(result);
@@ -231,10 +238,16 @@ pub fn ingest_syzkaller(
     }
 
     for bug_dir in bug_dirs {
-        let Some((report_path, report)) = read_kernel_report(&bug_dir, &mut result) else {
-            continue;
-        };
-        let Some(parsed) = crate::kernel::parse_kernel_report(&report) else {
+        let parsed = read_kernel_report(&bug_dir, &mut result).and_then(|(path, report)| {
+            crate::kernel::parse_kernel_report(&report).map(|parsed| (path, parsed))
+        });
+        let Some((report_path, parsed)) = parsed else {
+            let name = read_description(&bug_dir).unwrap_or_else(|| {
+                bug_dir
+                    .file_name()
+                    .map_or_else(String::new, |name| name.to_string_lossy().into_owned())
+            });
+            result.skipped_without_kernel_report.push(name);
             continue;
         };
         // The reproducer is the actionable input when syz-manager captured one;

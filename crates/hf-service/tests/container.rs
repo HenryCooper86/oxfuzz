@@ -3401,3 +3401,48 @@ async fn corpus_capabilities_of_an_unprepared_target_create_no_workspace() {
     );
     assert!(!hf_service::workspace_dir(&project, "parse").exists());
 }
+
+/// `oxfuzz kernel` ends by suggesting `oxfuzz triage <project> --target
+/// <kernel label>`; that failed with "target 'kernel-Image' not found",
+/// because a kernel campaign has no discovered symbol to resolve. Its runs
+/// are found through the label's workspace, as run-level triage finds them.
+#[tokio::test]
+async fn triage_by_kernel_label_finds_the_latest_kernel_campaign() {
+    isolate_workspace();
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("kernel_project");
+    std::fs::create_dir_all(&project).unwrap();
+    let project = project.canonicalize().unwrap();
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("runs.db"))
+            .await
+            .unwrap(),
+    );
+    let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None)
+        .with_store(Arc::clone(&store));
+    let mut run = hf_storage::RunRecord::new(
+        project.to_string_lossy(),
+        hf_core::engine::EngineKind::Syzkaller,
+        None,
+        chrono::Utc::now(),
+    );
+    run.status = hf_storage::RunStatus::Done;
+    run.ended_at = Some(chrono::Utc::now());
+    let relative = format!("runs/{}/out", run.id);
+    run.evidence_dir = Some(relative.clone());
+    std::fs::create_dir_all(hf_service::workspace_dir(&project, "kernel-Image").join(&relative))
+        .unwrap();
+    store.insert_run(&run).await.unwrap();
+
+    let crashes = container
+        .triage(&project, "kernel-Image", hf_service::AiPolicy::Off)
+        .await
+        .expect("the kernel label resolves to its campaign");
+    assert!(crashes.is_empty());
+
+    // A label with no campaign is still refused.
+    assert!(container
+        .triage(&project, "other-Image", hf_service::AiPolicy::Off)
+        .await
+        .is_err());
+}

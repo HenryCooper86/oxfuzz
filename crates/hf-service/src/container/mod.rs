@@ -1682,7 +1682,31 @@ impl ServiceContainer {
                 .filter(|run| stored_project_matches(Path::new(&run.project_root), project))
                 .find(|run| run_has_crash_evidence(run.status)));
         };
-        let target_id = self.resolve_target_id_any_language(project, target).await?;
+        let target_id = match self.resolve_target_id_any_language(project, target).await {
+            Ok(id) => id,
+            // A kernel campaign's label names no discovered symbol. Its runs
+            // belong to the label whose workspace holds their evidence, the
+            // rule run-level triage applies, so `oxfuzz triage <project>
+            // --target <kernel label>` finds the campaign it was suggested for.
+            Err(ClassifiedError::Validation(message)) if message.contains("not found") => {
+                let workspace = workspace_dir(project, target);
+                let kernel_run = store.list_runs(None).await?.into_iter().find(|run| {
+                    run.engine == EngineKind::Syzkaller
+                        && stored_project_matches(Path::new(&run.project_root), project)
+                        && run_has_crash_evidence(run.status)
+                        && run
+                            .evidence_dir
+                            .as_deref()
+                            .is_some_and(|relative| workspace.join(relative).is_dir())
+                        && staging::run_output_dir(&workspace, run).is_ok()
+                });
+                return match kernel_run {
+                    Some(run) => Ok(Some(run)),
+                    None => Err(ClassifiedError::Validation(message)),
+                };
+            }
+            Err(error) => return Err(error),
+        };
         if target_id.is_nil() {
             return Ok(None);
         }

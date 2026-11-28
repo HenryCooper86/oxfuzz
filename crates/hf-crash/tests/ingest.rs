@@ -370,3 +370,33 @@ fn syzkaller_ingest_skips_a_directory_with_no_kernel_report() {
             .unwrap();
     assert!(result.crashes.is_empty());
 }
+
+#[test]
+fn syzkaller_ingest_names_the_records_it_skips() {
+    // An emulated VM that drops its SSH session leaves a crash record titled
+    // "lost connection to test machine" with no kernel oops. It is skipped,
+    // but the campaign counted it as a crash, so triage must be able to say
+    // why it found none.
+    let dir = TempDir::new().unwrap();
+    let lost = dir.path().join("crashes").join("439c37d2");
+    fs::create_dir_all(&lost).unwrap();
+    fs::write(
+        lost.join("description"),
+        b"lost connection to test machine\n",
+    )
+    .unwrap();
+    fs::write(
+        lost.join("report0"),
+        b"<<<<<<<<<<<<<<< tail report >>>>>>>>>>>>>>>\n\n",
+    )
+    .unwrap();
+
+    let result =
+        hf_crash::ingest::ingest_syzkaller(dir.path(), uuid::Uuid::new_v4(), uuid::Uuid::new_v4())
+            .unwrap();
+    assert!(result.crashes.is_empty());
+    assert_eq!(
+        result.skipped_without_kernel_report,
+        vec!["lost connection to test machine".to_owned()]
+    );
+}
